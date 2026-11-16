@@ -1,0 +1,27 @@
+# Open points
+
+Points the decisions do not settle yet, listed by the card that has to settle them. They come from tracing one card through the POC outcomes on 2026-11-16, step by step, asking at each step what goes in, what comes out and what the next run starts with.
+
+The spec for a card settles the points listed for it and removes them here in the same pull request. A point that turns out to be a real trade-off goes to the developer as a question and becomes an ADR. A spec session that meets a new gap adds it here.
+
+## Questions for the developer, each before its card
+
+- **Network for research** (the spec-stage card): which hosts a run may reach, and whether a spec run may read the web for its research (ADR 0009, ADR 0017).
+- **Actions under "needs you"** (the review-loop card): what the developer can do with such a card besides dropping it, and what the card's two facts become afterwards (ADR 0054).
+- **Updates beyond the core** (the automatic-update card): who rebuilds and restarts the proxy and the run image after a merge (ADR 0034, ADR 0039); what the old core may still do after it has copied the store (ADR 0036); whether an unreachable Git host makes an update count as failed.
+
+## Settled in the spec of the card that first needs them
+
+- **Runs:** which commit a run starts from and when the card branch is made (ADR 0010); how the merged Claude Code configuration is laid over a card branch (ADR 0025); the base of "what the card changed" (ADR 0015); how a finished run is told from a failed one when its result is missing or the engine killed it for memory (ADR 0016).
+- **Spec stage:** rejecting a spec with reasons, and answering its questions (ADR 0021, ADR 0053); the fields of a card, and the lines of a spec that the core reads (ADR 0030, ADR 0051).
+- **Review loop:** what a send-back round and the next reviewer receive; whether a killed run's partial work is the saved state its retry starts from (ADR 0013, ADR 0016).
+- **Failures:** how a pause ends and what happens to runs in flight; a credential that expires while the core is down pauses the instance and does not use up a card's retry (ADR 0016, ADR 0040).
+- **Publishing:** who writes commit messages and the pull request's title and text (ADR 0020, ADR 0028); failures of steps that are not runs, such as a push; where the app's key lives; what the one switch does to pull requests that already have automatic merging on (ADR 0006); removing a card branch after the merge.
+- **Checks:** how CPU time per check run is recorded on hosted runners (ADR 0031). The "no C code" step (ADR 0037) lets through a package made only of C that nothing imports, and a dependency that falls back to a stub without C; rejecting cgo files and packages with no Go files left would close both.
+
+## Notes for later cards
+
+- **The run card.** Claude Code 2.1.325, read on 2026-11-16: headless runs start in manual permission mode unless a mode is set; a mode without the repo's own configuration is announced as the future default for headless runs, so the run command has to say what it wants (ADR 0025); a run that asks for a blocked model now warns and continues on another, so the core checks the model in the first output event (ADR 0030); a resumed run reports the cost of the whole conversation (ADR 0029, ADR 0053). Every card that changes the pinned version reads the changelog between the two versions.
+- **The first UI card.** Modern Web Guidance, skills for coding agents on current web platform practice (Apache-2.0, stewarded by browser vendors and MDN), is worth trying. Runs are sealed, so it has to be in the repo or the run image, as part of the repo's Claude Code configuration, which is a protected place.
+- **The visual design session.** Candidates for a short written standard for the UI: answer within about 400 ms, fewer choices, larger targets, familiar patterns, and less animation for what is used all day.
+- **The CLAUDE.md card.** The check command comes first. A sentence that tells the agent it owns the codebase is an experiment to measure against send-backs, not a default.

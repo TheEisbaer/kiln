@@ -20,3 +20,7 @@ A move into a cluster fails when runs have come to rely on the developer's machi
 
 - Nothing in Kiln may depend on Kiln and its runs sharing a filesystem.
 - What Kubernetes adds beyond containers (chart, image distribution, network policy, secret delivery) is built at the MVP, each part only as it is needed.
+
+## Settled later
+
+- A run is not quite "a pod in all but name": placing files in a run and collecting them from it uses the container engine and is rebuilt for Kubernetes at the MVP (ADR 0038).

@@ -25,3 +25,7 @@ In the POC Kiln sends no notifications. The "needs you" screen is where the deve
 
 - The UI may become richer after the POC.
 - The visual design is Kiln's own, worked out in its own design session, not in the POC.
+
+## Settled later
+
+- The first screen shows everything that waits for the developer: specs to approve, drops to confirm, and cards in the state "needs you". The term itself keeps its narrower meaning from CONTEXT.md, a card that has stopped outside the planned approval.

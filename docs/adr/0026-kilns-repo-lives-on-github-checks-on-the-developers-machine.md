@@ -56,3 +56,4 @@ If either is not possible for a personal repo, the fallback is a public GitHub r
 - How the runner is protected: isolated like a hosted runner, not sealed like a run (ADR 0046).
 - Where tests run that need the container engine, which the runner does not have (ADR 0048).
 - Kiln cannot act as an app on a personal repo on this host, so the fallback named above was taken: a public repo on github.com under the developer's personal account, with checks on the host's own runners (ADR 0049). GitHub as the first Git host, Kiln building no checker, and Kiln acting under its own identity all stand.
+- Of the cost rules above, two stand: Kiln's repo causes no billable usage, and there are no hosted background jobs. The rules about the developer's own runner and its caches ended with that runner (ADR 0049). What may be stored on the host, and how CPU time per check run is recorded there (ADR 0031), is settled by the card that needs it.

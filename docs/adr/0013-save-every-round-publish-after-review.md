@@ -18,3 +18,7 @@ Publishing is held back because a push or a pull request sets things off on the 
 - Unpublished work exists only where the instance keeps its copy. Losing that loses agent hours, not the developer's own work.
 - Wherever agents run, the instance's own copy must be durable and reachable from them. This is a requirement on the runtime decision.
 - The host's checks run after the agent's review; a failure there costs another implement and review round.
+
+## Settled later
+
+- Runs reach nothing. The core places the code in a run and collects the change from it through the container engine (ADR 0038), so "reachable from them" now means reachable from the core.

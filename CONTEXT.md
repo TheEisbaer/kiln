@@ -89,7 +89,7 @@ The one planned intervention on every card: the developer agreeing to the spec, 
 _Avoid_: Sign-off, confirmation, go
 
 **Intervention**:
-An occasion on which a card needs the developer between being written and being merged.
+An occasion on which a card needs the developer between being started and being merged.
 _Avoid_: Interaction, prompt, touch
 
 **Run**:

@@ -22,3 +22,9 @@ Review enforces standards and catches bugs, but a finding sends a card back only
 ## Problems outside the card's change
 
 A real problem the reviewer notices that the card did not cause, such as an existing bug next to the changed lines, does not block the card. Left open here at first and settled by ADR 0033: it is proposed to the developer, who can turn it into a card or dismiss it.
+
+## Settled later
+
+- "Not written anywhere" means that remarks are no part of review's result and are shown to nobody. The full output of a review run is still kept, like any run's (ADR 0032, ADR 0038).
+- Every review round starts in a fresh session; a stage that is sent back resumes its own (ADR 0053).
+- The number of send-backs is a fact on the card, and a failed check on the Git host counts as one (ADR 0054).
