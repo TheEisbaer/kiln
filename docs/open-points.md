@@ -9,9 +9,6 @@ The spec for a card settles the points listed for it and removes them here in th
 - **Network for research** (the spec-stage card): which hosts a run may reach, and whether a spec run may read the web for its research (ADR 0009, ADR 0017).
 - **Actions under "needs you"** (the review-loop card): what the developer can do with such a card besides dropping it, and what the card's two facts become afterwards (ADR 0054).
 - **Updates beyond the core** (the automatic-update card): who rebuilds and restarts the proxy and the run image after a merge (ADR 0034, ADR 0039); what the old core may still do after it has copied the store (ADR 0036); whether an unreachable Git host makes an update count as failed.
-- **State of the instance** (the card that creates the store): where "paused" and "automatic merging is off after a failed update" are kept, and how the UI hears of them, when the event stream carries the history of cards only (ADR 0016, ADR 0019, ADR 0044).
-- **Kiln's own stage instructions** (the first card that has them): where the spec template and the review rules live in Kiln's repo, and whether that place is protected. ADR 0006 says review instructions are; the named places of ADR 0047 do not include them.
-- **A bound on rejected specs** (the spec-stage card): a rejected spec resumes its session without limit, while ADR 0053 assumes a resumed session never holds more than two failed attempts.
 
 ## Settled in the spec of the card that first needs them
 

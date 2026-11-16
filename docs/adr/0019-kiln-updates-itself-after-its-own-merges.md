@@ -24,3 +24,4 @@ Three conditions:
 - Who judges a new version and undoes a failed update, and what happens to the store when it is undone (ADR 0036).
 - Where the new version is built (ADR 0037).
 - Kiln no longer runs from a checkout. Each version is a program built in a sealed container, with the previous one kept beside it (ADR 0036, ADR 0037).
+- That automatic merging is off after a failed update is state of the instance (ADR 0055).
