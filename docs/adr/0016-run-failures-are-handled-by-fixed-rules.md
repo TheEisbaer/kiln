@@ -15,3 +15,7 @@ If the same failure keeps reaching the developer, its cause is fixed or a rule i
 ## Later
 
 A supervising agent is wanted in a later phase, not the POC. It joins automatic update and Kiln's own ideas (ADR 0005) as steps to be decided each on its own, with what the POC has shown.
+
+## Settled later
+
+- Whether a run has been retried is a fact on the card (ADR 0054).

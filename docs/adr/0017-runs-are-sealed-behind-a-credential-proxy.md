@@ -31,3 +31,4 @@ Because the agent never pushes, the only thing that writes to a Git host is Kiln
 - The proxy does not hold the renewable secret. The core runs a command that yields a credential and pushes the result to the proxy (ADR 0040).
 - How a network is sealed on the developer's container engine (ADR 0041).
 - The checks runner is not covered by this decision; it is isolated, not sealed (ADR 0046).
+- "A second runtime later without rework" was given up for one place: placing files in a run and collecting them from it is rebuilt for Kubernetes (ADR 0038).

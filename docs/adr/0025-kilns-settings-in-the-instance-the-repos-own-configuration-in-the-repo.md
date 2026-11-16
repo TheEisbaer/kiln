@@ -22,3 +22,7 @@ The repo's own standards and Claude Code configuration stay in the repo and appl
 ## Consequences
 
 - Colleagues each configure a shared repo in their own instance. Sharing a configuration between instances is added when a second person needs it.
+
+## Settled later
+
+- Protected paths and the required checks are not settings in the instance. For a repo that merges automatically the Git host enforces both, from the code owner file in the repo and from its own rules (ADR 0047, ADR 0049), and the checks are a command in the repo (ADR 0045). Each still has one place. The instance holds what a host cannot: whether automatic merging is used, the limit, branch naming and the toolchain image (ADR 0039).
