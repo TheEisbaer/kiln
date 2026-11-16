@@ -17,3 +17,8 @@ The line between 2 and 3: would the result differ from what was approved? If onl
 
 - A revised spec is written knowing what is already on the card's branch, and says what is kept and what is redone.
 - An agent that returns cards to spec too readily shows up in the intervention count; one that quietly builds something else is what review against the spec has to catch.
+
+## Settled later
+
+- A card that returns to implement from the Git host counts as a send-back, for a conflict as for a failed check (ADR 0054).
+- A card that returns to spec has its spec session resumed, since that stage gets its own work back; after the new approval implement starts in a fresh session and the number of send-backs starts again (ADR 0053, ADR 0054). That approval is not the planned one and is the intervention counted here (ADR 0042). How a run reports that the spec cannot be built is listed in docs/open-points.md.

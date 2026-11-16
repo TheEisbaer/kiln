@@ -7,7 +7,7 @@ status: accepted
 Kiln is judged by measures it counts itself (ADR 0007): interventions per merged card, how long a card waited for the developer (ADR 0022), how often each ceiling is hit (ADR 0029), whether an approval changed anything (ADR 0008), proposals made and accepted (ADR 0033). All of them are questions about what happened. Every change to a card is therefore written as the card's new state plus one history entry, in a single atomic step (ADR 0032). The entry says what changed, when, and who caused it: the developer, a run, the Git host or a rule. Counters written apart from the state they count drift, and facts such as when a card merged go missing.
 
 1. **Measures are queries over the history.** They cannot disagree with the state, and a new measure works for the past as long as the change it counts was recorded.
-2. **The cause is on every entry.** An intervention is a change caused by the developer other than writing a card, starting it and the planned approval; nothing counts interventions separately. A rejected spec belongs to the approval and is counted as an approval that changed something (ADR 0008).
+2. **The cause is on every entry.** An intervention is a change caused by the developer other than writing a card, starting it and the planned approval, which is the first approval of its spec; nothing counts interventions separately. A rejected spec belongs to the approval and is counted as an approval that changed something (ADR 0008).
 3. **The history is never read to decide what to do.** The core acts on current state only (ADR 0035). The history is for measures and for showing the developer what happened.
 
 ## Considered options

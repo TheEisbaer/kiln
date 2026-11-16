@@ -18,3 +18,7 @@ The proxy is not part of the core because a sealed run could not reach it there.
 - Two things have to be started and kept alive, the core and the proxy.
 - The Claude credential has to get from the developer's machine into a container; how is its own decision.
 - The proxy restarts only when its own code has changed. A short restart during a run is survivable, by the measurement above.
+
+## Settled later
+
+- The core is not started from a checkout but from a program built in a sealed container (ADR 0036, ADR 0037).

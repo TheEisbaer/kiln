@@ -24,3 +24,4 @@ A move into a cluster fails when runs have come to rely on the developer's machi
 ## Settled later
 
 - A run is not quite "a pod in all but name": placing files in a run and collecting them from it uses the container engine and is rebuilt for Kubernetes at the MVP (ADR 0038).
+- Kiln no longer runs from a checkout. Each version is a program built in a sealed container, with the previous one kept beside it (ADR 0036, ADR 0037).
