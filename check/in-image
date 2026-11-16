@@ -1,13 +1,65 @@
 #!/bin/sh
 # Builds the toolchain image and runs the check command in it with the network
 # switched off. The workflow and the developer both run exactly this (ADR 0045).
+#
+# The tests that need the container engine cannot run in that image. They are
+# compiled in it, with the network off, and run on the host (ADR 0049). They
+# run always on the host's runner (GITHUB_ACTIONS=true), and on the developer's
+# machine only with --engine: a test built from a card's branch would otherwise
+# run there with the home directory in reach, on the engine that hosts other
+# work (ADR 0048).
 set -eu
+
+engine=
+case "${1-}" in
+    --engine) engine=1 ;;
+    "") ;;
+    *) echo "usage: check/in-image [--engine]" >&2; exit 2 ;;
+esac
+[ "${GITHUB_ACTIONS-}" = true ] && engine=1
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 image=kiln-toolchain
 
 docker build --quiet --tag "$image" "$root/images/toolchain" >/dev/null
 
-exec docker run --rm --network none \
+status=0
+docker run --rm --network none \
     --volume "$root:/src:ro" --workdir /src \
-    "$image" go run ./check
+    "$image" go run ./check || status=$?
+
+if [ -z "$engine" ]; then
+    echo "engine tests not run; check/in-image --engine runs them"
+    exit "$status"
+fi
+
+echo "== engine tests"
+# The test program is built for the machine it runs on, not for the image.
+case "$(uname -s)" in
+    Darwin) goos=darwin ;;
+    Linux) goos=linux ;;
+    *) echo "engine tests: unsupported system $(uname -s)" >&2; exit 2 ;;
+esac
+case "$(uname -m)" in
+    arm64 | aarch64) goarch=arm64 ;;
+    x86_64) goarch=amd64 ;;
+    *) echo "engine tests: unsupported machine $(uname -m)" >&2; exit 2 ;;
+esac
+
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
+
+# The program comes out on standard output: a directory of the host's, such as
+# the one mktemp makes on macOS, is not always visible to the engine.
+if docker run --rm --network none \
+    --volume "$root:/src:ro" --workdir /src \
+    --env GOOS="$goos" --env GOARCH="$goarch" --env CGO_ENABLED=0 \
+    "$image" sh -c 'go test -c -o /tmp/seal.test ./internal/seal && cat /tmp/seal.test' \
+    >"$out/seal.test"; then
+    chmod +x "$out/seal.test"
+    # From the package's directory, as go test would.
+    (cd "$root/internal/seal" && KILN_ENGINE_TESTS=1 "$out/seal.test" -test.v) || status=$?
+else
+    status=1
+fi
+exit "$status"
