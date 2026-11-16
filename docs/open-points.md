@@ -1,6 +1,6 @@
 # Open points
 
-Points the decisions do not settle yet, listed by the card that has to settle them. They come from tracing one card through the POC outcomes on 2026-11-16, step by step, asking at each step what goes in, what comes out and what the next run starts with.
+Points the decisions do not settle yet, listed by the card that has to settle them. They come from tracing one card through the POC outcomes twice on 2026-11-16, step by step, asking at each step what goes in, what comes out and what the next run starts with.
 
 The spec for a card settles the points listed for it and removes them here in the same pull request. A point that turns out to be a real trade-off goes to the developer as a question and becomes an ADR. A spec session that meets a new gap adds it here.
 
@@ -12,10 +12,10 @@ The spec for a card settles the points listed for it and removes them here in th
 
 ## Settled in the spec of the card that first needs them
 
-- **Runs:** which commit a run starts from and when the card branch is made (ADR 0010); how the merged Claude Code configuration is laid over a card branch (ADR 0025); the base of "what the card changed" (ADR 0015); how a finished run is told from a failed one when its result is missing or the engine killed it for memory (ADR 0016).
-- **Spec stage:** rejecting a spec with reasons, and answering its questions (ADR 0021, ADR 0053); the fields of a card, and the lines of a spec that the core reads (ADR 0030, ADR 0051).
-- **Review loop:** what a send-back round and the next reviewer receive; whether a killed run's partial work is the saved state its retry starts from (ADR 0013, ADR 0016).
-- **Failures:** how a pause ends and what happens to runs in flight; a credential that expires while the core is down pauses the instance and does not use up a card's retry (ADR 0016, ADR 0040).
+- **Runs:** which commit a run starts from and when the card branch is made (ADR 0010); how the merged Claude Code configuration is laid over a card branch (ADR 0025); the base of "what the card changed" (ADR 0015); how a finished run is told from a failed one when its result is missing or the engine killed it for memory (ADR 0016). Also: whether the store is written or the work is saved first when a run finishes, so that no stage starts on unsaved work after a crash (ADR 0013, ADR 0035); a restart of the core between the steps of starting a run, which must not use up the retry, and networks left behind (ADR 0041); where stage documents and session records are kept and for how long (ADR 0032, ADR 0053); what happens to changes a spec or review run made to its working tree; who enforces the advisor's "at most twice" (ADR 0030); the memory and CPU limits of a run (ADR 0017).
+- **Spec stage:** rejecting a spec with reasons, and answering its questions (ADR 0021, ADR 0053); the fields of a card, and the lines of a spec that the core reads (ADR 0030, ADR 0051). How the developer changes the proposed model at approval.
+- **Review loop:** what a send-back round and the next reviewer receive; whether a killed run's partial work is the saved state its retry starts from (ADR 0013, ADR 0016). What implement receives after a failed check on the host, and how the core gets that output. How a run reports that the spec cannot be built as written (ADR 0012).
+- **Failures:** how a pause ends and what happens to runs in flight; a credential that expires while the core is down pauses the instance and does not use up a card's retry (ADR 0016, ADR 0040). A run in flight across an update that changes the pinned Claude Code, whose output the new core was not tested with (ADR 0039); event numbers after a copy of the store is put back (ADR 0036, ADR 0044).
 - **Publishing:** who writes commit messages and the pull request's title and text (ADR 0020, ADR 0028); failures of steps that are not runs, such as a push; where the app's key lives; what the one switch does to pull requests that already have automatic merging on (ADR 0006); removing a card branch after the merge.
 - **Checks:** how CPU time per check run is recorded on hosted runners (ADR 0031). The "no C code" step (ADR 0037) lets through a package made only of C that nothing imports, and a dependency that falls back to a stub without C; rejecting cgo files and packages with no Go files left would close both.
 

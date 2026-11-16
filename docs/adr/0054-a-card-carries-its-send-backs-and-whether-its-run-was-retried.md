@@ -10,7 +10,7 @@ A card therefore carries two more small facts beside its stage and what it waits
 
 1. **The stronger model is not stored.** It follows from a number of send-backs above zero.
 2. **The retry belongs to one run.** The flag is set when a failed run is started again and cleared when a run of that stage finishes.
-3. **A failed check on the Git host counts as a send-back.** The card returns to implement exactly as if review had sent it back (ADR 0012), so the loop stays bounded whoever sends it back.
+3. **A conflict or a failed check on the Git host counts as a send-back.** The card returns to implement exactly as if review had sent it back (ADR 0012), so the loop stays bounded whoever sends it back: when the number is already two, the card needs the developer instead of a third round (ADR 0015).
 
 Others keep such facts with the unit of work in the same way: a job queue stores the retry count in the job, and Kubernetes keeps the failed count in a Job's status and compares it with its limit. Systems that derive it from the history are those in which the history is the source of truth, which ADR 0042 decided against.
 

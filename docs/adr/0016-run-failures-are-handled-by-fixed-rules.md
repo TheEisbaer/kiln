@@ -19,3 +19,4 @@ A supervising agent is wanted in a later phase, not the POC. It joins automatic 
 ## Settled later
 
 - Whether a run has been retried is a fact on the card (ADR 0054).
+- That the instance is paused is state of the instance, kept in the store with its own history (ADR 0055).

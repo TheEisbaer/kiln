@@ -20,3 +20,9 @@ Left open here at first, under two constraints: no recurring cost for CI, and th
 ## Consequences
 
 - Anything that defines a guardrail (check configuration, review instructions, permission and credential settings, the protected path configuration) belongs on the protected path list of a repo that merges automatically.
+
+## Settled later
+
+- Checks now run on the Git host's own runners, not on a runner on the developer's machine (ADR 0049).
+- The developer's approval of a protected path is given on the Git host. It is an intervention (ADR 0042), which the core records when it sees the approval there.
+- Kiln's review instructions, with all its stage instructions, are a protected place in Kiln's repo (ADR 0056).

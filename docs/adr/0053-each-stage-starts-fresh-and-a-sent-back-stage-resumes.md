@@ -11,7 +11,8 @@ The exception is a stage that gets its own work back. When the developer does no
 1. **Review never resumes.** Every round has a fresh reviewer (ADR 0015).
 2. **Starting fresh must always work.** If the earlier session cannot be resumed, because it is lost, a newer Claude Code cannot read it after an update (ADR 0019), or it belonged to a run that failed (ADR 0016), the run starts fresh from the saved work (ADR 0013), the spec and the findings. Resuming is the better path, not a second requirement.
 3. **The record of a session is a result of its run.** It is carried out of the run and into the next one like any other result (ADR 0038), and kept until the card is done or dropped.
-4. **There is no third correction.** After two send-backs the card stops (ADR 0015), so a resumed session never holds more than two failed attempts.
+4. **There is no third correction of an implementation.** After two send-backs the card stops (ADR 0015), so a resumed implement session never holds more than two failed attempts.
+5. **A spec has no such bound in Kiln.** The developer takes part in every rejection and can drop the card or rewrite it when the spec keeps missing. Rejections per card can be counted from the history (ADR 0008); if cards with three or more show up, starting the next spec run fresh is added then, by a decision.
 
 This follows Claude Code's own guidance, read on 2026-11-16: build from a spec in a fresh session; have the change reviewed by a session that did not see it being written, and give the findings back to the session that wrote it; after two failed corrections start over instead of trying a third.
 

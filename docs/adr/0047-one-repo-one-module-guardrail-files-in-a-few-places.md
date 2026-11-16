@@ -16,3 +16,7 @@ What is Kiln's own is where guardrail files go. A file that defines a guardrail 
 - **Go's convention only, with scripts, configuration and image files wherever convenient**: guardrail files scatter, the protected path list grows file by file, and a forgotten entry is an unprotected guardrail.
 - **Several repos for the core, the UI and the images**: a card is one pull request in one repo (ADR 0010), so most changes would need two cards, and the description of the API would live across repos.
 - **Several Go modules in one repo**: separate dependencies per part, with no present need and more for agents to get wrong.
+
+## Settled later
+
+- One more named place: Kiln's own stage instructions, in `instructions/` (ADR 0056).

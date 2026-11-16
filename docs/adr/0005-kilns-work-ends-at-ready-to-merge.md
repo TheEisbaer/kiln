@@ -17,3 +17,7 @@ Kiln's own repo opts in to automatic merging so that cards the developer writes 
 
 - Kiln builds nothing for merge ordering, keeping branches current or resolving merge conflicts at merge time.
 - A card is done when the host reports its pull request merged; Kiln observes that, it does not cause it, except by having switched on the host's automatic merge.
+
+## Settled later
+
+- Where everything the host requires has already passed, the host refuses to switch on automatic merge, and Kiln asks the host to merge instead (ADR 0049). The host's rules decide in both cases; Kiln never merges past them.
