@@ -1,0 +1,12 @@
+# The places where a guardrail file lives (ADR 0047). A change here waits for
+# the developer.
+/check/ @TheEisbaer
+/images/ @TheEisbaer
+/.github/ @TheEisbaer
+/cmd/launcher/ @TheEisbaer
+/internal/launcher/ @TheEisbaer
+/.claude/ @TheEisbaer
+/CLAUDE.md @TheEisbaer
+/docs/adr/ @TheEisbaer
+/docs/phases.md @TheEisbaer
+/CONTEXT.md @TheEisbaer

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Builds the toolchain image and runs the check command in it with the network
+# switched off. The workflow and the developer both run exactly this (ADR 0045).
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+image=kiln-toolchain
+
+docker build --quiet --tag "$image" "$root/images/toolchain" >/dev/null
+
+exec docker run --rm --network none \
+    --volume "$root:/src:ro" --workdir /src \
+    "$image" go run ./check
