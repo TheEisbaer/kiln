@@ -84,7 +84,8 @@ func CreateRunNetwork(ctx context.Context, name, proxy string) error {
 		return err
 	}
 	if _, err := docker(ctx, nil, "network", "connect", name, proxy); err != nil {
-		if _, rmErr := docker(ctx, nil, "network", "rm", name); rmErr != nil {
+		// The context may be what failed the connect, and the network must go anyway.
+		if _, rmErr := docker(context.WithoutCancel(ctx), nil, "network", "rm", name); rmErr != nil {
 			err = fmt.Errorf("%w (and removing the network failed: %v)", err, rmErr)
 		}
 		return err
