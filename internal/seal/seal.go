@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -28,16 +29,43 @@ type Proxy struct {
 // StartProxy starts the proxy on its ordinary network with packet forwarding
 // switched off, so that it cannot be used as a router between networks (ADR
 // 0041, point 4). The credential reaches docker by the name of a variable and
-// not as an argument, where `ps` would show it.
+// not as an argument, where `ps` would show it. On failure nothing is left
+// behind.
 func StartProxy(ctx context.Context, p Proxy, credential string) error {
-	_, err := docker(ctx, []string{credentialVar + "=" + credential},
-		"run", "--detach",
+	return runDetached(ctx, []string{credentialVar + "=" + credential},
 		"--name", p.Name,
 		"--network", p.Network,
 		"--sysctl", "net.ipv4.ip_forward=0",
 		"--env", upstreamVar+"="+p.Upstream,
 		"--env", credentialVar,
 		p.Image)
+}
+
+// runDetached runs `docker run --detach` with the given arguments. When docker
+// created the container but could not start it, it leaves the container behind;
+// runDetached then removes that container, found by the ID docker wrote to its
+// cidfile, so that a container of the same name that docker refused to replace
+// is never touched.
+func runDetached(ctx context.Context, env []string, args ...string) error {
+	dir, err := os.MkdirTemp("", "kiln-seal-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	cidfile := filepath.Join(dir, "cid")
+
+	_, err = docker(ctx, env, append([]string{"run", "--detach", "--cidfile", cidfile}, args...)...)
+	if err == nil {
+		return nil
+	}
+	id, readErr := os.ReadFile(cidfile)
+	if readErr != nil || strings.TrimSpace(string(id)) == "" {
+		return err // docker created nothing
+	}
+	// The context may be what failed the run, and the container must go anyway.
+	if _, rmErr := docker(context.WithoutCancel(ctx), nil, "rm", "--force", strings.TrimSpace(string(id))); rmErr != nil {
+		err = fmt.Errorf("%w (and removing the container failed: %v)", err, rmErr)
+	}
 	return err
 }
 

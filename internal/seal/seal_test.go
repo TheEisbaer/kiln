@@ -269,7 +269,8 @@ func build(t *testing.T, tag, dockerfile string) {
 }
 
 // start starts a detached container on a network, with extra options for docker
-// run before the image's arguments, and removes it afterwards.
+// run before the image's arguments, and removes it afterwards. A start that fails
+// leaves nothing behind (runDetached).
 func start(t *testing.T, name, network, image string, more ...string) {
 	t.Helper()
 	// Options go before the image; whatever follows "--" goes after it.
@@ -281,8 +282,10 @@ func start(t *testing.T, name, network, image string, more ...string) {
 		}
 		options = append(options, m)
 	}
-	args := append([]string{"run", "--detach", "--name", name, "--network", network}, options...)
-	must(t, append(append(args, image), command...)...)
+	args := append([]string{"--name", name, "--network", network}, options...)
+	if err := runDetached(t.Context(), nil, append(append(args, image), command...)...); err != nil {
+		t.Fatal(err)
+	}
 	cleanup(t, "rm", "--force", name)
 }
 
