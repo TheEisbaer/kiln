@@ -8,27 +8,46 @@ import (
 
 func TestDockerOnlyInSeal(t *testing.T) {
 	const runs = "package p\n\nimport \"os/exec\"\n\nvar c = exec.Command(\"docker\", \"ps\")\n"
+	src := func(lit string) *fstest.MapFile {
+		return &fstest.MapFile{Data: []byte("package p\n\nconst c = " + lit + "\n")}
+	}
 	fsys := fstest.MapFS{
 		"internal/seal/seal.go":         {Data: []byte(runs)},
 		"internal/seal/sub/x.go":        {Data: []byte(runs)},
 		"internal/run/run.go":           {Data: []byte(runs)},
 		"internal/run/run_test.go":      {Data: []byte(runs)},
-		"internal/run/raw.go":           {Data: []byte("package p\n\nconst c = `docker`\n")},
+		"internal/run/raw.go":           src("`docker`"),
 		"internal/run/testdata/x/a.go":  {Data: []byte(runs)},
-		"cmd/core/main.go":              {Data: []byte("package main\n\n// docker is named in a comment only.\nconst c = \"docker ps\"\n")},
+		"cmd/core/comment.go":           {Data: []byte("package main\n\n// docker ps is named in a comment only.\nconst c = 1\n")},
 		"internal/sealed/x.go":          {Data: []byte(runs)},
 		"internal/run/notgo.sh":         {Data: []byte("docker ps\n")},
 		".git/hooks/x.go":               {Data: []byte(runs)},
 		"internal/run/twice.go":         {Data: []byte("package p\n\nvar a, b = \"docker\", \"docker\"\n")},
 		"internal/seal/testdata/p/m.go": {Data: []byte(runs)},
+		// A shell line, a path, and both together.
+		"internal/run/line.go":      src(`"docker ps --all"`),
+		"internal/run/spaced.go":    src(`"  docker\tps"`),
+		"internal/run/path.go":      src(`"/usr/bin/docker"`),
+		"internal/run/pathline.go":  src(`"/usr/local/bin/docker rm x"`),
+		"internal/run/relative.go":  src(`"bin/docker"`),
+		"internal/run/notfirst.go":  src(`"the docker command"`),
+		"internal/run/longer.go":    src(`"dockerd"`),
+		"internal/run/pathlong.go":  src(`"/usr/bin/docker-compose"`),
+		"internal/run/dockerish.go": src(`"Dockerfile"`),
+		"internal/run/empty.go":     src(`""`),
 	}
 	got, err := dockerOutsideSeal(fsys)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
+		"internal/run/line.go",
+		"internal/run/path.go",
+		"internal/run/pathline.go",
 		"internal/run/raw.go",
+		"internal/run/relative.go",
 		"internal/run/run.go",
+		"internal/run/spaced.go",
 		"internal/run/testdata/x/a.go",
 		"internal/run/twice.go",
 		"internal/sealed/x.go",
