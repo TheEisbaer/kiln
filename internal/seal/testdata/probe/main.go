@@ -26,6 +26,7 @@ type Config struct {
 	Dial   []string // TCP addresses, host:port, to connect to
 	Lookup []string // names to resolve
 	Files  []string // files to read
+	List   []string // directories whose every entry is listed, the directory itself not
 }
 
 // Report is what the probe found.
@@ -35,8 +36,18 @@ type Report struct {
 	Lookup  []Result
 	Sockets []Result
 	Files   []Result
+	Entries []Entry
 	Init    string // process 1's program, from /proc/1/cmdline, with links resolved
 	Env     []string
+}
+
+// Entry is one entry under a listed directory, as lstat sees it.
+type Entry struct {
+	Path     string
+	Uid, Gid uint32
+	Mode     string // as Go prints an fs.FileMode, such as -rw-r--r-- or drwxr-xr-x
+	Link     string `json:",omitempty"` // a symlink's target
+	Error    string `json:",omitempty"`
 }
 
 // Result is one attempt. Errno is the error number of a failed system call, 0
@@ -89,6 +100,9 @@ func main() {
 		data, err := os.ReadFile(file)
 		r.Files = append(r.Files, result(file, string(data), err))
 	}
+	for _, dir := range config.List {
+		r.Entries = append(r.Entries, list(dir)...)
+	}
 	if cmdline, err := os.ReadFile("/proc/1/cmdline"); err == nil {
 		program, _, _ := strings.Cut(string(cmdline), "\x00")
 		if resolved, err := filepath.EvalSymlinks(program); err == nil {
@@ -100,6 +114,38 @@ func main() {
 	if err := json.NewEncoder(os.Stdout).Encode(r); err != nil {
 		fail(err)
 	}
+}
+
+// list lists every entry under a directory, without following symlinks.
+func list(dir string) []Entry {
+	var entries []Entry
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			entries = append(entries, Entry{Path: p, Error: err.Error()})
+			return nil
+		}
+		if p == dir {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			entries = append(entries, Entry{Path: p, Error: err.Error()})
+			return nil
+		}
+		e := Entry{Path: p, Mode: info.Mode().String()}
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			e.Uid, e.Gid = st.Uid, st.Gid
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			e.Link, _ = os.Readlink(p)
+		}
+		entries = append(entries, e)
+		return nil
+	})
+	if err != nil {
+		entries = append(entries, Entry{Path: dir, Error: err.Error()})
+	}
+	return entries
 }
 
 // get sends a GET with credentials of its own, which the proxy must replace,

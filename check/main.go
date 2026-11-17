@@ -16,20 +16,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	steps := []struct {
-		name string
-		run  func() error
-	}{
-		{"format", formatted},
-		{"vet", func() error { return run(nil, "go", "vet", "./...") }},
-		// The core is built for the developer's machine and has no C code (ADR 0037).
-		{"build for macOS on arm64", func() error {
-			return run([]string{"GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0"}, "go", "build", "-o", os.DevNull, "./...")
-		}},
-		{"test", func() error { return run(nil, "go", "test", "./...") }},
-		{"dependencies", dependencies},
-	}
-
 	failed := 0
 	for _, s := range steps {
 		fmt.Printf("== %s\n", s.name)
@@ -43,6 +29,28 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("check passed")
+}
+
+// dockerStep is the name of the step that keeps the docker command in the seal.
+const dockerStep = "docker only in internal/seal"
+
+// step is one step of the check.
+type step struct {
+	name string
+	run  func() error
+}
+
+// steps are the check's steps, in order.
+var steps = []step{
+	{"format", formatted},
+	{"vet", func() error { return run(nil, "go", "vet", "./...") }},
+	// The core is built for the developer's machine and has no C code (ADR 0037).
+	{"build for macOS on arm64", func() error {
+		return run([]string{"GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0"}, "go", "build", "-o", os.DevNull, "./...")
+	}},
+	{"test", func() error { return run(nil, "go", "test", "./...") }},
+	{"dependencies", dependencies},
+	{dockerStep, func() error { return dockerOnlyInSeal(os.DirFS(".")) }},
 }
 
 // run runs a command with the given extra environment, showing its output.

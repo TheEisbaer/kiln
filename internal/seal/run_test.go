@@ -30,13 +30,21 @@ const (
 
 // probeConfig and probeReport are testdata/probe's Config and Report.
 type probeConfig struct {
-	HTTP, Dial, Lookup, Files []string
+	HTTP, Dial, Lookup, Files, List []string
 }
 
 type probeReport struct {
 	HTTP, Dial, Lookup, Sockets, Files []probeResult
+	Entries                            []probeEntry
 	Init                               string
 	Env                                []string
+}
+
+type probeEntry struct {
+	Path       string
+	Uid, Gid   uint32
+	Mode, Link string
+	Error      string
 }
 
 type probeResult struct {
@@ -44,16 +52,18 @@ type probeResult struct {
 	Errno              int
 }
 
-// The probe's path in a run's container, and its configuration's.
+// The probe's path in a run's container, and its configuration's. PlaceRun puts
+// them under /work.
 const (
-	probePath       = "/probe"
-	probeConfigPath = "/probe.json"
+	probePath       = "/work/probe"
+	probeConfigPath = "/work/probe.json"
 )
 
 // TestRun is a large test (ADR 0031, ADR 0048): it needs the container engine.
-// It starts a container exactly as a run is started, through CreateRun, with
-// the probe as its command, and asserts what the probe finds from inside. It
-// also repeats and fails CreateRun and ReplaceProxy at each step.
+// It starts a container exactly as a run is started, through CreateRun and
+// PlaceRun, with the probe as its command, and asserts what the probe finds from
+// inside. It does the same for the save container. It also repeats and fails
+// the seal's functions for a run at each step, and checks the save.
 //
 // It runs only with KILN_ENGINE_TESTS=1, and then fails, not skips, when the
 // engine cannot be reached. Every name it uses carries a random id that no
@@ -103,9 +113,10 @@ func TestRun(t *testing.T) {
 	probeRun := runName(runID("probe"))
 	createRun(t, Run{ID: runID("probe"), Image: runImage, Proxy: proxy.Name,
 		Command: []string{probePath, probeConfigPath}})
-	cgroup := []string{"memory.max", "memory.swap.max", "cpu.max", "pids.max"}
+	f := fixture{runImage: runImage, upstreamImage: upstreamImage, proxyImage: proxyImage,
+		proxy: proxy, probe: probe, name: name, runID: runID}
 	files := []string{"/proc/self/status", "/proc/self/mountinfo"}
-	for _, f := range cgroup {
+	for _, f := range cgroupFiles {
 		files = append(files, "/sys/fs/cgroup/"+f)
 	}
 	proxyURL := func(host string) string { return "http://" + net.JoinHostPort(host, proxyPort) + "/hello" }
@@ -118,11 +129,24 @@ func TestRun(t *testing.T) {
 		net.JoinHostPort(ipOn(t, other, other), upstreamPort),
 		net.JoinHostPort(ip6On(t, other, other), upstreamPort),
 	}
-	report, logs := runProbe(t, probe, probeRun, probeConfig{
-		HTTP:   []string{proxyURL(proxy.Name), proxyURL(ipOn(t, proxy.Name, probeRun)), proxyURL(ip6On(t, proxy.Name, probeRun))},
+	proxyIPs := []string{ipOn(t, proxy.Name, probeRun), ip6On(t, proxy.Name, probeRun)}
+	report, logs, diff := runProbe(t, probe, runID("probe"), probeConfig{
+		HTTP:   []string{proxyURL(proxy.Name), proxyURL(proxyIPs[0]), proxyURL(proxyIPs[1])},
 		Dial:   noConnection,
 		Lookup: []string{proxy.Name, "example.com", other},
 		Files:  files,
+		List:   []string{"/work", "/kiln"},
+	}, placedExtra...)
+
+	t.Run("placing", func(t *testing.T) { testPlacing(t, report, diff) })
+
+	t.Run("the save container", func(t *testing.T) {
+		testSaveContainer(t, f, []string{
+			net.JoinHostPort(proxyIPs[0], proxyPort),
+			net.JoinHostPort(proxyIPs[1], proxyPort),
+			"1.1.1.1:80",
+			"[2606:4700:4700::1111]:80",
+		})
 	})
 
 	t.Run("identity and privileges", func(t *testing.T) {
@@ -188,29 +212,7 @@ func TestRun(t *testing.T) {
 		}
 	})
 
-	t.Run("limits", func(t *testing.T) {
-		want := map[string]string{"memory.max": "4294967296", "pids.max": "1024", "memory.swap.max": "0"}
-		for _, f := range cgroup {
-			r := resultFor(report.Files, "/sys/fs/cgroup/"+f)
-			if r == nil || r.Error != "" {
-				// Whether the runner has these files is a question for the
-				// developer (spec of card 3): fail and name it, never drop it.
-				t.Errorf("/sys/fs/cgroup/%s cannot be read in a run's container: %v", f, r)
-				continue
-			}
-			got := strings.TrimSpace(r.Value)
-			if f == "cpu.max" {
-				quota, period, _ := strings.Cut(got, " ")
-				q, qErr := strconv.ParseFloat(quota, 64)
-				p, pErr := strconv.ParseFloat(period, 64)
-				if qErr != nil || pErr != nil || p == 0 || q/p != 2 {
-					t.Errorf("cpu.max is %q, want a quota of twice the period", got)
-				}
-			} else if got != want[f] {
-				t.Errorf("%s is %q, want %s", f, got, want[f])
-			}
-		}
-	})
+	t.Run("limits", func(t *testing.T) { assertLimits(t, report) })
 
 	t.Run("mounts", func(t *testing.T) {
 		if report.Init == "" {
@@ -250,9 +252,8 @@ func TestRun(t *testing.T) {
 	})
 
 	t.Run("the run image has the pinned Claude Code", func(t *testing.T) {
-		version := runName(runID("version"))
 		createRun(t, Run{ID: runID("version"), Image: runImage, Proxy: proxy.Name, Command: []string{"claude", "--version"}})
-		if out, _ := startAndWait(t, version); strings.TrimSpace(out) != "2.1.326 (Claude Code)" {
+		if out, _ := startAndWait(t, runID("version")); strings.TrimSpace(out) != "2.1.326 (Claude Code)" {
 			t.Errorf("claude --version printed %q", out)
 		}
 	})
@@ -278,11 +279,13 @@ func TestRun(t *testing.T) {
 		if got := containerID(t, proxy.Name); got == before || got == "" {
 			t.Errorf("the proxy is %q, was %s: not replaced", got, before)
 		}
-		probe2 := runName(runID("probe2"))
 		createRun(t, Run{ID: runID("probe2"), Image: runImage, Proxy: proxy.Name,
 			Command: []string{probePath, probeConfigPath}})
-		report2, _ := runProbe(t, probe, probe2, probeConfig{HTTP: []string{proxyURL(proxy.Name)}})
+		report2, _, _ := runProbe(t, probe, runID("probe2"), probeConfig{HTTP: []string{proxyURL(proxy.Name)}})
 		assertCredential(t, report2, credential2)
+
+		// The replaced proxy is on no earlier run's network until it is attached.
+		t.Run("AttachProxy", func(t *testing.T) { testAttachProxy(t, f, runID("probe")) })
 
 		// As after a kill between removing the old proxy and starting the new.
 		must(t, "rm", "--force", proxy.Name)
@@ -337,8 +340,9 @@ func TestRun(t *testing.T) {
 		t.Run("with an image that does not exist", func(t *testing.T) {
 			r := Run{ID: runID("no-image"), Image: name("no-such-image"), Proxy: proxy.Name}
 			cleanupRun(t, r)
-			if err := CreateRun(t.Context(), r); err == nil {
-				t.Error("no error")
+			err := CreateRun(t.Context(), r)
+			if err == nil || !strings.Contains(err.Error(), "No such image") {
+				t.Errorf("want the image missing locally, got %v", err)
 			}
 			assertLeft(t, r.ID, false, false)
 		})
@@ -346,7 +350,7 @@ func TestRun(t *testing.T) {
 		t.Run("after a network left alone", func(t *testing.T) {
 			r := Run{ID: runID("left-network"), Image: runImage, Proxy: proxy.Name}
 			cleanupRun(t, r)
-			if err := CreateRunNetwork(t.Context(), runName(r.ID), proxy.Name); err != nil {
+			if err := CreateRunNetwork(t.Context(), r.ID, proxy.Name); err != nil {
 				t.Fatal(err)
 			}
 			network := networkID(t, runName(r.ID))
@@ -391,6 +395,20 @@ func TestRun(t *testing.T) {
 			}
 		})
 
+		t.Run("after a network without kiln.run", func(t *testing.T) {
+			r := Run{ID: runID("foreign-network"), Image: runImage, Proxy: proxy.Name}
+			cleanupRun(t, r)
+			must(t, "network", "create", "--internal", runName(r.ID))
+			network := networkID(t, runName(r.ID))
+			if err := CreateRun(t.Context(), r); err == nil {
+				t.Error("no error")
+			}
+			assertLeft(t, r.ID, false, true)
+			if got := networkID(t, runName(r.ID)); got != network {
+				t.Errorf("the network is %q, was %s", got, network)
+			}
+		})
+
 		t.Run("after a container without kiln.run", func(t *testing.T) {
 			r := Run{ID: runID("foreign"), Image: runImage, Proxy: proxy.Name}
 			cleanupRun(t, r)
@@ -406,6 +424,12 @@ func TestRun(t *testing.T) {
 		})
 	})
 
+	t.Run("a run's life", func(t *testing.T) { testLife(t, f, runID("probe")) })
+	t.Run("PlaceRun refuses", func(t *testing.T) { testPlaceRefusals(t, f, runID("probe")) })
+	t.Run("the save", func(t *testing.T) { testSave(t, f) })
+	t.Run("RemoveRun", func(t *testing.T) { testRemoveRun(t, f) })
+	t.Run("images are never pulled", func(t *testing.T) { testNoPull(t, f) })
+
 	// Needs the developer's credential, so it is run by hand (ADR 0049).
 	t.Run("Claude answers in a run", func(t *testing.T) {
 		claudeUpstream, command := os.Getenv("KILN_CLAUDE_UPSTREAM"), os.Getenv("KILN_CLAUDE_CREDENTIAL_COMMAND")
@@ -417,13 +441,12 @@ func TestRun(t *testing.T) {
 		if err := ReplaceProxy(t.Context(), real, command); err != nil {
 			t.Fatal(err)
 		}
-		claude := runName(runID("claude"))
 		createRun(t, Run{ID: runID("claude"), Image: runImage, Proxy: real.Name, Command: []string{
 			"claude", "-p", "--output-format", "stream-json", "--verbose",
 			"--permission-mode", "bypassPermissions", "--model", "claude-haiku-5-5", "--effort", "low",
 			"Reply with the single word OK.",
 		}})
-		out, _ := startAndWait(t, claude)
+		out, _ := startAndWait(t, runID("claude"))
 
 		var model, subtype, result string
 		var cost float64
@@ -490,21 +513,24 @@ func createRun(t *testing.T, r Run) {
 	}
 }
 
-// cleanupRun removes a run's container and network when the test is over,
-// whatever happened.
+// cleanupRun removes a run's save container, container and network when the
+// test is over, whatever happened.
 func cleanupRun(t *testing.T, r Run) {
 	t.Helper()
 	t.Cleanup(func() {
 		ctx := context.Background()
 		name := runName(r.ID)
-		if _, err := docker(ctx, nil, "rm", "--force", name); err != nil {
-			t.Errorf("cleanup: %v", err)
+		for _, c := range []string{saveName(r.ID), name} {
+			if _, err := docker(ctx, nil, "rm", "--force", c); err != nil {
+				t.Errorf("cleanup: %v", err)
+			}
 		}
 		if exists, err := networkExists(ctx, name); err != nil || !exists {
 			return
 		}
-		// The proxy may be gone, and then RemoveRunNetwork cannot ask it.
-		if err := RemoveRunNetwork(ctx, name, r.Proxy); err != nil {
+		// The proxy may be gone, and then RemoveRunNetwork cannot ask it; a
+		// network without the label is refused by it.
+		if err := RemoveRunNetwork(ctx, r.ID, r.Proxy); err != nil {
 			if _, rmErr := docker(ctx, nil, "network", "rm", "--force", name); rmErr != nil {
 				t.Errorf("cleanup: %v, then %v", err, rmErr)
 			}
@@ -512,68 +538,101 @@ func cleanupRun(t *testing.T, r Run) {
 	})
 }
 
-// runProbe places the probe and its configuration in a created run's container,
-// as card 4 will place files, starts the container, waits for it and returns the
-// probe's report and its whole output.
-func runProbe(t *testing.T, probe []byte, container string, config probeConfig) (probeReport, string) {
+// tarEntry is one entry of a tar the test makes.
+type tarEntry struct {
+	hdr  tar.Header
+	data string
+}
+
+// file, dir and symlink make tar entries as a caller of PlaceRun might give
+// them: owned by someone else, with an extended attribute as macOS's tar
+// writes it.
+func file(name string, mode int64, data string) tarEntry {
+	return tarEntry{hdr: foreign(tar.Header{Typeflag: tar.TypeReg, Name: name, Mode: mode, Size: int64(len(data))}), data: data}
+}
+
+func symlink(name, target string) tarEntry {
+	return tarEntry{hdr: foreign(tar.Header{Typeflag: tar.TypeSymlink, Name: name, Linkname: target, Mode: 0o777})}
+}
+
+func foreign(h tar.Header) tar.Header {
+	h.Uid, h.Gid, h.Uname, h.Gname = 501, 20, "someone", "staff"
+	h.ModTime = time.Now()
+	h.Format = tar.FormatPAX
+	h.PAXRecords = map[string]string{"SCHILY.xattr.com.apple.provenance": "\x01\x02"}
+	return h
+}
+
+// tarOf writes entries into a tar.
+func tarOf(t *testing.T, entries ...tarEntry) []byte {
 	t.Helper()
-	configJSON, err := json.Marshal(config)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var archive bytes.Buffer
 	tw := tar.NewWriter(&archive)
-	for _, f := range []struct {
-		path string
-		mode int64
-		data []byte
-	}{{probePath, 0o755, probe}, {probeConfigPath, 0o644, configJSON}} {
-		hdr := &tar.Header{Name: strings.TrimPrefix(f.path, "/"), Mode: f.mode, Size: int64(len(f.data)),
-			Uid: 1000, Gid: 1000, ModTime: time.Now()}
-		if err := tw.WriteHeader(hdr); err != nil {
+	for _, e := range entries {
+		if err := tw.WriteHeader(&e.hdr); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tw.Write(f.data); err != nil {
+		if _, err := tw.Write([]byte(e.data)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	cp := exec.CommandContext(t.Context(), "docker", "cp", "--archive", "-", container+":/")
-	cp.Stdin = &archive
-	if out, err := cp.CombinedOutput(); err != nil {
-		t.Fatalf("docker cp: %v: %s", err, out)
-	}
+	return archive.Bytes()
+}
 
-	out, stderr := startAndWait(t, container)
+// probeInstruction is the instruction PlaceRun places with the probe.
+const probeInstruction = "The probe's instruction.\n"
+
+// runProbe places the probe, its configuration and any extra entries in a
+// created run's container with PlaceRun, starts it, waits for it and returns
+// the probe's report, its whole output, and what `docker diff` showed before
+// the start.
+func runProbe(t *testing.T, probe []byte, id string, config probeConfig, extra ...tarEntry) (probeReport, string, string) {
+	t.Helper()
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := append([]tarEntry{
+		file(strings.TrimPrefix(probePath, "/work/"), 0o755, string(probe)),
+		file(strings.TrimPrefix(probeConfigPath, "/work/"), 0o644, string(configJSON)),
+	}, extra...)
+	if err := PlaceRun(t.Context(), id, bytes.NewReader(tarOf(t, entries...)), []byte(probeInstruction)); err != nil {
+		t.Fatal(err)
+	}
+	diff := must(t, "diff", runName(id))
+
+	out, stderr := startAndWait(t, id)
 	var report probeReport
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatalf("the probe's report: %v\n%s\n%s", err, out, stderr)
 	}
-	return report, out + stderr
+	return report, out + stderr, diff
 }
 
-// startAndWait starts a created container, waits up to five minutes for it to
-// exit, and returns what it printed to standard output and to standard error.
-// It fails the test when the container did not exit with 0.
-func startAndWait(t *testing.T, container string) (string, string) {
+// startAndWait starts a created run with StartRun, follows it with ReadRun
+// until it has exited, for up to five minutes, and returns what it printed to
+// standard output and to standard error. It fails the test when the container
+// did not exit with 0.
+func startAndWait(t *testing.T, id string) (string, string) {
 	t.Helper()
-	must(t, "start", container)
+	if err := StartRun(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
-	status, err := docker(ctx, nil, "wait", container)
+	var stdout, stderr strings.Builder
+	if err := ReadRun(ctx, id, true, &stdout, &stderr); err != nil {
+		t.Fatalf("ReadRun: %v: %s", err, stderr.String())
+	}
+	state, err := InspectRun(t.Context(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	logs := exec.CommandContext(t.Context(), "docker", "logs", container)
-	var stdout, stderr strings.Builder
-	logs.Stdout, logs.Stderr = &stdout, &stderr
-	if err := logs.Run(); err != nil {
-		t.Fatalf("docker logs: %v: %s", err, stderr.String())
-	}
-	if status != "0" {
-		t.Errorf("%s exited with %s:\n%s\n%s", container, status, stdout.String(), stderr.String())
+	if state == nil || state.Status != "exited" || state.ExitCode != 0 {
+		t.Errorf("%s ended as %+v:\n%s\n%s", runName(id), state, stdout.String(), stderr.String())
 	}
 	return stdout.String(), stderr.String()
 }

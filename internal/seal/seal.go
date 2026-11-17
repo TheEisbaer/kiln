@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,10 +40,12 @@ type Proxy struct {
 // networks (ADR 0041, point 4). IPv6 forwarding is off by default; it is set
 // anyway, so that the seal does not rest on a default. The credential reaches docker by the name of a variable and
 // not as an argument, where `ps` would show it. The container carries the label
-// kiln.proxy, by which ReplaceProxy knows it as Kiln's. On failure nothing is
-// left behind.
+// kiln.proxy, by which ReplaceProxy knows it as Kiln's. The image is never
+// pulled: one that is not there locally is an error. On failure nothing is left
+// behind.
 func StartProxy(ctx context.Context, p Proxy, credential string) error {
 	return runDetached(ctx, []string{credentialVar + "=" + credential},
+		"--pull", "never", // a missing image is an error, never a download
 		"--name", p.Name,
 		"--label", proxyLabel+"=1",
 		"--network", p.Network,
@@ -122,40 +125,47 @@ func runCredentialCommand(ctx context.Context, command string) (string, error) {
 // runDetached runs `docker run --detach` with the given arguments, through
 // createContainer.
 func runDetached(ctx context.Context, env []string, args ...string) error {
-	return createContainer(ctx, env, "run", append([]string{"--detach"}, args...)...)
+	_, err := createContainer(ctx, env, "run", append([]string{"--detach"}, args...)...)
+	return err
 }
 
 // createContainer runs a docker command that creates a container, `run` or
-// `create`, with the given arguments. When docker created the container but
-// failed afterwards, for instance to start it, it leaves the container behind;
-// createContainer then removes that container, found by the ID docker wrote to
-// its cidfile, so that a container of the same name that docker refused to
-// replace is never touched.
-func createContainer(ctx context.Context, env []string, verb string, args ...string) error {
+// `create`, with the given arguments, and returns the container's ID. When
+// docker created the container but failed afterwards, for instance to start it,
+// it leaves the container behind; createContainer then removes that container,
+// found by the ID docker wrote to its cidfile, so that a container of the same
+// name that docker refused to replace is never touched.
+func createContainer(ctx context.Context, env []string, verb string, args ...string) (string, error) {
 	dir, err := os.MkdirTemp("", "kiln-seal-")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(dir)
 	cidfile := filepath.Join(dir, "cid")
 
 	_, err = docker(ctx, env, append([]string{verb, "--cidfile", cidfile}, args...)...)
+	data, readErr := os.ReadFile(cidfile)
+	id := strings.TrimSpace(string(data))
 	if err == nil {
-		return nil
+		if readErr != nil || id == "" {
+			return "", fmt.Errorf("docker %s wrote no container ID: %v", verb, readErr)
+		}
+		return id, nil
 	}
-	id, readErr := os.ReadFile(cidfile)
-	if readErr != nil || strings.TrimSpace(string(id)) == "" {
-		return err // docker created nothing
+	if readErr != nil || id == "" {
+		return "", err // docker created nothing
 	}
 	// The context may be what failed the command, and the container must go anyway.
-	if _, rmErr := docker(context.WithoutCancel(ctx), nil, "rm", "--force", strings.TrimSpace(string(id))); rmErr != nil {
+	if _, rmErr := docker(context.WithoutCancel(ctx), nil, "rm", "--force", id); rmErr != nil {
 		err = fmt.Errorf("%w (and removing the container failed: %v)", err, rmErr)
 	}
-	return err
+	return "", err
 }
 
-// CreateRunNetwork creates a network for one run, with no outside connection and
-// no gateway in either family, and attaches the proxy to it (ADR 0041).
+// CreateRunNetwork creates the network of one run, kiln-run-<id>, with no
+// outside connection and no gateway in either family, and attaches the proxy to
+// it (ADR 0041). The network carries the label kiln.run=<id>, by which the seal
+// knows it as that run's.
 //
 // IPv6 is on on purpose. With it off, the network's bridge on the engine's host
 // keeps IPv6 on with a link-local address, which a container with NET_RAW
@@ -163,7 +173,11 @@ func createContainer(ctx context.Context, env []string, verb string, args ...str
 // its gateway mode isolated, the bridge has IPv6 off and no address.
 //
 // On failure nothing is left behind.
-func CreateRunNetwork(ctx context.Context, name, proxy string) error {
+func CreateRunNetwork(ctx context.Context, id, proxy string) error {
+	if err := checkRunID(id); err != nil {
+		return err
+	}
+	name := runName(id)
 	_, err := docker(ctx, nil,
 		"network", "create",
 		"--driver", "bridge",
@@ -171,6 +185,7 @@ func CreateRunNetwork(ctx context.Context, name, proxy string) error {
 		"--ipv6",
 		"--opt", "com.docker.network.bridge.gateway_mode_ipv4=isolated",
 		"--opt", "com.docker.network.bridge.gateway_mode_ipv6=isolated",
+		"--label", runLabel+"="+id,
 		name)
 	if err != nil {
 		return err
@@ -185,22 +200,45 @@ func CreateRunNetwork(ctx context.Context, name, proxy string) error {
 	return nil
 }
 
-// RemoveRunNetwork detaches the proxy from a run's network and removes the
-// network. Containers of the run must be gone already.
+// RemoveRunNetwork detaches the proxy from the network of a run and removes the
+// network. Containers of the run must be gone already. A network of the name
+// without the label kiln.run=<id> was not made for this run: it is refused, and
+// nothing is touched.
 //
-// It can be repeated (ADR 0035): it succeeds when the proxy is already detached
-// and when the network is already gone. docker answers both of those with the
-// same exit status as any other failure, so a failed disconnect is judged by
-// asking whether the proxy is still attached, and `network rm --force` leaves
-// out only the engine's "not found". Every other failure is returned.
-func RemoveRunNetwork(ctx context.Context, name, proxy string) error {
-	if _, err := docker(ctx, nil, "network", "disconnect", name, proxy); err != nil {
-		attached, inspectErr := attachedTo(ctx, proxy, name)
-		if inspectErr != nil || attached {
-			return err
+// It can be repeated (ADR 0035): it succeeds when the proxy is already detached,
+// when there is no proxy at all, and when the network is already gone. Whether
+// the proxy exists is asked of the engine first; a proxy that does not exist is
+// not attached, so the network is removed without a disconnect. docker answers
+// a failed disconnect with the same exit status as any other failure, so it is
+// judged by asking whether the proxy is still attached. The network is removed by its ID, so that a
+// network that took the name in between is not touched, and `network rm
+// --force` leaves out only the engine's "not found". Every other failure is
+// returned.
+func RemoveRunNetwork(ctx context.Context, id, proxy string) error {
+	if err := checkRunID(id); err != nil {
+		return err
+	}
+	name := runName(id)
+	n, err := findNetwork(ctx, name, runLabel)
+	if err != nil || n == nil {
+		return err
+	}
+	if n.label != id {
+		return notOurs("network", name, runLabel+"="+id)
+	}
+	p, err := findContainer(ctx, proxy, proxyLabel)
+	if err != nil {
+		return err
+	}
+	if p != nil {
+		if _, err := docker(ctx, nil, "network", "disconnect", n.id, p.id); err != nil {
+			attached, inspectErr := attachedTo(ctx, p.id, name)
+			if inspectErr != nil || attached {
+				return err
+			}
 		}
 	}
-	_, err := docker(ctx, nil, "network", "rm", "--force", name)
+	_, err = docker(ctx, nil, "network", "rm", "--force", n.id)
 	return err
 }
 
@@ -244,6 +282,36 @@ func findContainer(ctx context.Context, name, label string) (*foundContainer, er
 	return nil, nil
 }
 
+// foundNetwork is what the seal reads of a network it looks for by name.
+type foundNetwork struct {
+	id    string
+	label string // the value of the label asked for, empty without it
+}
+
+// findNetwork looks for the network of a name and reads one of its labels. It
+// returns nil when there is none.
+func findNetwork(ctx context.Context, name, label string) (*foundNetwork, error) {
+	// The filter matches parts of names, so the name is compared below.
+	out, err := docker(ctx, nil, "network", "ls", "--no-trunc", "--filter", "name="+name,
+		"--format", "{{.ID}}\t{{.Name}}\t{{.Label \""+label+"\"}}")
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) == 3 && f[1] == name {
+			return &foundNetwork{id: f[0], label: f[2]}, nil
+		}
+	}
+	return nil, nil
+}
+
+// notOurs is the error for a container or network of a run's name that lacks
+// the run's label.
+func notOurs(what, name, label string) error {
+	return fmt.Errorf("the %s %s has no label %s, so Kiln did not make it for this run; it is left alone", what, name, label)
+}
+
 // networkExists reports whether there is a network of a name.
 func networkExists(ctx context.Context, name string) (bool, error) {
 	// The filter matches parts of names, so the name is compared below.
@@ -269,11 +337,31 @@ func docker(ctx context.Context, env []string, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		what := args[0]
-		if what == "network" {
-			what += " " + args[1]
-		}
-		return "", fmt.Errorf("docker %s: %w: %s", what, err, strings.TrimSpace(stderr.String()))
+		return "", dockerError(args, err, stderr.String())
 	}
 	return strings.TrimRight(string(out), "\n"), nil
+}
+
+// dockerIO runs the docker command with the given standard input and output,
+// either of which may be nil, as the bytes come. A failure carries what it
+// printed to standard error.
+func dockerIO(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdin, cmd.Stdout = stdin, stdout
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return dockerError(args, err, stderr.String())
+	}
+	return nil
+}
+
+// dockerError names the docker command that failed and carries what it printed
+// to standard error.
+func dockerError(args []string, err error, stderr string) error {
+	what := args[0]
+	if what == "network" {
+		what += " " + args[1]
+	}
+	return fmt.Errorf("docker %s: %w: %s", what, err, strings.TrimSpace(stderr))
 }
