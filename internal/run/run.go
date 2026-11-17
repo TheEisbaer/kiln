@@ -114,6 +114,13 @@ func check(ctx context.Context, in Inputs) (*run, error) {
 		return nil, fmt.Errorf("the branch %q is not a valid branch name: %v", in.Branch, err)
 	}
 	r.ref = "refs/heads/" + in.Branch
+	// A symbolic ref would let the guard pass against, and update-ref move,
+	// another branch that the run did not create.
+	if symbolic, err := isSymbolic(ctx, in.Repo, r.ref); err != nil {
+		return nil, err
+	} else if symbolic {
+		return nil, fmt.Errorf("the branch %s is a symbolic ref; it is left alone", in.Branch)
+	}
 	var err error
 	if r.commit, err = gitLine(ctx, in.Repo, "rev-parse", "--verify", "--end-of-options", in.Commit+"^{commit}"); err != nil {
 		return nil, fmt.Errorf("the commit %q: %w", in.Commit, err)
@@ -171,7 +178,9 @@ func after(step string) error {
 func Do(ctx context.Context, in Inputs, out, errOut io.Writer) int {
 	code, err := do(ctx, in, out, errOut)
 	if err != nil {
-		fmt.Fprintln(errOut, "kiln run:", err)
+		// An error can carry text of the run's, such as file names in the
+		// save's output.
+		fmt.Fprintln(errOut, "kiln run:", printable(err.Error()))
 		if code == 0 {
 			code = exitFailed
 		}
@@ -334,13 +343,15 @@ func (r *run) follow(ctx context.Context) (int, error) {
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := seal.ReadRun(ctx, r.ID, true, pw, r.errOut)
+		// The run's standard error is shown as it comes, without control
+		// characters; it is recorded as it is in step 5.
+		err := seal.ReadRun(ctx, r.ID, true, pw, &printableWriter{w: r.errOut})
 		pw.CloseWithError(err)
 		done <- err
 	}()
 	var stopErr error
 	f := &follower{out: r.out, model: r.Model, mismatch: func(seen string) {
-		fmt.Fprintf(r.out, "the run uses the model %s, not %s: it is stopped\n", seen, r.Model)
+		fmt.Fprintf(r.out, "the run uses the model %s, not %s: it is stopped\n", printable(seen), r.Model)
 		stopErr = seal.StopRun(context.WithoutCancel(ctx), r.ID)
 	}}
 	_, readErr := readEvents(pr, f.see)
@@ -414,10 +425,11 @@ func (r *run) collect(ctx context.Context) (*record, error) {
 		return nil, err
 	}
 	return &record{
-		Inputs:    r.recordInputs(),
-		Ending:    endingOf(state),
-		ModelSeen: s.model,
-		Result:    s.result,
+		Inputs:       r.recordInputs(),
+		Ending:       endingOf(state),
+		ModelSeen:    s.model,
+		Result:       s.result,
+		TooLongLines: s.tooLong,
 	}, nil
 }
 

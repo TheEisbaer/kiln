@@ -155,6 +155,21 @@ func TestSteps(t *testing.T) {
 		}
 		f.assertDone(t, c)
 
+		// The run's escape sequences reach the record, and not the terminal.
+		if strings.ContainsAny(out+errOut, "\x1b\x07") {
+			t.Errorf("the command printed a control character:\n%q\n%q", out, errOut)
+		}
+		if !strings.Contains(out, "text: Done.\uFFFD[2K") || !strings.Contains(errOut, "run stderr \uFFFD]0;kiln-title\uFFFD") {
+			t.Errorf("the command printed\n%q\n%q", out, errOut)
+		}
+		dir := filepath.Join(f.runs, c.id)
+		if got := readAll(t, filepath.Join(dir, "output.jsonl")); !strings.Contains(got, `Done.\u001b[2K`) {
+			t.Error("output.jsonl does not hold the text's escape sequence")
+		}
+		if got := readAll(t, filepath.Join(dir, "stderr.txt")); !strings.Contains(got, "run stderr \x1b]0;kiln-title\x07") {
+			t.Errorf("stderr.txt does not hold the escape sequence: %q", got)
+		}
+
 		// Started again after it is done: a repeat, not a retry.
 		if code, out, errOut := f.kiln(t, c, "", false); code != 0 || !strings.Contains(out, "recorded already") {
 			t.Errorf("started again: exit status %d\n%s\n%s", code, out, errOut)
@@ -411,6 +426,8 @@ func (f *fixture) makeRepo(t *testing.T) {
 			"printf 'A line from the run.\\n' >> NOTES.md\n" +
 			"printf 'ignored\\n' > build/new.txt\n" +
 			"printf 'A note from the run.\\n' > /kiln/out/note.md\n" +
+			// To the container's own standard error, which kiln run shows.
+			"printf 'run stderr \\033]0;kiln-title\\007\\n' > /proc/1/fd/2\n" +
 			"touch /tmp/waiting\n" +
 			"while [ ! -e /tmp/gate ]; do sleep 0.1; done\n" +
 			"go vet ./...\n" +

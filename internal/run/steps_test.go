@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -326,5 +327,117 @@ func TestCommand(t *testing.T) {
 	want := `sh -c exec claude "$@" < /kiln/instruction.md sh -p --output-format stream-json --verbose --permission-mode bypassPermissions --model claude-haiku-5-5 --effort low`
 	if got != want {
 		t.Errorf("the command is\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestPrintable(t *testing.T) {
+	in := "a\x1b[2Kb\tc\nd\x07e\u009bf\x7fg\x00h"
+	want := "a�[2Kb\tc\nd�e�f�g�h"
+	if got := printable(in); got != want {
+		t.Errorf("printable(%q) = %q, want %q", in, got, want)
+	}
+
+	// As the run's standard error comes, with a C1 character split across two
+	// writes, and a byte that is not UTF-8.
+	var out bytes.Buffer
+	w := &printableWriter{w: &out}
+	for _, part := range []string{"x\x1b]0;title\x07 \xc2", "\x9by \x9b z\t\n"} {
+		if n, err := w.Write([]byte(part)); err != nil || n != len(part) {
+			t.Fatalf("Write(%q) = %d, %v", part, n, err)
+		}
+	}
+	if got, want := out.String(), "x�]0;title� �y � z\t\n"; got != want {
+		t.Errorf("the writer passed on %q, want %q", got, want)
+	}
+
+	// An event's text, a tool's description and the model, as following prints
+	// them.
+	var printed bytes.Buffer
+	f := &follower{out: &printed, model: "claude-haiku-5-5\u001b[2K", mismatch: func(string) {}}
+	events := `{"type":"system","subtype":"init","model":"claude-haiku-5-5\u001b[2K","claude_code_version":"2.1.326\u0007"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash\u001b]52;c;eA==\u0007","input":{"description":"Run\u001b[1A it"}},{"type":"text","text":"Done.\u001b[2K\u009b"}]}}
+`
+	if _, err := readEvents(strings.NewReader(events), f.see); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsFunc(printed.String(), func(r rune) bool { return isControl(r) && r != '\n' }) {
+		t.Errorf("following printed a control character: %q", printed.String())
+	}
+	if !strings.Contains(printed.String(), "text: Done.�[2K�") {
+		t.Errorf("following printed %q", printed.String())
+	}
+}
+
+func TestSymbolicBranch(t *testing.T) {
+	repo, commit := bareRepo(t, map[string]string{"NOTES.md": "notes\n"})
+	gitIn(t, repo, "update-ref", "refs/heads/main", commit)
+	gitIn(t, repo, "symbolic-ref", "refs/heads/alias", "refs/heads/main")
+	instruction := filepath.Join(t.TempDir(), "i.md")
+	writeIn(t, filepath.Dir(instruction), "i.md", "Do it.\n", 0o644)
+	in := Inputs{Repo: repo, Commit: commit, Branch: "alias", ID: "run1", Instruction: instruction,
+		Runs: t.TempDir(), Image: "kiln-run", Proxy: "kiln-proxy", Model: "claude-haiku-5-5", Effort: "low"}
+	if _, err := check(t.Context(), in); err == nil || !strings.Contains(err.Error(), "symbolic ref") {
+		t.Errorf("check with a symbolic branch: want a refusal, got %v", err)
+	}
+	in.Branch = "main"
+	if _, err := check(t.Context(), in); err != nil {
+		t.Errorf("check with a plain branch: %v", err)
+	}
+
+	// update-ref never moves main through the symbolic ref.
+	other := gitIn(t, repo, "commit-tree", "-p", commit, "-m", "other", gitIn(t, repo, "rev-parse", commit+"^{tree}"))
+	moveBranch(t.Context(), repo, "refs/heads/alias", other, commit)
+	if at := gitIn(t, repo, "rev-parse", "refs/heads/main"); at != commit {
+		t.Errorf("main is at %s, was %s", at, commit)
+	}
+}
+
+// repeated reads one byte over and over.
+type repeated byte
+
+func (r repeated) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(r)
+	}
+	return len(p), nil
+}
+
+func TestLongLine(t *testing.T) {
+	const limit = 1 << 10
+	const long = 64 << 20 // far over the limit
+	first := `{"type":"system","subtype":"init","model":"claude-haiku-5-5"}` + "\n"
+	last := `{"type":"result","subtype":"success","num_turns":2}` + "\n"
+	output := func(line int64) io.Reader {
+		return io.MultiReader(strings.NewReader(first), io.LimitReader(repeated('x'), line),
+			strings.NewReader("\n"+last))
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	s, err := readEventsUpTo(output(long), nil, limit)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.model != "claude-haiku-5-5" || s.result == nil || s.result.Subtype != "success" {
+		t.Errorf("the events around the long line were not read: %+v", s)
+	}
+	if s.tooLong != 1 {
+		t.Errorf("%d lines were passed over, want 1", s.tooLong)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+		t.Errorf("reading a line of %d bytes took %d bytes of memory", long, grew)
+	}
+
+	// A line at the limit is read; one without a newline at the end is counted.
+	atLimit := `{"type":"result","subtype":"success"}`
+	atLimit += strings.Repeat(" ", limit-len(atLimit)-1) + "\n"
+	if s, err := readEventsUpTo(strings.NewReader(atLimit), nil, limit); err != nil || s.result == nil || s.tooLong != 0 {
+		t.Errorf("a line at the limit: %+v, %v", s, err)
+	}
+	if s, err := readEventsUpTo(io.MultiReader(strings.NewReader(first), io.LimitReader(repeated('x'), 4*limit)), nil, limit); err != nil ||
+		s.model == "" || s.tooLong != 1 {
+		t.Errorf("a long line at the end: %+v, %v", s, err)
 	}
 }

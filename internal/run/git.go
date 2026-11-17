@@ -255,8 +255,24 @@ func branchAt(ctx context.Context, repo, ref string) (string, error) {
 // "" for a branch that must not exist. Git refuses the update when the branch
 // has another value.
 func moveBranch(ctx context.Context, repo, ref, commit, old string) error {
-	_, err := git(ctx, repo, nil, nil, "update-ref", ref, commit, old)
+	// --no-deref, so that it never moves another branch through a symbolic ref.
+	_, err := git(ctx, repo, nil, nil, "update-ref", "--no-deref", ref, commit, old)
 	return err
+}
+
+// isSymbolic reports whether a ref is a symbolic ref.
+func isSymbolic(ctx context.Context, repo, ref string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "--git-dir="+repo, "symbolic-ref", "--quiet", ref)
+	cmd.Env = gitEnv()
+	err := cmd.Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.As(err, &exit) && exit.ExitCode() == 1: // not symbolic, or absent
+		return false, nil
+	}
+	return false, fmt.Errorf("git symbolic-ref %s: %w", ref, err)
 }
 
 // isSaveOf reports whether a commit is the save of a run on top of a parent:

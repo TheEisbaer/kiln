@@ -104,10 +104,11 @@ func hasToolResult(req request) bool {
 	return false
 }
 
-// The scripted answers.
+// The scripted answers. The text carries an escape sequence, which the test
+// expects in the record and not on the terminal.
 const (
 	bashInput = `{"command":"sh run.sh","description":"Run the script"}`
-	doneText  = "Done."
+	doneText  = "Done.\x1b[2K"
 )
 
 // answer writes the next answer of the script, streamed or whole.

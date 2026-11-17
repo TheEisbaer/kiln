@@ -44,22 +44,53 @@ type Result struct {
 	TotalCostUSD float64 `json:"total_cost_usd"`
 }
 
-// summary is what a run's output says: the model system/init names, and the
-// last result event, if any.
+// summary is what a run's output says: the model system/init names, the last
+// result event, if any, and how many lines were passed over as too long.
 type summary struct {
-	model  string
-	result *Result
+	model   string
+	result  *Result
+	tooLong int
 }
 
-// readEvents reads a run's output line by line. For every event it calls see,
-// which may be nil, and it returns the summary. A line that is not an event is
-// passed over.
+// maxLine is the longest line of a run's output that is read as an event; a
+// longer one is passed over and counted, so that one huge line without a
+// newline cannot fill the developer's machine's memory. The longest line of the
+// scripted run's output.jsonl is 2,751 bytes (measured on 2026-11-17 with
+// Claude Code 2.1.326). A real event carries a tool's input or result, such as
+// a file that was read or a command's output, and can be far larger; no real
+// run was measured, so the limit is generous: 64 MiB, over 20,000 times the
+// measured line. The recorded output.jsonl is written as a stream and keeps
+// every line, whatever its length.
+const maxLine = 64 << 20
+
+// readEvents reads a run's output line by line, each up to maxLine. For every
+// event it calls see, which may be nil, and it returns the summary. A line
+// that is not an event is passed over.
 func readEvents(r io.Reader, see func(event)) (summary, error) {
+	return readEventsUpTo(r, see, maxLine)
+}
+
+func readEventsUpTo(r io.Reader, see func(event), limit int) (summary, error) {
 	var s summary
-	br := bufio.NewReader(r) // no limit on a line, unlike bufio.Scanner
+	br := bufio.NewReader(r)
+	var line []byte
+	tooLong := false // the line so far is longer than limit and is not kept
 	for {
-		line, err := br.ReadBytes('\n')
-		if len(line) > 0 {
+		chunk, err := br.ReadSlice('\n')
+		if !tooLong {
+			if len(line)+len(chunk) > limit {
+				tooLong, line = true, nil
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			continue // the same line goes on
+		}
+		if tooLong {
+			s.tooLong++
+			tooLong = false
+		} else if len(line) > 0 {
 			var e event
 			if json.Unmarshal(line, &e) == nil {
 				switch {
@@ -73,6 +104,7 @@ func readEvents(r io.Reader, see func(event)) (summary, error) {
 				}
 			}
 		}
+		line = line[:0]
 		if err == io.EOF {
 			return s, nil
 		}
@@ -133,7 +165,7 @@ type follower struct {
 
 func (f *follower) see(e event) {
 	for _, line := range describe(e) {
-		fmt.Fprintln(f.out, line)
+		fmt.Fprintln(f.out, printable(line))
 	}
 	if e.Type == "system" && e.Subtype == "init" && e.Model != f.model && !f.stopped {
 		f.stopped = true

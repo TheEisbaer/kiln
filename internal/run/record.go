@@ -22,7 +22,10 @@ type record struct {
 	Ending    Ending       `json:"ending"`
 	ModelSeen string       `json:"model_seen"` // the model system/init named
 	Result    *Result      `json:"result"`     // the last result event, or none
-	Saved     string       `json:"saved"`      // the saved commit, or "no change"
+	// Lines of output.jsonl longer than maxLine, which were not read as events:
+	// with one, a missing result may have been too long.
+	TooLongLines int    `json:"too_long_lines"`
+	Saved        string `json:"saved"` // the saved commit, or "no change"
 }
 
 // RecordInputs are the inputs a run was started with.
