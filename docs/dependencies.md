@@ -26,3 +26,17 @@ not read by the check command.
 - **Looked at:** Fetching the code with `git` by hand in the workflow, which avoids third-party code but leaves the handling of pull request refs and credentials to us.
 - **Why this one:** It is the Git host's own action and the common way to do this; it is pinned by commit (`actions/checkout` v7.0.1, `3d3c42e5aac5ba805825da76410c181273ba90b1`) because a tag can move.
 - **Licence:** MIT.
+
+### Claude Code
+
+- **For:** The agent in every run (ADR 0002), installed by Kiln's layer of the run image (`images/run/`) at a pinned version.
+- **Looked at:** The install script, which fetches whatever version is current and sets up background updates; the npm package, which needs Node.js in the image to install; the apt and dnf repositories, which only toolchain images of those distributions can use.
+- **Why this one:** The release bucket serves one self-contained binary per platform and a `manifest.json` with each binary's SHA-256, signed with the release key. The Dockerfile pins the version and the SHA-256 per platform, so a changed file fails the build, on any toolchain image with `curl` and `sha256sum`.
+- **Licence:** Proprietary: © Anthropic PBC, all rights reserved, use subject to Anthropic's Commercial Terms of Service. It is downloaded into the run image when that is built, and never committed or redistributed with Kiln.
+
+### The docker command
+
+- **For:** Driving the container engine from `internal/seal` and from `check/in-image`: networks, containers, images, and copying files into a run's container.
+- **Looked at:** The engine's Go client library, a Go module with many dependencies of its own; the engine's HTTP API over its socket directly, which would be Kiln's own client to write and keep up.
+- **Why this one:** It is there wherever the engine is, on the developer's machine and on the host's runner, adds no Go module, and is the interface every measurement in the ADRs was made with. Kiln does not pin it; the engine's stable API is what the seal relies on.
+- **Licence:** Apache-2.0. It is not part of Kiln's programs; they run it.
