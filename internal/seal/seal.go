@@ -5,6 +5,7 @@ package seal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -104,12 +105,36 @@ func CreateRunNetwork(ctx context.Context, name, proxy string) error {
 
 // RemoveRunNetwork detaches the proxy from a run's network and removes the
 // network. Containers of the run must be gone already.
+//
+// It can be repeated (ADR 0035): it succeeds when the proxy is already detached
+// and when the network is already gone. docker answers both of those with the
+// same exit status as any other failure, so a failed disconnect is judged by
+// asking whether the proxy is still attached, and `network rm --force` leaves
+// out only the engine's "not found". Every other failure is returned.
 func RemoveRunNetwork(ctx context.Context, name, proxy string) error {
 	if _, err := docker(ctx, nil, "network", "disconnect", name, proxy); err != nil {
-		return err
+		attached, inspectErr := attachedTo(ctx, proxy, name)
+		if inspectErr != nil || attached {
+			return err
+		}
 	}
-	_, err := docker(ctx, nil, "network", "rm", name)
+	_, err := docker(ctx, nil, "network", "rm", "--force", name)
 	return err
+}
+
+// attachedTo reports whether a container is attached to a network, by the
+// network's name.
+func attachedTo(ctx context.Context, container, network string) (bool, error) {
+	out, err := docker(ctx, nil, "inspect", "--type", "container", "--format", "{{json .NetworkSettings.Networks}}", container)
+	if err != nil {
+		return false, err
+	}
+	var networks map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &networks); err != nil {
+		return false, fmt.Errorf("the networks of %s: %w", container, err)
+	}
+	_, ok := networks[network]
+	return ok, nil
 }
 
 // docker runs the docker command with extra environment and returns what it

@@ -232,6 +232,32 @@ func TestSeal(t *testing.T) {
 		}
 	})
 
+	// Removing a run network is safe to repeat (ADR 0035): after a crash between
+	// the disconnect and the removal, and after a create that never attached the
+	// proxy.
+	t.Run("removing a run network can be repeated", func(t *testing.T) {
+		again := name("again")
+		if err := CreateRunNetwork(t.Context(), again, proxy); err != nil {
+			t.Fatal(err)
+		}
+		cleanup(t, "network", "rm", "--force", again)
+
+		must(t, "network", "disconnect", again, proxy)
+		if err := RemoveRunNetwork(t.Context(), again, proxy); err != nil {
+			t.Errorf("with the proxy already detached: %v", err)
+		}
+		if out, err := docker(t.Context(), nil, "network", "inspect", again); err == nil {
+			t.Errorf("the network is still there: %s", out)
+		}
+		if err := RemoveRunNetwork(t.Context(), again, proxy); err != nil {
+			t.Errorf("with the network already gone: %v", err)
+		}
+		// Any other failure is still returned.
+		if err := RemoveRunNetwork(t.Context(), run2, name("no-such-proxy")); err == nil {
+			t.Error("with a proxy that does not exist: no error")
+		}
+	})
+
 	// Needs the developer's credential, so it is run by hand (ADR 0049).
 	t.Run("Claude answers through the proxy", func(t *testing.T) {
 		claudeUpstream, command := os.Getenv("KILN_CLAUDE_UPSTREAM"), os.Getenv("KILN_CLAUDE_CREDENTIAL_COMMAND")
