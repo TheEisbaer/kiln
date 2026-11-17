@@ -34,6 +34,13 @@ not read by the check command.
 - **Why this one:** The release bucket serves one self-contained binary per platform and a `manifest.json` with each binary's SHA-256, signed with the release key. The Dockerfile pins the version and the SHA-256 per platform, so a changed file fails the build, on any toolchain image with `curl` and `sha256sum`.
 - **Licence:** Proprietary: © Anthropic PBC, all rights reserved, use subject to Anthropic's Commercial Terms of Service. It is downloaded into the run image when that is built, and never committed or redistributed with Kiln.
 
+### The git command
+
+- **For:** Saving a run's working tree: the save's script in `internal/seal` runs it in the save container, from the toolchain image the run image is built on. The core runs it on the developer's machine to build what is placed in a run and to take in the save.
+- **Looked at:** A Go module that implements Git, which brings many dependencies of its own; bindings to Git's C library, which ADR 0037 rules out.
+- **Why this one:** It is Git itself, there on the developer's machine and in the toolchain image, adds no Go module, and its plumbing commands are a stable interface.
+- **Licence:** GPL-2.0. It is not part of Kiln's programs; Kiln runs it and does not ship it.
+
 ### The docker command
 
 - **For:** Driving the container engine from `internal/seal` and from `check/in-image`: networks, containers, images, and copying files into a run's container.
