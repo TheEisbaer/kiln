@@ -41,6 +41,7 @@ func TestSeal(t *testing.T) {
 
 	id := randomID(t)
 	name := func(what string) string { return "kiln-sealtest-" + id + "-" + what }
+	runID := func(what string) string { return "sealtest-" + id + "-" + what }
 	credential := "fake-credential-" + id
 
 	// Images. The repo's root is the build context.
@@ -70,7 +71,7 @@ func TestSeal(t *testing.T) {
 	}
 	cleanup(t, "rm", "--force", proxy)
 
-	run1, run2 := runNetwork(t, name("run1"), proxy), runNetwork(t, name("run2"), proxy)
+	run1, run2 := runNetwork(t, runID("run1"), proxy), runNetwork(t, runID("run2"), proxy)
 
 	// The probe: the toolchain image with default capabilities, as on a run.
 	probe := name("probe")
@@ -234,24 +235,28 @@ func TestSeal(t *testing.T) {
 	// the disconnect and the removal, and after a create that never attached the
 	// proxy.
 	t.Run("removing a run network can be repeated", func(t *testing.T) {
-		again := name("again")
-		if err := CreateRunNetwork(t.Context(), again, proxy); err != nil {
+		againID := runID("again")
+		again := runName(againID)
+		if err := CreateRunNetwork(t.Context(), againID, proxy); err != nil {
 			t.Fatal(err)
 		}
 		cleanup(t, "network", "rm", "--force", again)
+		if got := must(t, "network", "inspect", "--format", `{{index .Labels "`+runLabel+`"}}`, again); got != againID {
+			t.Errorf("the run network has %s=%q, want %q", runLabel, got, againID)
+		}
 
 		must(t, "network", "disconnect", again, proxy)
-		if err := RemoveRunNetwork(t.Context(), again, proxy); err != nil {
+		if err := RemoveRunNetwork(t.Context(), againID, proxy); err != nil {
 			t.Errorf("with the proxy already detached: %v", err)
 		}
 		if out, err := docker(t.Context(), nil, "network", "inspect", again); err == nil {
 			t.Errorf("the network is still there: %s", out)
 		}
-		if err := RemoveRunNetwork(t.Context(), again, proxy); err != nil {
+		if err := RemoveRunNetwork(t.Context(), againID, proxy); err != nil {
 			t.Errorf("with the network already gone: %v", err)
 		}
 		// Any other failure is still returned.
-		if err := RemoveRunNetwork(t.Context(), run2, name("no-such-proxy")); err == nil {
+		if err := RemoveRunNetwork(t.Context(), runID("run2"), name("no-such-proxy")); err == nil {
 			t.Error("with a proxy that does not exist: no error")
 		}
 	})
@@ -273,7 +278,7 @@ func TestSeal(t *testing.T) {
 			t.Fatal(err)
 		}
 		cleanup(t, "rm", "--force", real)
-		run3 := runNetwork(t, name("run3"), real)
+		run3 := runNetwork(t, runID("run3"), real)
 		probe3 := name("probe3")
 		start(t, probe3, run3, toolchainImage, "--entrypoint", "sleep", "--", "infinity")
 
@@ -350,19 +355,19 @@ func start(t *testing.T, name, network, image string, more ...string) {
 	cleanup(t, "rm", "--force", name)
 }
 
-// runNetwork creates a run network with the proxy attached, and removes it
-// afterwards.
-func runNetwork(t *testing.T, name, proxy string) string {
+// runNetwork creates the network of a run with the proxy attached, removes it
+// afterwards, and returns its name.
+func runNetwork(t *testing.T, id, proxy string) string {
 	t.Helper()
-	if err := CreateRunNetwork(t.Context(), name, proxy); err != nil {
+	if err := CreateRunNetwork(t.Context(), id, proxy); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := RemoveRunNetwork(context.Background(), name, proxy); err != nil {
+		if err := RemoveRunNetwork(context.Background(), id, proxy); err != nil {
 			t.Errorf("cleanup: %v", err)
 		}
 	})
-	return name
+	return runName(id)
 }
 
 // execIn runs a command in a container and returns its output, standard error

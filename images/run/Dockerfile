@@ -6,7 +6,7 @@
 # Claude Code is pinned by version and by the SHA-256 of each platform's binary,
 # from that release's manifest.json. A card that changes the pin reads Claude
 # Code's changelog between the two versions, and updates the test data that
-# follows the pin (card 4's scripted upstream, once it exists).
+# follows the pin: the scripted upstream in internal/run/testdata/claude/.
 ARG TOOLCHAIN=kiln-toolchain
 FROM ${TOOLCHAIN}
 
@@ -24,8 +24,13 @@ RUN set -eu; \
     install --owner root --group root --mode 0755 /tmp/claude /usr/local/bin/claude; \
     rm /tmp/claude
 
-# Claude Code refuses bypassPermissions as root.
+# Claude Code refuses bypassPermissions as root. The run's working tree is
+# /work, and the documents of a stage go to /kiln/out (ADR 0038); both are the
+# run's own. /kiln itself is root's: the seal places the instruction there.
 RUN set -eu; \
     useradd --uid 1000 --user-group --create-home kiln; \
-    test "$(id -g kiln)" = 1000
+    test "$(id -g kiln)" = 1000; \
+    mkdir --mode 0755 /kiln; \
+    install --directory --owner kiln --group kiln --mode 0755 /work /kiln/out
 USER kiln
+WORKDIR /work

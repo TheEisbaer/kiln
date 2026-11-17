@@ -24,8 +24,25 @@ const runLabel = "kiln.run"
 
 var runID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
+// checkRunID refuses an ID that cannot name a run.
+func checkRunID(id string) error {
+	if !runID.MatchString(id) {
+		return fmt.Errorf("the run ID %q does not match %s", id, runID)
+	}
+	return nil
+}
+
 // runName is the name of a run's network and of its container.
 func runName(id string) string { return "kiln-run-" + id }
+
+// runLimits are the limits of a run's container, and of its save container:
+// 4 GiB without swap, 2 CPUs, 1024 processes (ADR 0017).
+var runLimits = []string{
+	"--memory", "4g",
+	"--memory-swap", "4g",
+	"--cpus", "2",
+	"--pids-limit", "1024",
+}
 
 // CreateRun creates a run's network, with the proxy attached, and then its
 // container. The container is created, not started: the caller places files in
@@ -39,13 +56,15 @@ func runName(id string) string { return "kiln-run-" + id }
 //   - A container of the name that has started, or that lacks the label, is
 //     refused, and nothing is touched.
 //   - A network of the name without a container is removed. A network left
-//     behind is never reused, since its options cannot be trusted.
+//     behind is never reused, since its options cannot be trusted. One without
+//     the label kiln.run=<ID> is refused, and nothing is touched.
 //
-// When a step fails, everything this call made is removed, also when the
-// context was cancelled.
+// The image is never pulled: one that is not there locally is an error. When a
+// step fails, everything this call made is removed, also when the context was
+// cancelled.
 func CreateRun(ctx context.Context, r Run) error {
-	if !runID.MatchString(r.ID) {
-		return fmt.Errorf("the run ID %q does not match %s", r.ID, runID)
+	if err := checkRunID(r.ID); err != nil {
+		return err
 	}
 	keys := make([]string, 0, len(r.Labels))
 	for k := range r.Labels {
@@ -61,11 +80,12 @@ func CreateRun(ctx context.Context, r Run) error {
 		return err
 	}
 
-	if err := CreateRunNetwork(ctx, name, r.Proxy); err != nil {
+	if err := CreateRunNetwork(ctx, r.ID, r.Proxy); err != nil {
 		return err // CreateRunNetwork leaves nothing behind
 	}
 
 	args := []string{
+		"--pull", "never", // a missing image is an error, never a download
 		"--name", name,
 		"--label", runLabel + "=" + r.ID,
 	}
@@ -78,12 +98,9 @@ func CreateRun(ctx context.Context, r Run) error {
 		"--user", "1000:1000",
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
-		"--init",
-		// 4 GiB without swap, 2 CPUs, 1024 processes (ADR 0017).
-		"--memory", "4g",
-		"--memory-swap", "4g",
-		"--cpus", "2",
-		"--pids-limit", "1024",
+		"--init")
+	args = append(args, runLimits...)
+	args = append(args,
 		"--log-driver", "json-file",
 		// Not a credential: the proxy replaces it (ADR 0017).
 		"--env", "ANTHROPIC_BASE_URL=http://"+r.Proxy+":"+proxyPort,
@@ -93,10 +110,10 @@ func CreateRun(ctx context.Context, r Run) error {
 		"--", r.Image)
 	args = append(args, r.Command...)
 
-	if err := createContainer(ctx, nil, "create", args...); err != nil {
+	if _, err := createContainer(ctx, nil, "create", args...); err != nil {
 		// createContainer removed the container; the network must go as well,
 		// also when the context is what failed the create.
-		if rmErr := RemoveRunNetwork(context.WithoutCancel(ctx), name, r.Proxy); rmErr != nil {
+		if rmErr := RemoveRunNetwork(context.WithoutCancel(ctx), r.ID, r.Proxy); rmErr != nil {
 			err = fmt.Errorf("%w (and removing the network failed: %v)", err, rmErr)
 		}
 		return err
@@ -115,7 +132,7 @@ func removeLeftovers(ctx context.Context, name, id, proxy string) error {
 	if c != nil {
 		switch {
 		case c.label != id:
-			return fmt.Errorf("the container %s has no label %s=%s, so Kiln did not make it; it is left alone", name, runLabel, id)
+			return notOurs("container", name, runLabel+"="+id)
 		case c.state != "created":
 			return fmt.Errorf("the container %s has started (it is %s); it is left alone", name, c.state)
 		}
@@ -127,9 +144,7 @@ func removeLeftovers(ctx context.Context, name, id, proxy string) error {
 		}
 	}
 
-	exists, err := networkExists(ctx, name)
-	if err != nil || !exists {
-		return err
-	}
-	return RemoveRunNetwork(ctx, name, proxy)
+	// RemoveRunNetwork refuses a network without the label, and succeeds when
+	// there is none.
+	return RemoveRunNetwork(ctx, id, proxy)
 }
