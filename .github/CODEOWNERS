@@ -6,6 +6,8 @@
 /.github/ @TheEisbaer
 /cmd/launcher/ @TheEisbaer
 /internal/launcher/ @TheEisbaer
+/cmd/proxy/ @TheEisbaer
+/internal/seal/ @TheEisbaer
 /.claude/ @TheEisbaer
 /CLAUDE.md @TheEisbaer
 /docs/adr/ @TheEisbaer

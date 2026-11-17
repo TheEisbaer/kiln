@@ -16,3 +16,7 @@ status: accepted
 
 - The proxy is attached to one more network per run in flight, and detached when the run's container is removed.
 - The seal must not rest on what else happens to run on the same virtual machine. The POC's own test of the seal (a run cannot reach a host other than the proxy) is what decides on any given machine.
+
+## Settled later
+
+- The measurements above were IPv4 only. On 2026-11-17 a run network with IPv6 off turned out to keep IPv6 on its bridge on the virtual machine, with a link-local address; a container with Docker's default capabilities has `NET_RAW`, sent raw frames to it, and reached the virtual machine's remote login and a published port. A run network is now closed in both families: IPv6 on, with the gateway mode isolated for IPv4 and IPv6, which leaves the bridge with IPv6 off and no address. The proxy has forwarding off in both families, and the seal's test checks both.

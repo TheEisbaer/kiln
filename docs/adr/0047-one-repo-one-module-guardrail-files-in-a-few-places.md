@@ -20,3 +20,4 @@ What is Kiln's own is where guardrail files go. A file that defines a guardrail 
 ## Settled later
 
 - One more named place: Kiln's own stage instructions, in `instructions/` (ADR 0056).
+- The places of the seal, which ADR 0048 names as protected, are `cmd/proxy/` and `internal/seal/`; the image of the proxy is under `images/`.
