@@ -21,7 +21,8 @@ const (
 	credentialVar = "KILN_PROXY_CREDENTIAL"
 )
 
-// listen is the address the proxy serves on, inside its container.
+// listen is the address the proxy serves on, inside its container, in both IPv4
+// and IPv6.
 const listen = ":8080"
 
 func main() {

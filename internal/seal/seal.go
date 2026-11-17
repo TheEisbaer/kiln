@@ -27,8 +27,9 @@ type Proxy struct {
 }
 
 // StartProxy starts the proxy on its ordinary network with packet forwarding
-// switched off, so that it cannot be used as a router between networks (ADR
-// 0041, point 4). The credential reaches docker by the name of a variable and
+// switched off in both families, so that it cannot be used as a router between
+// networks (ADR 0041, point 4). IPv6 forwarding is off by default; it is set
+// anyway, so that the seal does not rest on a default. The credential reaches docker by the name of a variable and
 // not as an argument, where `ps` would show it. On failure nothing is left
 // behind.
 func StartProxy(ctx context.Context, p Proxy, credential string) error {
@@ -36,6 +37,7 @@ func StartProxy(ctx context.Context, p Proxy, credential string) error {
 		"--name", p.Name,
 		"--network", p.Network,
 		"--sysctl", "net.ipv4.ip_forward=0",
+		"--sysctl", "net.ipv6.conf.all.forwarding=0",
 		"--env", upstreamVar+"="+p.Upstream,
 		"--env", credentialVar,
 		p.Image)
@@ -69,16 +71,23 @@ func runDetached(ctx context.Context, env []string, args ...string) error {
 	return err
 }
 
-// CreateRunNetwork creates a network for one run, with no outside connection, no
-// gateway and no IPv6, and attaches the proxy to it (ADR 0041). On failure
-// nothing is left behind.
+// CreateRunNetwork creates a network for one run, with no outside connection and
+// no gateway in either family, and attaches the proxy to it (ADR 0041).
+//
+// IPv6 is on on purpose. With it off, the network's bridge on the engine's host
+// keeps IPv6 on with a link-local address, which a container with NET_RAW
+// reaches by raw frames, and through it the host's services. With IPv6 on and
+// its gateway mode isolated, the bridge has IPv6 off and no address.
+//
+// On failure nothing is left behind.
 func CreateRunNetwork(ctx context.Context, name, proxy string) error {
 	_, err := docker(ctx, nil,
 		"network", "create",
 		"--driver", "bridge",
 		"--internal",
+		"--ipv6",
 		"--opt", "com.docker.network.bridge.gateway_mode_ipv4=isolated",
-		"--ipv6=false",
+		"--opt", "com.docker.network.bridge.gateway_mode_ipv6=isolated",
 		name)
 	if err != nil {
 		return err

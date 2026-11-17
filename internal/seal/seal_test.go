@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -82,23 +83,31 @@ func TestSeal(t *testing.T) {
 	proxyURL := "http://" + proxy + ":" + proxyPort
 
 	t.Run("through the proxy", func(t *testing.T) {
-		var got map[string]string
-		eventually(t, func() error {
-			out, err := execIn(t, probe, "curl", "--silent", "--show-error", "--max-time", "5",
-				"--header", "Authorization: Bearer the-probes-own",
-				"--header", "X-Api-Key: the-probes-own",
-				proxyURL+"/hello")
-			if err != nil {
-				return errors.New(out)
-			}
-			return json.Unmarshal([]byte(out), &got)
-		})
-		if got["path"] != "/hello" {
-			t.Errorf("the upstream saw path %q", got["path"])
-		}
-		if got["authorization"] != "Bearer "+credential || got["x-api-key"] != credential {
-			t.Errorf("the upstream saw Authorization %q and X-Api-Key %q, want the credential in both",
-				got["authorization"], got["x-api-key"])
+		for _, target := range []struct{ what, host string }{
+			{"by its name", proxy},
+			{"at its IPv4 address", ipOn(t, proxy, run1)},
+			{"at its IPv6 address", ip6On(t, proxy, run1)},
+		} {
+			t.Run(target.what, func(t *testing.T) {
+				var got map[string]string
+				eventually(t, func() error {
+					out, err := execIn(t, probe, "curl", "--silent", "--show-error", "--max-time", "5",
+						"--header", "Authorization: Bearer the-probes-own",
+						"--header", "X-Api-Key: the-probes-own",
+						"http://"+net.JoinHostPort(target.host, proxyPort)+"/hello")
+					if err != nil {
+						return errors.New(out)
+					}
+					return json.Unmarshal([]byte(out), &got)
+				})
+				if got["path"] != "/hello" {
+					t.Errorf("the upstream saw path %q", got["path"])
+				}
+				if got["authorization"] != "Bearer "+credential || got["x-api-key"] != credential {
+					t.Errorf("the upstream saw Authorization %q and X-Api-Key %q, want the credential in both",
+						got["authorization"], got["x-api-key"])
+				}
+			})
 		}
 	})
 
@@ -142,16 +151,22 @@ func TestSeal(t *testing.T) {
 			noConnection(t, ipOn(t, upstream, ordinary), upstreamPort)
 		})
 		t.Run("the published port at the ordinary network's gateway", func(t *testing.T) {
-			noConnection(t, gateway(t, ordinary), hostPort)
+			noConnection(t, gateway4(t, ordinary), hostPort)
 		})
 		t.Run("the published port at the default bridge", func(t *testing.T) {
-			noConnection(t, gateway(t, "bridge"), hostPort)
+			noConnection(t, gateway4(t, "bridge"), hostPort)
 		})
-		t.Run("an internet address", func(t *testing.T) {
+		t.Run("an internet address over IPv4", func(t *testing.T) {
 			noConnection(t, "1.1.1.1", "80")
 		})
-		t.Run("the container on the second run network", func(t *testing.T) {
+		t.Run("an internet address over IPv6", func(t *testing.T) {
+			noConnection(t, "2606:4700:4700::1111", "80")
+		})
+		t.Run("the container on the second run network at its IPv4 address", func(t *testing.T) {
 			noConnection(t, ipOn(t, other, run2), upstreamPort)
+		})
+		t.Run("the container on the second run network at its IPv6 address", func(t *testing.T) {
+			noConnection(t, ip6On(t, other, run2), upstreamPort)
 		})
 	})
 
@@ -167,8 +182,27 @@ func TestSeal(t *testing.T) {
 	})
 
 	t.Run("no way out", func(t *testing.T) {
-		if gw := gateway(t, run1); gw != "" {
-			t.Errorf("the run network has the gateway %q", gw)
+		subnets := ipam(t, run1)
+		for _, c := range subnets {
+			if c.Gateway != "" {
+				t.Errorf("the run network has the gateway %q on %s", c.Gateway, c.Subnet)
+			}
+		}
+
+		// The network's bridge, read on the engine's host from a container that
+		// only reads. With IPv6 off on the network, the bridge keeps IPv6 on with
+		// a link-local address, which a run with NET_RAW reaches.
+		bridge := "br-" + must(t, "network", "inspect", run1, "--format", "{{.Id}}")[:12]
+		onHost := func(file string) string {
+			return must(t, "run", "--rm", "--network", "host", "--entrypoint", "cat", toolchainImage, file)
+		}
+		if got := onHost("/proc/sys/net/ipv6/conf/" + bridge + "/disable_ipv6"); got != "1" {
+			t.Errorf("disable_ipv6 of the run network's bridge %s is %q, want 1", bridge, got)
+		}
+		for _, line := range strings.Split(onHost("/proc/net/if_inet6"), "\n") {
+			if f := strings.Fields(line); len(f) == 6 && f[5] == bridge {
+				t.Errorf("the run network's bridge %s has the IPv6 address %s", bridge, f[0])
+			}
 		}
 
 		table := must(t, "exec", probe, "cat", "/proc/net/route")
@@ -176,22 +210,25 @@ func TestSeal(t *testing.T) {
 		if len(routes) != 1 {
 			t.Fatalf("the probe's routing table has %d routes, want only its own subnet:\n%s", len(routes), table)
 		}
-		cidr, _ := ipam(t, run1)
-		_, subnet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			t.Fatal(err)
-		}
+		subnet := subnetOf(t, subnets, false)
 		f := strings.Fields(routes[0])
 		if len(f) < 8 || routeIP(f[1]).String() != subnet.IP.String() || f[2] != "00000000" ||
 			routeIP(f[7]).String() != net.IP(subnet.Mask).String() {
 			t.Errorf("the probe's only route is not its own subnet %s:\n%s", subnet, table)
 		}
 
+		table6 := must(t, "exec", probe, "cat", "/proc/net/ipv6_route")
+		for _, problem := range ipv6RouteProblems(table6, subnetOf(t, subnets, true)) {
+			t.Errorf("the probe's IPv6 routes: %s\n%s", problem, table6)
+		}
+
 		// Read in the proxy's own network namespace, from a container that joins it.
-		got := must(t, "run", "--rm", "--network", "container:"+proxy, "--entrypoint", "cat",
-			toolchainImage, "/proc/sys/net/ipv4/ip_forward")
-		if got != "0" {
-			t.Errorf("ip_forward in the proxy's namespace is %q, want 0", got)
+		for _, setting := range []string{"net/ipv4/ip_forward", "net/ipv6/conf/all/forwarding"} {
+			got := must(t, "run", "--rm", "--network", "container:"+proxy, "--entrypoint", "cat",
+				toolchainImage, "/proc/sys/"+setting)
+			if got != "0" {
+				t.Errorf("%s in the proxy's namespace is %q, want 0", strings.ReplaceAll(setting, "/", "."), got)
+			}
 		}
 	})
 
@@ -331,22 +368,102 @@ func ipOn(t *testing.T, container, network string) string {
 	return must(t, "inspect", container, "--format", `{{(index .NetworkSettings.Networks "`+network+`").IPAddress}}`)
 }
 
-// ipam returns the subnet and the gateway address of a network; the gateway is
-// empty when it has none. The template's own output for a missing one differs
-// between engine versions, so the JSON is read.
-func ipam(t *testing.T, network string) (subnet, gateway string) {
+func ip6On(t *testing.T, container, network string) string {
 	t.Helper()
-	var config []struct{ Subnet, Gateway string }
-	if err := json.Unmarshal([]byte(must(t, "network", "inspect", network, "--format", "{{json .IPAM.Config}}")), &config); err != nil || len(config) != 1 {
-		t.Fatalf("the IPAM configuration of %s: %v, %d entries", network, err, len(config))
+	ip := must(t, "inspect", container, "--format", `{{(index .NetworkSettings.Networks "`+network+`").GlobalIPv6Address}}`)
+	// Without IPv6 the template prints "invalid IP" or nothing, depending on the
+	// engine's version.
+	if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() != nil {
+		t.Fatalf("%s has no IPv6 address on %s (docker printed %q)", container, network, ip)
 	}
-	return config[0].Subnet, config[0].Gateway
+	return ip
 }
 
-func gateway(t *testing.T, network string) string {
+// subnetConfig is one family's entry in a network's IPAM configuration.
+type subnetConfig struct{ Subnet, Gateway string }
+
+// ipam returns a network's IPAM configuration, one entry per family. A gateway
+// is empty when the family has none. The template's own output for a missing
+// one differs between engine versions, so the JSON is read.
+func ipam(t *testing.T, network string) []subnetConfig {
 	t.Helper()
-	_, gw := ipam(t, network)
-	return gw
+	var config []subnetConfig
+	if err := json.Unmarshal([]byte(must(t, "network", "inspect", network, "--format", "{{json .IPAM.Config}}")), &config); err != nil {
+		t.Fatalf("the IPAM configuration of %s: %v", network, err)
+	}
+	return config
+}
+
+// subnetOf returns the subnet of one family.
+func subnetOf(t *testing.T, config []subnetConfig, ipv6 bool) *net.IPNet {
+	t.Helper()
+	for _, c := range config {
+		_, subnet, err := net.ParseCIDR(c.Subnet)
+		if err == nil && (subnet.IP.To4() == nil) == ipv6 {
+			return subnet
+		}
+	}
+	t.Fatalf("no %s subnet in %v", map[bool]string{false: "IPv4", true: "IPv6"}[ipv6], config)
+	return nil
+}
+
+// gateway4 returns the IPv4 gateway address of a network.
+func gateway4(t *testing.T, network string) string {
+	t.Helper()
+	for _, c := range ipam(t, network) {
+		if ip := net.ParseIP(c.Gateway); ip != nil && ip.To4() != nil {
+			return c.Gateway
+		}
+	}
+	t.Fatalf("%s has no IPv4 gateway", network)
+	return ""
+}
+
+// The flags of /proc/net/ipv6_route that the probe's routes are judged by.
+const (
+	rtfReject = 0x0200
+	rtfLocal  = 0x80000000
+)
+
+// ipv6RouteProblems judges a routing table as /proc/net/ipv6_route prints it.
+// It allows routes within the run's subnet, link-local and multicast, none with
+// a next hop. On lo it allows only the kernel's own reject entries and the
+// local route of the loopback address.
+func ipv6RouteProblems(table string, subnet *net.IPNet) []string {
+	linkLocal := &net.IPNet{IP: net.ParseIP("fe80::"), Mask: net.CIDRMask(10, 128)}
+	multicast := &net.IPNet{IP: net.ParseIP("ff00::"), Mask: net.CIDRMask(8, 128)}
+	within := func(dest net.IP, plen int, n *net.IPNet) bool {
+		ones, _ := n.Mask.Size()
+		return n.Contains(dest) && plen >= ones
+	}
+
+	var problems []string
+	for _, line := range strings.Split(strings.TrimSpace(table), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 10 {
+			problems = append(problems, fmt.Sprintf("cannot read the line %q", line))
+			continue
+		}
+		dest, destErr := hex.DecodeString(f[0])
+		plen, plenErr := strconv.ParseUint(f[1], 16, 8)
+		flags, flagsErr := strconv.ParseUint(f[8], 16, 32)
+		if destErr != nil || len(dest) != 16 || plenErr != nil || flagsErr != nil {
+			problems = append(problems, fmt.Sprintf("cannot read the line %q", line))
+			continue
+		}
+		route := fmt.Sprintf("%s/%d on %s", net.IP(dest), plen, f[9])
+		switch {
+		case strings.Trim(f[4], "0") != "":
+			problems = append(problems, route+" has a next hop")
+		case f[9] == "lo":
+			if flags&rtfReject == 0 && !(net.IP(dest).Equal(net.IPv6loopback) && plen == 128 && flags&rtfLocal != 0) {
+				problems = append(problems, route+" is neither a reject entry nor the loopback address")
+			}
+		case !within(dest, int(plen), subnet) && !within(dest, int(plen), linkLocal) && !within(dest, int(plen), multicast):
+			problems = append(problems, route+" is outside the run's subnet, link-local and multicast")
+		}
+	}
+	return problems
 }
 
 func lastField(s, sep string) string {
