@@ -33,7 +33,6 @@ if [ -z "$engine" ]; then
     exit "$status"
 fi
 
-echo "== engine tests"
 # The test program is built for the machine it runs on, not for the image.
 case "$(uname -s)" in
     Darwin) goos=darwin ;;
@@ -46,19 +45,31 @@ case "$(uname -m)" in
     *) echo "engine tests: unsupported machine $(uname -m)" >&2; exit 2 ;;
 esac
 
+# The packages with engine tests. internal/run comes with the run's steps, and
+# is left out while it does not exist.
+packages=
+for pkg in internal/seal internal/run; do
+    if [ -d "$root/$pkg" ]; then packages="$packages ./$pkg"; fi
+done
+
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
-# The program comes out on standard output: a directory of the host's, such as
-# the one mktemp makes on macOS, is not always visible to the engine.
+# The programs come out on standard output, as a tar: a directory of the
+# host's, such as the one mktemp makes on macOS, is not always visible to the
+# engine. One container builds them all, so the standard library is compiled
+# once.
 if docker run --rm --network none \
     --volume "$root:/src:ro" --workdir /src \
     --env GOOS="$goos" --env GOARCH="$goarch" --env CGO_ENABLED=0 \
-    "$image" sh -c 'go test -c -o /tmp/seal.test ./internal/seal && cat /tmp/seal.test' \
-    >"$out/seal.test"; then
-    chmod +x "$out/seal.test"
-    # From the package's directory, as go test would.
-    (cd "$root/internal/seal" && KILN_ENGINE_TESTS=1 "$out/seal.test" -test.v) || status=$?
+    "$image" sh -c 'mkdir /tmp/tests && go test -c -o /tmp/tests/ "$@" && tar -C /tmp/tests -cf - .' sh $packages \
+    >"$out/tests.tar" && tar -xf "$out/tests.tar" -C "$out"; then
+    for pkg in $packages; do
+        test="$out/$(basename "$pkg").test"
+        echo "== engine tests of ${pkg#./}"
+        # From the package's directory, as go test would.
+        (cd "$root/$pkg" && KILN_ENGINE_TESTS=1 "$test" -test.v) || status=$?
+    done
 else
     status=1
 fi
