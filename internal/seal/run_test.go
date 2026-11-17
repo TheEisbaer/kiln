@@ -137,6 +137,11 @@ func TestRun(t *testing.T) {
 				t.Errorf("%s is %q, want 0", field, status[field])
 			}
 		}
+		// The run image's own user is uid 1000 as well, so the uid alone does not
+		// show that CreateRun sets it.
+		if got := must(t, "inspect", "--format", "{{.Config.User}}", probeRun); got != "1000:1000" {
+			t.Errorf("the run's container has the user %q, want 1000:1000", got)
+		}
 		if status["NoNewPrivs"] != "1" {
 			t.Errorf("NoNewPrivs is %q, want 1", status["NoNewPrivs"])
 		}
