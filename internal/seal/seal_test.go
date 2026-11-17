@@ -255,9 +255,12 @@ func TestSeal(t *testing.T) {
 		if err := RemoveRunNetwork(t.Context(), againID, proxy); err != nil {
 			t.Errorf("with the network already gone: %v", err)
 		}
-		// Any other failure is still returned.
-		if err := RemoveRunNetwork(t.Context(), runID("run2"), name("no-such-proxy")); err == nil {
-			t.Error("with a proxy that does not exist: no error")
+		// Any other failure is still returned: run2 still has a container.
+		if err := RemoveRunNetwork(t.Context(), runID("run2"), proxy); err == nil {
+			t.Error("with a container still attached: no error")
+		}
+		if got := must(t, "inspect", "--format", `{{json .NetworkSettings.Networks}}`, other); !strings.Contains(got, `"`+run2+`"`) {
+			t.Errorf("the container on run2 was detached: %s", got)
 		}
 	})
 

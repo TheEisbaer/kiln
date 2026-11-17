@@ -557,6 +557,23 @@ func testRemoveRun(t *testing.T, f fixture) {
 		}
 	})
 
+	t.Run("with no proxy", func(t *testing.T) {
+		gone := Proxy{Name: f.name("gone-proxy"), Image: f.proxyImage, Network: f.proxy.Network, Upstream: f.proxy.Upstream}
+		cleanup(t, "rm", "--force", gone.Name)
+		if err := ReplaceProxy(t.Context(), gone, "echo unused"); err != nil {
+			t.Fatal(err)
+		}
+		id := f.runID("remove-no-proxy")
+		createRun(t, Run{ID: id, Image: f.runImage, Proxy: gone.Name, Command: []string{"true"}})
+		startAndWait(t, id)
+		must(t, "rm", "--force", gone.Name)
+		if err := RemoveRun(t.Context(), id, gone.Name); err != nil {
+			t.Errorf("RemoveRun: %v", err)
+		}
+		assertLeft(t, id, false, false)
+		assertNoSave(t, id)
+	})
+
 	t.Run("a container without kiln.run", func(t *testing.T) {
 		id := f.runID("remove-foreign")
 		cleanupRun(t, Run{ID: id, Proxy: f.proxy.Name})

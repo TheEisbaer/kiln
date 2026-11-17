@@ -205,10 +205,12 @@ func CreateRunNetwork(ctx context.Context, id, proxy string) error {
 // without the label kiln.run=<id> was not made for this run: it is refused, and
 // nothing is touched.
 //
-// It can be repeated (ADR 0035): it succeeds when the proxy is already detached
-// and when the network is already gone. docker answers a failed disconnect with
-// the same exit status as any other failure, so it is judged by asking whether
-// the proxy is still attached. The network is removed by its ID, so that a
+// It can be repeated (ADR 0035): it succeeds when the proxy is already detached,
+// when there is no proxy at all, and when the network is already gone. Whether
+// the proxy exists is asked of the engine first; a proxy that does not exist is
+// not attached, so the network is removed without a disconnect. docker answers
+// a failed disconnect with the same exit status as any other failure, so it is
+// judged by asking whether the proxy is still attached. The network is removed by its ID, so that a
 // network that took the name in between is not touched, and `network rm
 // --force` leaves out only the engine's "not found". Every other failure is
 // returned.
@@ -224,10 +226,16 @@ func RemoveRunNetwork(ctx context.Context, id, proxy string) error {
 	if n.label != id {
 		return notOurs("network", name, runLabel+"="+id)
 	}
-	if _, err := docker(ctx, nil, "network", "disconnect", n.id, proxy); err != nil {
-		attached, inspectErr := attachedTo(ctx, proxy, name)
-		if inspectErr != nil || attached {
-			return err
+	p, err := findContainer(ctx, proxy, proxyLabel)
+	if err != nil {
+		return err
+	}
+	if p != nil {
+		if _, err := docker(ctx, nil, "network", "disconnect", n.id, p.id); err != nil {
+			attached, inspectErr := attachedTo(ctx, p.id, name)
+			if inspectErr != nil || attached {
+				return err
+			}
 		}
 	}
 	_, err = docker(ctx, nil, "network", "rm", "--force", n.id)
