@@ -20,3 +20,7 @@ Elsewhere such tests run automatically because every job gets an engine: hosted 
 
 - Every card that touches this code costs an intervention (ADR 0007). That is accepted because the seal is what the developer's attention is best spent on.
 - A regression in the run path outside the seal shows as failing runs and reaches the developer by the usual rules (ADR 0016).
+
+## Settled later
+
+- Creating a run's network and container, and starting the proxy from the credential command, are functions of `internal/seal`. The caller gives no network, mount, environment or limit. What a run can reach, read and obtain is asserted from inside a run's container in `internal/seal`'s test.

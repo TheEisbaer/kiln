@@ -21,3 +21,7 @@ There is then one Claude Code version per version of Kiln, changed by a card and
 
 - Kiln's layer installs onto images Kiln did not make, so a toolchain image has to meet a short list of requirements.
 - An update that touches Kiln's layer rebuilds one run image per target repo.
+
+## Settled later
+
+- Kiln's layer is `images/run/`. Claude Code is downloaded from the release bucket and checked against a SHA-256 per platform, and a run is user `kiln`, uid 1000, because Claude Code refuses `bypassPermissions` as root.
