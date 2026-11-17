@@ -23,3 +23,4 @@ There are three possible paths: the command line for stage runs, the SDK for sho
 
 - Which part of a run's image is Kiln's, and so where the pinned Claude Code version lives (ADR 0039).
 - How code and instructions get into a run and results out of it (ADR 0038).
+- A run's command line is `sh -c 'exec claude "$@" < /kiln/instruction.md' sh -p --output-format stream-json --verbose --permission-mode bypassPermissions --model <id> --effort <level>`, without `--bare`, so that the repo's `CLAUDE.md` reaches the prompt. The instruction comes on standard input.
