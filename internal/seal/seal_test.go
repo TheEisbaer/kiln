@@ -21,10 +21,8 @@ import (
 // from it.
 const toolchainImage = "kiln-toolchain"
 
-const (
-	proxyPort    = "8080" // cmd/proxy
-	upstreamPort = "8081" // testdata/upstream
-)
+// upstreamPort is where testdata/upstream listens. The proxy's is proxyPort.
+const upstreamPort = "8081"
 
 // TestSeal is a large test (ADR 0031, ADR 0048): it needs the container engine.
 // It builds the proxy, puts a probe on a run's network and asserts that the
