@@ -23,8 +23,3 @@ This follows how others handle it: Google sizes tests by what they may do and de
 ## Consequences
 
 - The limits, the marking of large tests and the list of unreliable tests live in the check configuration, which is a protected path (ADR 0006).
-
-## Settled later
-
-- The checks are one command in the repo, and these rules live in it (ADR 0045).
-- The checks now run on the Git host's own runners and not on the developer's machine (ADR 0049). The rules stand, since those machines vary in speed as well.
