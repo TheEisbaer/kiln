@@ -265,18 +265,24 @@ func TestTick(t *testing.T) {
 			{Command: "card", Config: Config{Data: c.data}, Text: "A second card."},
 			{Command: "core", Config: f.config(c)},
 		} {
+			// A refusal comes at once; one that is not refused is killed.
 			cmd, done := f.start(t, ch)
 			select {
 			case code := <-done:
 				if errOut := cmd.Stderr.(*bytes.Buffer).String(); code == 0 || !strings.Contains(errOut, "another core holds the lock") {
-					t.Fatalf("kiln %s: exit status %d\n%s", ch.Command, code, errOut)
+					t.Errorf("kiln %s: exit status %d\n%s", ch.Command, code, errOut)
 				}
-			case <-time.After(30 * time.Second):
-				t.Fatalf("kiln %s was not refused: it still runs after 30 s", ch.Command)
+			case <-time.After(10 * time.Second):
+				cmd.Process.Signal(syscall.SIGKILL)
+				<-done
+				t.Errorf("kiln %s was not refused: it still ran after 10 s", ch.Command)
 			}
 		}
 		if got := f.snapshot(t, c); got != before {
 			t.Errorf("the store changed:\n%s\nwas\n%s", got, before)
+		}
+		if t.Failed() {
+			t.FailNow()
 		}
 
 		must(t, "exec", "kiln-run-"+c.run, "touch", "/tmp/gate")
