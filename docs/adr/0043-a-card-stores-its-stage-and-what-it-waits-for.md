@@ -37,3 +37,4 @@ A run has no waiting state of its own; a card waits for a run. A run is in fligh
 
 - "The developer's approval" covers confirming a proposed drop, since a spec run ends with one of two results (ADR 0011).
 - A card carries two more facts beside the two lists: its number of send-backs and whether its run was retried (ADR 0054).
+- `change` in `internal/store` is the one place of rule 4, and the 11 valid pairings are one table in its code (ADR 0057).
