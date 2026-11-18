@@ -145,11 +145,10 @@ func TestStreamsAResponseAsItArrives(t *testing.T) {
 }
 
 // heldBody is the request body the proxy's transport reads. It passes reads
-// through until the request's Content-Length bytes have gone. It does not pass
-// on the io.EOF that comes with the last bytes, so that the transport makes the
-// one read after the body's last byte that HTTP/1 makes (net/http, transfer.go).
-// That read waits until release is closed, then reads from the server's body and
-// reports what that returned.
+// through until the request's Content-Length bytes have gone. The next read is
+// the one the HTTP/1 transport always makes after the body's last byte
+// (net/http, transfer.go). It waits until release is closed, then reads from the
+// server's body and reports what that returned.
 type heldBody struct {
 	io.ReadCloser
 	remaining int64
@@ -163,9 +162,6 @@ func (b *heldBody) Read(p []byte) (int, error) {
 	if b.remaining > 0 {
 		n, err := b.ReadCloser.Read(p[:min(int64(len(p)), b.remaining)])
 		b.remaining -= int64(n)
-		if err == io.EOF {
-			err = nil
-		}
 		return n, err
 	}
 	select {
