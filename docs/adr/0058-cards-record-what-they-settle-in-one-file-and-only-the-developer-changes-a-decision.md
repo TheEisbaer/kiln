@@ -12,6 +12,11 @@ Cards therefore write what they settle into one file, `docs/settled.md`, which i
 2. **A decision says what was decided, and the file says what cards settled under it.** Whoever reads a decision reads its section of the file with it. The instructions for the spec, implement and review stages name both.
 3. **The lines are judged like the rest of a card's change.** The spec lists them, the developer approves the spec, and review sends a card back when a line says more or less than the spec (ADR 0015).
 4. **A line that would change what a decision says is not such a line.** It is a question for the developer, and the answer is a change to the decision or a new one.
+5. **A decision is changed in one way.** When a later decision reverses or revises an earlier one:
+   - the new decision states what is decided now and lists what it changes in earlier ones;
+   - the earlier decision keeps its text, and gets the status "superseded by" or "superseded in part by" with the new one's number, and one line at its top saying what no longer holds;
+   - its section in `docs/settled.md` gets a note saying which of its lines no longer hold;
+   - every place that cites the earlier decision, in the decisions, `CONTEXT.md`, `docs/open-points.md` and `docs/settled.md`, is looked up and checked.
 
 ## Considered options
 
