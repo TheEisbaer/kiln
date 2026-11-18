@@ -41,7 +41,3 @@ A public repo on the free plan, with one rule set on the main branch: pull reque
 3. **A pull request runs its own version of the workflow file.** The folder with the workflow files therefore has a code owner, like every guardrail file (ADR 0047). An app also needs a separate permission to change workflow files at all. Kiln's app does not have it and is never given it: on 2026-11-16 the host refused the app's push of a workflow file. Workflow files therefore change only through the developer's own pull request, and it is the host that keeps Kiln from changing them.
 4. **Automatic merging can only be switched on while something is still outstanding.** On a pull request whose checks had already passed the host refused it, and the app merged directly instead. Publishing needs both paths.
 5. **A pull request by the code owner is not held.** With no further approvals required, the developer's own pull request on a protected path was mergeable at once. That fits: the rule exists to hold Kiln, not the developer.
-
-## Settled later
-
-- The engine tests are started by `check/in-image`: always on the host's runner, and on the developer's machine only with `--engine`, so that a test built from a card's branch does not run there unasked (ADR 0048). They are compiled in the toolchain image with the network off and run on the host, since the image has no engine.

@@ -23,9 +23,3 @@ Measured on 2026-11-14: after a hard kill the container's files could still be c
 ## Consequences
 
 - Kubernetes cannot copy files out of a pod that has ended. Placing and collecting files is the one place that is rebuilt at the MVP, where the whole path of a card is tested on k3s in any case. "Ready for Kubernetes without rework" is given up here in exchange for building nothing for it in the POC.
-
-## Settled later
-
-- What is placed in a run, and how: the commit's files under `/work`, owned by the run's user, and the instruction at `/kiln/instruction.md`. The seal writes them as one archive into a container that has never started, and refuses absolute names, `..` and anything but files, directories and symlinks, so nothing else can be placed.
-- The change is collected by saving the working tree in a throwaway container from the run image, with no network, the run's user and limits, and no mounts. The engine pipes the tree from the run's container into it, so nothing of it is unpacked on the developer's machine; what comes back is a tree and a pack of its new objects.
-- A stage's documents and the run's sessions are kept as the archives the engine hands over, `documents.tar` and `session.tar` in the run's record, and are never unpacked on the developer's machine.

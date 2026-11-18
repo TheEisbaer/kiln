@@ -16,10 +16,3 @@ status: accepted
 
 - The proxy is attached to one more network per run in flight, and detached when the run's container is removed.
 - The seal must not rest on what else happens to run on the same virtual machine. The POC's own test of the seal (a run cannot reach a host other than the proxy) is what decides on any given machine.
-
-## Settled later
-
-- The measurements above were IPv4 only. On 2026-11-17 a run network with IPv6 off turned out to keep IPv6 on its bridge on the virtual machine, with a link-local address; a container with Docker's default capabilities has `NET_RAW`, sent raw frames to it, and reached the virtual machine's remote login and a published port. A run network is now closed in both families: IPv6 on, with the gateway mode isolated for IPv4 and IPv6, which leaves the bridge with IPv6 off and no address. The proxy has forwarding off in both families, and the seal's test checks both.
-- As a non-root user a run has no effective capabilities whatever is dropped, and the bounding set matters only through setuid and file-capability programs. A run's container drops all capabilities and sets `no-new-privileges`, by the developer's decision of 2026-11-17.
-- A run's network carries the label `kiln.run` with the run's ID, as its container does. The seal removes or attaches to a network of a run's name only with that label, and refuses one without it. A proxy whose container does not exist is not attached, so a run's network is removed without it, by the developer's decision of 2026-11-17.
-- A run's network is created, and attached to, only for a proxy that carries the label `kiln.proxy`. One without it is refused before anything is created and left untouched, so that a mistyped proxy does not put another container on a run's network, by the developer's decision of 2026-11-17.

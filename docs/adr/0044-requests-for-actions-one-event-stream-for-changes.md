@@ -23,7 +23,3 @@ The UI reads and acts through plain requests over HTTP, and learns about changes
 
 - There is one way to learn about changes; the UI does not also poll.
 - Watching a run's output live, if it is wanted, can use the same kind of stream. Talking to a run would need the two-way connection and is its own decision (ADR 0020).
-
-## Settled later
-
-- The stream also carries the entries of the instance, such as a pause (ADR 0055).

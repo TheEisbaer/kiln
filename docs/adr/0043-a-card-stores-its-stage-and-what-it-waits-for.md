@@ -32,9 +32,3 @@ A run has no waiting state of its own; a card waits for a run. A run is in fligh
 
 - **One field with a value for every combination**: one thing to look at, but values multiply with every addition, and "everything that waits for the developer" becomes a list to keep up to date.
 - **Only the stage stored, the rest worked out each time**: nothing can drift, but "needs you" and an approval are decisions, not facts that can be read off elsewhere, so the core would have to decide from the history, against ADR 0042.
-
-## Settled later
-
-- "The developer's approval" covers confirming a proposed drop, since a spec run ends with one of two results (ADR 0011).
-- A card carries two more facts beside the two lists: its number of send-backs and whether its run was retried (ADR 0054).
-- `change` in `internal/store` is the one place of rule 4, and the 11 valid pairings are one table in its code (ADR 0057).

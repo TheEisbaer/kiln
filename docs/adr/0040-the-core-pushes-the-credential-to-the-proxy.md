@@ -21,7 +21,3 @@ ADR 0017 says the proxy "needs the renewable secret". It does not: the proxy hol
 - Renewal needs the core. If the core is down for minutes exactly when the credential expires, runs in flight fail and are retried once (ADR 0016). Measured on 2026-11-14 and 2026-11-16: Claude Code retries a refused credential and a refused connection ten times over two to three minutes, and a restart of the core takes seconds.
 - A refused credential shows in a run's output within about a second, and it differs there from a lost connection and from any other failure. The core can therefore tell a failure that is about the instance (ADR 0016) from one that is about a run, and need not wait for the retries to run out.
 - On Kubernetes the command runs wherever the core runs, which puts the renewable secret in the cluster. That is the decision ADR 0017 names, and it is made when Kubernetes arrives.
-
-## Settled later
-
-- Whether runs that lose the credential while the core is down use up a card's retry, or pause the instance as rule 3 of ADR 0016 says for a failure of the instance, is listed in docs/open-points.md.

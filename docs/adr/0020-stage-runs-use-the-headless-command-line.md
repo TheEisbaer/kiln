@@ -18,9 +18,3 @@ There are three possible paths: the command line for stage runs, the SDK for sho
 - Kiln depends on the format of the headless event stream, which carries no stated stability guarantee; pinning the version is what contains that.
 - Kiln's own implementation language is not constrained by the SDK's languages.
 - Anthropic's documentation says third-party products may not offer claude.ai login without approval. The developer's gateway setup is unaffected, but it limits how a public Kiln can be used and has to be settled before going public.
-
-## Settled later
-
-- Which part of a run's image is Kiln's, and so where the pinned Claude Code version lives (ADR 0039).
-- How code and instructions get into a run and results out of it (ADR 0038).
-- A run's command line is `sh -c 'exec claude "$@" < /kiln/instruction.md' sh -p --output-format stream-json --verbose --permission-mode bypassPermissions --model <id> --effort <level>`, without `--bare`, so that the repo's `CLAUDE.md` reaches the prompt. The instruction comes on standard input.
