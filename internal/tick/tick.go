@@ -284,14 +284,14 @@ func (c *core) card(ctx context.Context, id int64) error {
 	var starting func() error
 	switch decide(inFlight, container, recorded) {
 	case start:
-		fmt.Fprintf(c.out, "card %d: run %s starts\n", id, row.ID)
 		starting = func() error {
 			at("before-add")
-			err := c.store.AddRun(*row)
-			if err == nil {
-				at("after-add")
+			if err := c.store.AddRun(*row); err != nil {
+				return err
 			}
-			return err
+			at("after-add")
+			fmt.Fprintf(c.out, "card %d: run %s starts\n", id, row.ID)
+			return nil
 		}
 	case carry:
 		fmt.Fprintf(c.out, "card %d: run %s goes on\n", id, row.ID)
