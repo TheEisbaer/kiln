@@ -22,3 +22,4 @@ Everything Kiln knows about cards and runs lives in a single embedded database f
 ## Settled later
 
 - The file is SQLite, and `sqlite3 <file> .dump` is the readable export of rule 2 (ADR 0057).
+- The schema is version 2: besides cards and their entries, an `instance` table with one row, the instance's identity of eight hex digits, and a `runs` table with one row per run, with a run's ending empty while it is in flight. A run's row is kept for good, so that the measures can count it (ADR 0029, ADR 0030); the files of its record stay until its card is done or dropped (ADR 0053), and are removed by the card that first ends a card.
