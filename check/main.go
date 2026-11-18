@@ -32,7 +32,7 @@ func main() {
 }
 
 // dockerStep is the name of the step that keeps the docker command in the seal.
-const dockerStep = "docker only in internal/seal"
+const dockerStep = "the docker command only in internal/seal"
 
 // step is one step of the check.
 type step struct {

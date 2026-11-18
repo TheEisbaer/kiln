@@ -32,6 +32,10 @@ func checkRunID(id string) error {
 	return nil
 }
 
+// CheckRunID refuses an ID that cannot name a run, so that a caller can judge
+// an ID before it uses it for anything else.
+func CheckRunID(id string) error { return checkRunID(id) }
+
 // runName is the name of a run's network and of its container.
 func runName(id string) string { return "kiln-run-" + id }
 
@@ -59,11 +63,15 @@ var runLimits = []string{
 //     behind is never reused, since its options cannot be trusted. One without
 //     the label kiln.run=<ID> is refused, and nothing is touched.
 //
-// The image is never pulled: one that is not there locally is an error. When a
-// step fails, everything this call made is removed, also when the context was
-// cancelled.
+// The proxy must carry the label kiln.proxy; one without it, or none, is
+// refused first, and nothing is touched. The image is never pulled: one that is
+// not there locally is an error. When a step fails, everything this call made
+// is removed, also when the context was cancelled.
 func CreateRun(ctx context.Context, r Run) error {
 	if err := checkRunID(r.ID); err != nil {
+		return err
+	}
+	if _, err := kilnProxy(ctx, r.Proxy); err != nil {
 		return err
 	}
 	keys := make([]string, 0, len(r.Labels))

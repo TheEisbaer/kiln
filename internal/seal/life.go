@@ -239,15 +239,9 @@ func AttachProxy(ctx context.Context, id, proxy string) error {
 	if n.label != id {
 		return notOurs("network", name, runLabel+"="+id)
 	}
-	p, err := findContainer(ctx, proxy, proxyLabel)
+	p, err := kilnProxy(ctx, proxy)
 	if err != nil {
 		return err
-	}
-	if p == nil {
-		return fmt.Errorf("there is no proxy %s", proxy)
-	}
-	if p.label == "" {
-		return notOurs("container", proxy, proxyLabel)
 	}
 	attached, err := attachedTo(ctx, p.id, name)
 	if err != nil || attached {

@@ -337,6 +337,28 @@ func TestRun(t *testing.T) {
 			assertLeft(t, r.ID, false, false)
 		})
 
+		// A mistyped proxy names a container that is not Kiln's. It is not put on
+		// a run's network, where the run could reach it, and it is not touched.
+		t.Run("with a proxy that lacks kiln.proxy", func(t *testing.T) {
+			foreign := name("foreign-proxy")
+			must(t, "create", "--name", foreign, "--network", ordinary, upstreamImage)
+			cleanup(t, "rm", "--force", foreign)
+			before := must(t, "inspect", "--format", "{{.Id}} {{.State.Status}} {{json .NetworkSettings.Networks}}", foreign)
+			r := Run{ID: runID("foreign-proxy"), Image: runImage, Proxy: foreign}
+			cleanupRun(t, r)
+			if err := CreateRun(t.Context(), r); err == nil || !strings.Contains(err.Error(), proxyLabel) {
+				t.Errorf("CreateRun: want a refusal for the label %s, got %v", proxyLabel, err)
+			}
+			assertLeft(t, r.ID, false, false)
+			if err := CreateRunNetwork(t.Context(), r.ID, foreign); err == nil || !strings.Contains(err.Error(), proxyLabel) {
+				t.Errorf("CreateRunNetwork: want a refusal for the label %s, got %v", proxyLabel, err)
+			}
+			assertLeft(t, r.ID, false, false)
+			if got := must(t, "inspect", "--format", "{{.Id}} {{.State.Status}} {{json .NetworkSettings.Networks}}", foreign); got != before {
+				t.Errorf("the container that lacks kiln.proxy was touched:\nbefore %s\nafter  %s", before, got)
+			}
+		})
+
 		t.Run("with an image that does not exist", func(t *testing.T) {
 			r := Run{ID: runID("no-image"), Image: name("no-such-image"), Proxy: proxy.Name}
 			cleanupRun(t, r)

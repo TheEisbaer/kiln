@@ -20,8 +20,9 @@ const sealDir = "internal/seal"
 const dockerCommand = "dock" + "er"
 
 // dockerOutsideSeal returns, in a stable order, every Go file in fsys outside
-// internal/seal/ that is not a test and contains the string literal "docker".
-// It stops a slip, not an evasion: a name put together at run time passes.
+// internal/seal/ that is not a test and contains a string literal that names
+// the docker command (namesDocker). It stops a slip, not an evasion: a name put
+// together at run time passes.
 func dockerOutsideSeal(fsys fs.FS) ([]string, error) {
 	var found []string
 	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
@@ -48,7 +49,7 @@ func dockerOutsideSeal(fsys fs.FS) ([]string, error) {
 		named := false
 		ast.Inspect(file, func(n ast.Node) bool {
 			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				if v, err := strconv.Unquote(lit.Value); err == nil && v == dockerCommand {
+				if v, err := strconv.Unquote(lit.Value); err == nil && namesDocker(v) {
 					named = true
 				}
 			}
@@ -63,8 +64,16 @@ func dockerOutsideSeal(fsys fs.FS) ([]string, error) {
 	return found, err
 }
 
+// namesDocker reports whether a string literal names the docker command: its
+// first word is "docker", as in "docker" or a shell line "docker ps", or a path
+// that ends in "/docker", as in "/usr/bin/docker".
+func namesDocker(s string) bool {
+	words := strings.Fields(s)
+	return len(words) > 0 && (words[0] == dockerCommand || strings.HasSuffix(words[0], "/"+dockerCommand))
+}
+
 // dockerOnlyInSeal fails when a Go file outside internal/seal/ that is not a
-// test contains the string literal "docker".
+// test contains a string literal that names the docker command.
 func dockerOnlyInSeal(fsys fs.FS) error {
 	found, err := dockerOutsideSeal(fsys)
 	if err != nil {

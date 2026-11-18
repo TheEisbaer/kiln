@@ -172,13 +172,21 @@ func createContainer(ctx context.Context, env []string, verb string, args ...str
 // reaches by raw frames, and through it the host's services. With IPv6 on and
 // its gateway mode isolated, the bridge has IPv6 off and no address.
 //
+// The proxy must carry the label kiln.proxy. One without it, or none at all,
+// is refused before anything is created, and nothing is touched: a mistyped
+// proxy would otherwise put another container on the run's network.
+//
 // On failure nothing is left behind.
 func CreateRunNetwork(ctx context.Context, id, proxy string) error {
 	if err := checkRunID(id); err != nil {
 		return err
 	}
+	p, err := kilnProxy(ctx, proxy)
+	if err != nil {
+		return err
+	}
 	name := runName(id)
-	_, err := docker(ctx, nil,
+	_, err = docker(ctx, nil,
 		"network", "create",
 		"--driver", "bridge",
 		"--internal",
@@ -190,7 +198,9 @@ func CreateRunNetwork(ctx context.Context, id, proxy string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := docker(ctx, nil, "network", "connect", name, proxy); err != nil {
+	// By ID, so that a container that took the proxy's name in between is not
+	// attached.
+	if _, err := docker(ctx, nil, "network", "connect", name, p.id); err != nil {
 		// The context may be what failed the connect, and the network must go anyway.
 		if _, rmErr := docker(context.WithoutCancel(ctx), nil, "network", "rm", name); rmErr != nil {
 			err = fmt.Errorf("%w (and removing the network failed: %v)", err, rmErr)
@@ -198,6 +208,22 @@ func CreateRunNetwork(ctx context.Context, id, proxy string) error {
 		return err
 	}
 	return nil
+}
+
+// kilnProxy finds the proxy container of a name and refuses one without the
+// label kiln.proxy, or none.
+func kilnProxy(ctx context.Context, proxy string) (*foundContainer, error) {
+	p, err := findContainer(ctx, proxy, proxyLabel)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, fmt.Errorf("there is no proxy %s", proxy)
+	}
+	if p.label == "" {
+		return nil, notOurs("container", proxy, proxyLabel)
+	}
+	return p, nil
 }
 
 // RemoveRunNetwork detaches the proxy from the network of a run and removes the

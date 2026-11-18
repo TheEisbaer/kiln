@@ -22,3 +22,7 @@ While the core is down, runs finish, pull requests merge and ceilings pass, so t
 
 - Every step the core takes must be safe to repeat.
 - Kiln reacts with a delay of up to one tick.
+
+## Settled later
+
+- A run's work is saved, then the run is recorded, and only then is its container removed (rule 3). The same command started again is a repeat of the run and not a retry: each step looks at what is there and goes on from it, so a repeat uses up nothing of ADR 0016.

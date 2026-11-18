@@ -43,3 +43,4 @@ Effort is set per stage, starting from Anthropic's defaults for Claude Code (`me
 ## Settled later
 
 - That a send-back happened is read from the number of send-backs on the card (ADR 0054). A session that is resumed after a send-back continues on the stronger model (ADR 0053).
+- The core compares the model that a run's first event, `system/init`, names with the one it gave. A run on another model is stopped, saved and recorded with the model seen, and the command exits non-zero. Claude Code 2.1.326's output does not show the effort, so the effort recorded is the one given.

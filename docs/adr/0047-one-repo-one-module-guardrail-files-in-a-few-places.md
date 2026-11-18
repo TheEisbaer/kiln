@@ -22,3 +22,5 @@ What is Kiln's own is where guardrail files go. A file that defines a guardrail 
 - One more named place: Kiln's own stage instructions, in `instructions/` (ADR 0056).
 - The places of the seal, which ADR 0048 names as protected, are `cmd/proxy/` and `internal/seal/`; the image of the proxy is under `images/`.
 - Only `internal/seal` runs the `docker` command. A step of the check command fails when a Go file outside it that is not a test contains the string literal `"docker"`; it stops a slip, not an evasion.
+- The core is `cmd/core`, built as `kiln`, and the steps of a run are `internal/run`, not `internal/core`: a package named after the whole core would take everything. Both call `internal/seal` and do not run the `docker` command.
+- The step of the check command also fails on a string literal whose first word is `docker`, as in a shell line, or that is a path ending in `/docker`.
