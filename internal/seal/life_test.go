@@ -71,10 +71,13 @@ func testPlacing(t *testing.T, report probeReport, diff string) {
 		}
 	}
 
-	if !strings.Contains(diff, "A /work/probe\n") || !strings.Contains(diff, "A /kiln/instruction.md") {
+	// The engine promises no order for these lines, so they are looked up, not
+	// searched for as text: a line that comes last has no newline after it.
+	lines := strings.Split(diff, "\n")
+	if !slices.Contains(lines, "A /work/probe") || !slices.Contains(lines, "A /kiln/instruction.md") {
 		t.Errorf("docker diff does not show the placed files:\n%s", diff)
 	}
-	for _, line := range strings.Split(diff, "\n") {
+	for _, line := range lines {
 		_, p, _ := strings.Cut(line, " ")
 		if p != "/work" && p != "/kiln" && !strings.HasPrefix(p, "/work/") && !strings.HasPrefix(p, "/kiln/") {
 			t.Errorf("docker diff shows a change outside /work and /kiln: %q", line)
