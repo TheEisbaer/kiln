@@ -75,6 +75,9 @@ func asKiln(spec string) int {
 	return 2
 }
 
+// names are the actions' names, for the test's messages.
+var names = map[action]string{start: "start", carry: "carry", gone: "gone", leave: "leave"}
+
 // TestDecide checks every row of the table of what a tick does for a card
 // that waits for a run.
 func TestDecide(t *testing.T) {
@@ -100,7 +103,7 @@ func TestDecide(t *testing.T) {
 		{"in flight, dead", true, "dead", false, leave},
 	} {
 		if got := decide(row.inFlight, row.container, row.recorded); got != row.want {
-			t.Errorf("%s: %v, want %v", row.what, got, row.want)
+			t.Errorf("%s: %s, want %s", row.what, names[got], names[row.want])
 		}
 	}
 }

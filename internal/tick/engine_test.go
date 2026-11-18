@@ -261,13 +261,19 @@ func TestTick(t *testing.T) {
 		f.waitAtGate(t, c)
 		before := f.snapshot(t, c)
 
-		code, _, errOut := f.kiln(t, child{Command: "card", Config: Config{Data: c.data}, Text: "A second card."})
-		if code == 0 || !strings.Contains(errOut, "another core holds the lock") {
-			t.Errorf("kiln card: exit status %d\n%s", code, errOut)
-		}
-		code, _, errOut = f.kiln(t, child{Command: "core", Config: f.config(c)})
-		if code == 0 || !strings.Contains(errOut, "another core holds the lock") {
-			t.Errorf("a second kiln core: exit status %d\n%s", code, errOut)
+		for _, ch := range []child{
+			{Command: "card", Config: Config{Data: c.data}, Text: "A second card."},
+			{Command: "core", Config: f.config(c)},
+		} {
+			cmd, done := f.start(t, ch)
+			select {
+			case code := <-done:
+				if errOut := cmd.Stderr.(*bytes.Buffer).String(); code == 0 || !strings.Contains(errOut, "another core holds the lock") {
+					t.Fatalf("kiln %s: exit status %d\n%s", ch.Command, code, errOut)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatalf("kiln %s was not refused: it still runs after 30 s", ch.Command)
+			}
 		}
 		if got := f.snapshot(t, c); got != before {
 			t.Errorf("the store changed:\n%s\nwas\n%s", got, before)
@@ -475,6 +481,9 @@ func (f *fixture) waitAtGate(t *testing.T, c *testCase) {
 func (f *fixture) waitEnded(t *testing.T, c *testCase) {
 	t.Helper()
 	waitUntil(t, "the card's run has ended and is removed", func() bool {
+		if n := c.starts.count(); n > 1 {
+			t.Fatalf("the instance's containers started %d times, want 1", n)
+		}
 		s := f.open(t, c)
 		card, err := s.Card(1)
 		s.Close()
