@@ -33,6 +33,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 - Whether a run has been retried is a fact on the card (ADR 0054).
 - That the instance is paused is state of the instance, kept in the store with its own history (ADR 0055).
+- Until the retry card, a failed run is not retried: it moves its card to "needs you", in spec waiting for the developer, with the run's reason on the entry that ends it. Finished and failed are told apart by the run's record (ADR 0043). A missing result and a kill for memory are still the retry card's (card 8, 2026-11-18).
 
 ## ADR 0017: Every run is sealed, and credentials stay behind a proxy
 
@@ -101,6 +102,11 @@ A line says what was settled and, where it matters, when and by which card. The 
 ## ADR 0035: The core keeps nothing in memory that matters; it reconciles the store, the container engine and the Git host
 
 - A run's work is saved, then the run is recorded, and only then is its container removed (rule 3). The same command started again is a repeat of the run and not a retry: each step looks at what is there and goes on from it, so a repeat uses up nothing of ADR 0016.
+- One core at a time holds a data directory: `kiln core` takes `flock` on `<dir>/lock` for the life of its process, and a second core, or `kiln card`, is refused. The kernel drops the lock with the process, also when a child such as `docker logs` lives on. The store's unique index refuses a second run in flight per card as well, since a lock alone does not guarantee one holder (card 8, 2026-11-18).
+- The engine's things are known as an instance's by the label `kiln.instance` with the instance's eight hex digits, beside `kiln.run`, on a run's network and container (rule 2). Every tick sweeps first: what carries both labels and is not in flight in the store is removed (rule 4). Nothing without both labels is touched, and `kiln run` by hand sets no instance, so no core lists what it made (card 8).
+- A run is written to the store between placing its container and starting it, so that a kill before leaves a container that never started, which the sweep removes, and a kill after leaves a run whose container is created again and started once. A run in the store is never created again: one with no container and nothing recorded is failed (rule 4) (card 8).
+- At a run's end the work is saved, then `result.json` is written, then the store, and only then are the container and network removed (rule 3) (card 8).
+- A run's ID is `<instance>-<card>-<number of the card's runs + 1>`. It is the same on every tick until the run is in the store, and the engine allows one container per name, so a wait gets one run (card 8).
 
 ## ADR 0037: Kiln is built in a sealed container, and the core contains no C code
 
@@ -137,10 +143,12 @@ A line says what was settled and, where it matters, when and by which card. The 
 - "The developer's approval" covers confirming a proposed drop, since a spec run ends with one of two results (ADR 0011).
 - A card carries two more facts beside the two lists: its number of send-backs and whether its run was retried (ADR 0054).
 - `change` in `internal/store` is the one place of rule 4, and the 11 valid pairings are one table in its code (ADR 0057).
+- A run's ending is read off its record: finished when its container exited with 0, the result is `success`, the model is the one asked for, and the work is saved or nothing changed; failed otherwise. Until the retry card a failed run moves its card to "needs you" (ADR 0016). Until the stage cards a card waits in spec for a run, which is told the card's text; a finished run moves it to wait for the developer's approval (card 8, 2026-11-18).
 
 ## ADR 0044: The UI sends requests; the core tells it about changes over one one-way event stream
 
 - The stream also carries the entries of the instance, such as a pause (ADR 0055).
+- Until the API comes, `kiln card --data <dir> <text>` stands in for it: it writes a card that waits in spec for a run. It takes the core's lock, so it never writes beside a running core (rule 5). The API card removes it in the pull request that adds the API (card 8, 2026-11-18).
 
 ## ADR 0045: Kiln's checks are one command that runs the tools directly in the toolchain image
 

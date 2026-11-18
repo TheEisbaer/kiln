@@ -6,7 +6,8 @@
 # Claude Code is pinned by version and by the SHA-256 of each platform's binary,
 # from that release's manifest.json. A card that changes the pin reads Claude
 # Code's changelog between the two versions, and updates the test data that
-# follows the pin: the scripted upstream in internal/run/testdata/claude/.
+# follows the pin: the scripted upstream in internal/run/testdata/claude/, and
+# the stand-in for Claude Code in internal/tick/testdata/claude/.
 ARG TOOLCHAIN=kiln-toolchain
 FROM ${TOOLCHAIN}
 
