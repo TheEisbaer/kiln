@@ -7,3 +7,11 @@ FROM golang:1.27.4@sha256:fe517acaa580cc7915457080f850c37e618b3c1e750f98b58fc642
 # runs with the network off and on a mounted copy that Git may not trust.
 ENV GOTOOLCHAIN=local \
     GOFLAGS=-buildvcs=false
+
+# The modules of go.mod and go.sum come with the image, so that the check finds
+# them with the network off. The copies are removed, and the proxy is turned off
+# afterwards: a module the image lacks fails with "module lookup disabled", not
+# with a network error. The build context is these two files and this one.
+COPY go.mod go.sum /tmp/modules/
+RUN cd /tmp/modules && go mod download && rm -rf /tmp/modules
+ENV GOPROXY=off
