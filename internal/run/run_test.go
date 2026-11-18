@@ -603,24 +603,130 @@ func (f *fixture) assertDone(t *testing.T, c testCase) {
 	// effort, the marker and the fake credential.
 	logs := must(t, "logs", f.upstream)
 	var requests []map[string]any
+	var lines []string // the case's lines of the upstream's log, both kinds
 	for _, line := range strings.Split(logs, "\n") {
 		var r map[string]any
-		if json.Unmarshal([]byte(line), &r) == nil && r["case"] == "kiln-case-"+c.name {
+		if json.Unmarshal([]byte(line), &r) != nil || r["case"] != "kiln-case-"+c.name {
+			continue
+		}
+		lines = append(lines, line)
+		if r["kind"] == "request" {
 			requests = append(requests, r)
 		}
 	}
+	explained := false
+	explain := func() {
+		if !explained {
+			explained = true
+			f.explain(t, c, lines)
+		}
+	}
 	if len(requests) != 2 {
-		t.Fatalf("the upstream saw %d requests of the case, want 2:\n%v", len(requests), requests)
+		explain()
+		t.Fatalf("the upstream saw %d requests of the case, want 2", len(requests))
 	}
 	for i, r := range requests {
 		want := map[string]any{"method": "POST", "path": "/v1/messages", "model": model, "effort": effort,
 			"x_api_key": f.credential, "marker": true, "tool_result": i == 1}
 		for k, v := range want {
 			if r[k] != v {
+				explain()
 				t.Errorf("request %d: %s is %v, want %v", i+1, k, r[k], v)
 			}
 		}
 	}
+}
+
+// explain prints what tells apart why a case's requests were not what the test
+// expects: the upstream's lines of the case, with the time, the client's
+// address, Claude Code's session, its SDK's retry count and the shape of each
+// request, and how each answer went; the kinds of the events in the run's
+// record, in order, and in full those that are not of the four ordinary kinds;
+// the system entries of its session, which name the error behind a retry; the
+// run's standard error; and the proxy's log.
+func (f *fixture) explain(t *testing.T, c testCase, lines []string) {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "the upstream's lines of kiln-case-%s:\n", c.name)
+	for _, line := range lines {
+		fmt.Fprintf(&b, "  %s\n", line)
+	}
+
+	dir := filepath.Join(f.runs, c.id)
+	if output, err := os.ReadFile(filepath.Join(dir, "output.jsonl")); err != nil {
+		fmt.Fprintf(&b, "output.jsonl: %v\n", err)
+	} else {
+		var kinds, unusual []string
+		for _, line := range strings.Split(string(output), "\n") {
+			var e struct{ Type, Subtype string }
+			if line == "" || json.Unmarshal([]byte(line), &e) != nil {
+				if line != "" {
+					unusual = append(unusual, line)
+				}
+				continue
+			}
+			kind := e.Type
+			if e.Type == "system" || e.Type == "result" {
+				kind += "/" + e.Subtype
+			}
+			kinds = append(kinds, kind)
+			switch {
+			case kind == "system/init", e.Type == "assistant", e.Type == "user", e.Type == "result":
+			default:
+				unusual = append(unusual, line)
+			}
+		}
+		fmt.Fprintf(&b, "the events of output.jsonl, in order: %s\n", strings.Join(kinds, ", "))
+		for _, line := range unusual {
+			if len(line) > 2000 {
+				line = line[:2000] + "…"
+			}
+			fmt.Fprintf(&b, "  unusual: %s\n", line)
+		}
+	}
+	// The session holds what output.jsonl does not: the error behind an
+	// api_retry event, as a system entry of the kind api_error (read in a
+	// session of Claude Code 2.1.326 whose connection was cut).
+	if session, err := os.Open(filepath.Join(dir, "session.tar")); err != nil {
+		fmt.Fprintf(&b, "session.tar: %v\n", err)
+	} else {
+		tr := tar.NewReader(session)
+		for {
+			h, err := tr.Next()
+			if err != nil {
+				if err != io.EOF {
+					fmt.Fprintf(&b, "session.tar: %v\n", err)
+				}
+				break
+			}
+			if !strings.HasSuffix(h.Name, ".jsonl") {
+				continue
+			}
+			data, _ := io.ReadAll(tr)
+			for _, line := range strings.Split(string(data), "\n") {
+				var e struct{ Type string }
+				if json.Unmarshal([]byte(line), &e) == nil && e.Type == "system" {
+					if len(line) > 2000 {
+						line = line[:2000] + "…"
+					}
+					fmt.Fprintf(&b, "  session %s: %s\n", h.Name, line)
+				}
+			}
+		}
+		session.Close()
+	}
+	if stderr, err := os.ReadFile(filepath.Join(dir, "stderr.txt")); err != nil {
+		fmt.Fprintf(&b, "stderr.txt: %v\n", err)
+	} else {
+		fmt.Fprintf(&b, "stderr.txt: %q\n", stderr)
+	}
+	// The proxy logs to its standard error.
+	if proxy, err := exec.Command("docker", "logs", "--tail", "50", f.proxy.Name).CombinedOutput(); err != nil {
+		fmt.Fprintf(&b, "the proxy's log: %v\n", err)
+	} else {
+		fmt.Fprintf(&b, "the proxy's log, its last 50 lines:\n%s\n", proxy)
+	}
+	t.Log(b.String())
 }
 
 // assertNoRecord asserts that a case's run has no record, nor a partial one.
