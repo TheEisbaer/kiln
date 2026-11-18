@@ -18,3 +18,7 @@ The price is a permanent restriction: the core contains no C code, because a pro
 
 - Go code compiled into the core still runs on the developer's machine; what is sealed is the build.
 - Images for more than one architecture are a matter for a public Kiln and are decided then.
+
+## Settled later
+
+- The database is pure Go: SQLite translated to Go, through `ncruces/go-sqlite3` (ADR 0057).

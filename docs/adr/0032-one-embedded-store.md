@@ -18,3 +18,7 @@ Everything Kiln knows about cards and runs lives in a single embedded database f
 
 - One instance writes to the store at a time, which matches one instance per developer.
 - The instance's own copies of target repos (ADR 0013) are git repositories on disk and are not part of the store.
+
+## Settled later
+
+- The file is SQLite, and `sqlite3 <file> .dump` is the readable export of rule 2 (ADR 0057).

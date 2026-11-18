@@ -22,3 +22,4 @@ Kiln is judged by measures it counts itself (ADR 0007): interventions per merged
 ## Settled later
 
 - A card carries two more facts beside its stage and what it waits for, so that no rule has to read the history (ADR 0054).
+- The one place is `change` in `internal/store`: one transaction that checks, writes the card and writes its entry (ADR 0057).

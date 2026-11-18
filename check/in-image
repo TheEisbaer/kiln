@@ -21,7 +21,10 @@ esac
 root=$(cd "$(dirname "$0")/.." && pwd)
 image=kiln-toolchain
 
-docker build --quiet --tag "$image" "$root/images/toolchain" >/dev/null
+# The context is exactly go.mod, go.sum and the Dockerfile: the image downloads
+# the modules of the first two, and nothing else of the repo is sent to the engine.
+tar -C "$root" -cf - go.mod go.sum images/toolchain/Dockerfile |
+    docker build --quiet --tag "$image" --file images/toolchain/Dockerfile - >/dev/null
 
 status=0
 docker run --rm --network none \

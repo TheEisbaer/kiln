@@ -30,3 +30,4 @@ The rules of ADR 0031 (sizes, per-test limits, CPU time, the list of unreliable 
 ## Settled later
 
 - "The same everywhere" holds for what the check command can run inside the toolchain image. Tests that need the container engine run in the checks on the host only (ADR 0049); how they are started there is settled by the first card that has such a test.
+- The toolchain image carries the Go modules of `go.mod` and `go.sum`, downloaded when it is built, so that the check finds them with the network off (ADR 0057).
