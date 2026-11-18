@@ -48,10 +48,10 @@ case "$(uname -m)" in
     *) echo "engine tests: unsupported machine $(uname -m)" >&2; exit 2 ;;
 esac
 
-# The packages with engine tests. internal/run comes with the run's steps, and
-# is left out while it does not exist.
+# The packages with engine tests. internal/tick comes after the other two, so
+# that the run image it builds comes from the cache.
 packages=
-for pkg in internal/seal internal/run; do
+for pkg in internal/seal internal/run internal/tick; do
     if [ -d "$root/$pkg" ]; then packages="$packages ./$pkg"; fi
 done
 

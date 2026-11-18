@@ -15,12 +15,30 @@ type Run struct {
 	Image   string            // the run image (ADR 0039)
 	Proxy   string            // the proxy container's name
 	Command []string          // the container's arguments, after the image
-	Labels  map[string]string // extra labels; kiln.run cannot be among them
+	Labels  map[string]string // extra labels; kiln.run and kiln.instance cannot be among them
+	// The instance the run belongs to, carried by the label kiln.instance on
+	// its network and container, by which ListRuns finds it. A run started by
+	// hand has none, so no core lists it.
+	Instance string
 }
 
 // runLabel carries a run's ID on its container (ADR 0035, point 2), and marks
 // the container as Kiln's.
 const runLabel = "kiln.run"
+
+// instanceLabel carries the instance a run belongs to.
+const instanceLabel = "kiln.instance"
+
+// instanceID is what an instance's identity may be.
+var instanceID = regexp.MustCompile(`^[a-z0-9]{1,40}$`)
+
+// checkInstance refuses an identity that cannot name an instance.
+func checkInstance(instance string) error {
+	if !instanceID.MatchString(instance) {
+		return fmt.Errorf("the instance %q does not match %s", instance, instanceID)
+	}
+	return nil
+}
 
 var runID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
@@ -49,7 +67,7 @@ var runLimits = []string{
 }
 
 // CreateRun creates a run's network, with the proxy attached, and then its
-// container. The container is created, not started: the caller places files in
+// container. With an instance, both carry the label kiln.instance=<instance>. The container is created, not started: the caller places files in
 // it and starts it.
 //
 // Before it creates anything it looks at what is there, so that it can be
@@ -71,12 +89,17 @@ func CreateRun(ctx context.Context, r Run) error {
 	if err := checkRunID(r.ID); err != nil {
 		return err
 	}
+	if r.Instance != "" {
+		if err := checkInstance(r.Instance); err != nil {
+			return err
+		}
+	}
 	if _, err := kilnProxy(ctx, r.Proxy); err != nil {
 		return err
 	}
 	keys := make([]string, 0, len(r.Labels))
 	for k := range r.Labels {
-		if k == "" || k == runLabel || strings.Contains(k, "=") {
+		if k == "" || k == runLabel || k == instanceLabel || strings.Contains(k, "=") {
 			return fmt.Errorf("the label %q cannot be given for a run", k)
 		}
 		keys = append(keys, k)
@@ -88,14 +111,17 @@ func CreateRun(ctx context.Context, r Run) error {
 		return err
 	}
 
-	if err := CreateRunNetwork(ctx, r.ID, r.Proxy); err != nil {
-		return err // CreateRunNetwork leaves nothing behind
+	if err := createRunNetwork(ctx, r.ID, r.Proxy, r.Instance); err != nil {
+		return err // createRunNetwork leaves nothing behind
 	}
 
 	args := []string{
 		"--pull", "never", // a missing image is an error, never a download
 		"--name", name,
 		"--label", runLabel + "=" + r.ID,
+	}
+	if r.Instance != "" {
+		args = append(args, "--label", instanceLabel+"="+r.Instance)
 	}
 	for _, k := range keys {
 		args = append(args, "--label", k+"="+r.Labels[k])
@@ -155,4 +181,37 @@ func removeLeftovers(ctx context.Context, name, id, proxy string) error {
 	// RemoveRunNetwork refuses a network without the label, and succeeds when
 	// there is none.
 	return RemoveRunNetwork(ctx, id, proxy)
+}
+
+// ListRuns returns the IDs of the runs of an instance that have a container or
+// a network on the engine: those named kiln-run-<id> that carry both the label
+// kiln.run=<id> and kiln.instance=<instance>. Nothing without both labels is
+// listed, so a run started by hand, which has no instance, and another
+// instance's runs are never listed. Each ID is listed once, in order.
+func ListRuns(ctx context.Context, instance string) ([]string, error) {
+	if err := checkInstance(instance); err != nil {
+		return nil, err
+	}
+	filter := "label=" + instanceLabel + "=" + instance
+	format := "\t{{.Label \"" + runLabel + "\"}}"
+	containers, err := docker(ctx, nil, "ps", "--all", "--no-trunc", "--filter", filter, "--format", "{{.Names}}"+format)
+	if err != nil {
+		return nil, err
+	}
+	networks, err := docker(ctx, nil, "network", "ls", "--no-trunc", "--filter", filter, "--format", "{{.Name}}"+format)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var ids []string
+	for _, line := range strings.Split(containers+"\n"+networks, "\n") {
+		name, id, ok := strings.Cut(line, "\t")
+		if !ok || id == "" || name != runName(id) || checkRunID(id) != nil || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }

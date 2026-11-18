@@ -36,6 +36,10 @@ type Inputs struct {
 	Proxy       string // the proxy container's name
 	Model       string // an exact model identifier (ADR 0030)
 	Effort      string // low, medium or high
+	// The instance the run belongs to, as a label on its network and
+	// container; none for a run started by hand. A container of another
+	// instance, or of none when one is given, is refused and left alone.
+	Instance string
 }
 
 // Exit statuses.
@@ -51,6 +55,7 @@ const (
 	labelModel       = "kiln.model"
 	labelEffort      = "kiln.effort"
 	labelInstruction = "kiln.instruction" // the instruction's SHA-256
+	labelInstance    = "kiln.instance"    // set by the seal from Inputs.Instance
 )
 
 // Where Claude Code writes in a run: the documents of a stage (ADR 0038) and
@@ -170,6 +175,25 @@ func after(step string) error {
 	return afterStep(step)
 }
 
+// ErrGone is Carry's answer for a run that is in the store, with no
+// container and no record: it is never started a second time.
+var ErrGone = errors.New("its container is gone and nothing was recorded")
+
+// ErrInterrupted is Carry's answer when its context was cancelled while it
+// followed the run. The run goes on.
+var ErrInterrupted = errors.New("following ended; the run goes on")
+
+// Verdict is how a recorded run ended.
+type Verdict struct {
+	// Finished is true when the container exited with 0, the result is
+	// success, the model was the one asked for, and the work is saved or
+	// nothing changed.
+	Finished bool
+	// Reason is one line: the container's ending, the result's subtype,
+	// turns and cost, and the saved commit or "no change".
+	Reason string
+}
+
 // Do carries out one run, or the rest of one started before with the same
 // inputs, and returns the command's exit status. It prints the events it
 // follows to out, and errors to errOut. A cancelled context ends the following
@@ -189,61 +213,98 @@ func Do(ctx context.Context, in Inputs, out, errOut io.Writer) int {
 }
 
 func do(ctx context.Context, in Inputs, out, errOut io.Writer) (int, error) {
+	rec, err := carry(ctx, in, out, errOut, func() error { return nil })
+	if errors.Is(err, ErrInterrupted) {
+		fmt.Fprintf(out, "following ended; the run goes on in kiln-run-%s, and the same command started again follows it and saves its work\n", in.ID)
+		return exitInterrupted, nil
+	}
+	if err != nil {
+		return exitFailed, err
+	}
+	if err := Remove(ctx, in); err != nil {
+		return exitFailed, err
+	}
+	return rec.status(), nil
+}
+
+// Carry is steps 0 to 7 of a run: it checks the inputs and looks at what is
+// there, creates, places, starts and follows the run as far as that is still
+// to do, collects it, saves its work and records it, and returns the verdict.
+// It removes nothing that has started; step 8 is Remove.
+//
+// starting is called once, right before the container is started for the
+// first time. When it fails, the container is removed and nothing has
+// started. With starting nil, the run is known to have been started before:
+// Carry then never creates a container where there is none and no record,
+// and returns ErrGone. A cancelled context while it follows returns
+// ErrInterrupted. It prints nothing: the run's output is in its record.
+func Carry(ctx context.Context, in Inputs, starting func() error) (Verdict, error) {
+	rec, err := carry(ctx, in, io.Discard, io.Discard, starting)
+	if err != nil {
+		return Verdict{}, err
+	}
+	return Verdict{Finished: rec.status() == 0, Reason: rec.reason()}, nil
+}
+
+func carry(ctx context.Context, in Inputs, out, errOut io.Writer, starting func() error) (*record, error) {
 	// 0: check the inputs, and look at what is there.
 	r, err := check(ctx, in)
 	if err != nil {
-		return exitFailed, err
+		return nil, err
 	}
 	r.out, r.errOut = out, errOut
 
 	rec, err := readRecord(r.Runs, r.ID)
 	if err != nil {
-		return exitFailed, err
+		return nil, err
 	}
 	if rec != nil {
 		if err := rec.Inputs.matches(r); err != nil {
-			return exitFailed, err
+			return nil, err
 		}
 		fmt.Fprintf(out, "the run %s is recorded already\n", r.ID)
-		if err := r.remove(ctx); err != nil {
-			return exitFailed, err
-		}
-		return rec.status(), nil
+		return rec, nil
 	}
 
 	state, err := seal.InspectRun(ctx, r.ID) // refuses a container without kiln.run=<id>
 	if err != nil {
-		return exitFailed, err
+		return nil, err
 	}
 	if state != nil {
+		if got := state.Labels[labelInstance]; got != r.Instance {
+			return nil, fmt.Errorf("the container %s belongs to the instance %q, not %q; it is left alone", "kiln-run-"+r.ID, got, r.Instance)
+		}
 		want := r.labels()
 		got := maps.Clone(state.Labels)
 		maps.DeleteFunc(got, func(k, _ string) bool { _, ok := want[k]; return !ok })
 		if !maps.Equal(got, want) {
-			return exitFailed, fmt.Errorf("the container %s was started with other inputs (%v, not %v); it is left alone", "kiln-run-"+r.ID, got, want)
+			return nil, fmt.Errorf("the container %s was started with other inputs (%v, not %v); it is left alone", "kiln-run-"+r.ID, got, want)
 		}
 	}
 	status := ""
 	if state != nil {
 		status = state.Status
 	}
+	if status == "" && starting == nil {
+		return nil, ErrGone
+	}
 
 	at, err := branchAt(ctx, r.Repo, r.ref)
 	if err != nil {
-		return exitFailed, err
+		return nil, err
 	}
 	switch {
 	case at == "" || at == r.commit:
 	case status == "exited":
 		ours, err := isSaveOf(ctx, r.Repo, at, r.commit, r.ID)
 		if err != nil {
-			return exitFailed, err
+			return nil, err
 		}
 		if !ours {
-			return exitFailed, fmt.Errorf("the branch %s is at %s, neither absent nor at the commit %s nor at this run's save", r.Branch, at, r.commit)
+			return nil, fmt.Errorf("the branch %s is at %s, neither absent nor at the commit %s nor at this run's save", r.Branch, at, r.commit)
 		}
 	default:
-		return exitFailed, fmt.Errorf("the branch %s is at %s, neither absent nor at the commit %s", r.Branch, at, r.commit)
+		return nil, fmt.Errorf("the branch %s is at %s, neither absent nor at the commit %s", r.Branch, at, r.commit)
 	}
 	// What update-ref requires of the branch: absent, or at the commit.
 	guard := r.commit
@@ -253,39 +314,48 @@ func do(ctx context.Context, in Inputs, out, errOut io.Writer) (int, error) {
 
 	switch status {
 	case "", "created":
-		if err := r.create(ctx); err != nil {
-			return exitFailed, err
+		if err := r.create(ctx, starting); err != nil {
+			return nil, err
 		}
 		fallthrough
 	case "running":
 		if status == "running" {
 			// A proxy replaced since is on no earlier run's network.
 			if err := seal.AttachProxy(ctx, r.ID, r.Proxy); err != nil {
-				return exitFailed, err
+				return nil, err
 			}
 		}
-		if code, err := r.follow(ctx); err != nil || code != 0 {
-			return code, err
+		if err := r.follow(ctx); err != nil {
+			return nil, err
 		}
 	case "exited":
 	default:
-		return exitFailed, fmt.Errorf("the container kiln-run-%s is %s; it is left alone", r.ID, status)
+		return nil, fmt.Errorf("the container kiln-run-%s is %s; it is left alone", r.ID, status)
 	}
 
 	rec, err = r.collect(ctx)
 	if err != nil {
-		return exitFailed, err
+		return nil, err
 	}
 	if rec.Saved, err = r.save(ctx, rec.Ending, guard); err != nil {
-		return exitFailed, err
+		return nil, err
 	}
 	if err := r.record(rec); err != nil {
-		return exitFailed, err
+		return nil, err
 	}
-	if err := r.remove(ctx); err != nil {
-		return exitFailed, err
+	return rec, nil
+}
+
+// Remove is step 8: it removes the run's container and network, and whatever
+// of them is left. It can be repeated.
+func Remove(ctx context.Context, in Inputs) error {
+	if err := seal.CheckRunID(in.ID); err != nil {
+		return err
 	}
-	return rec.status(), nil
+	if err := seal.RemoveRun(ctx, in.ID, in.Proxy); err != nil {
+		return err
+	}
+	return after("remove")
 }
 
 // undo removes the run's container and network after a failure before the
@@ -299,10 +369,11 @@ func (r *run) undo(ctx context.Context, err error) error {
 }
 
 // create is steps 1 to 3: create the run, place its files, and start it.
-func (r *run) create(ctx context.Context) error {
+// starting, when it is not nil, is called right before the start.
+func (r *run) create(ctx context.Context, starting func() error) error {
 	// 1: CreateRun leaves nothing behind when it fails.
 	if err := seal.CreateRun(ctx, seal.Run{ID: r.ID, Image: r.Image, Proxy: r.Proxy,
-		Command: r.command(), Labels: r.labels()}); err != nil {
+		Command: r.command(), Labels: r.labels(), Instance: r.Instance}); err != nil {
 		return err
 	}
 	if err := after("create"); err != nil {
@@ -316,6 +387,9 @@ func (r *run) create(ctx context.Context) error {
 	}
 	if err == nil {
 		err = after("place")
+	}
+	if err == nil && starting != nil {
+		err = starting()
 	}
 	if err != nil {
 		return r.undo(ctx, err)
@@ -338,8 +412,9 @@ func (r *run) create(ctx context.Context) error {
 
 // follow is step 4: it prints the run's events until its container stops. If
 // system/init names another model, it stops the run, which then goes through
-// the other steps like any other. A cancelled context ends the following only.
-func (r *run) follow(ctx context.Context) (int, error) {
+// the other steps like any other. A cancelled context ends the following only,
+// with ErrInterrupted.
+func (r *run) follow(ctx context.Context) error {
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
@@ -358,17 +433,13 @@ func (r *run) follow(ctx context.Context) (int, error) {
 	pr.CloseWithError(readErr)
 	err := <-done
 	if ctx.Err() != nil {
-		fmt.Fprintf(r.out, "following ended; the run goes on in kiln-run-%s, and the same command started again follows it and saves its work\n", r.ID)
-		return exitInterrupted, nil
+		return ErrInterrupted
 	}
 	err = errors.Join(err, readErr, stopErr)
 	if err == nil {
 		err = after("follow")
 	}
-	if err != nil {
-		return exitFailed, err
-	}
-	return 0, nil
+	return err
 }
 
 // collect is step 5: it collects the run into <runs>/<id>.partial, after
@@ -470,12 +541,4 @@ func (r *run) save(ctx context.Context, end Ending, guard string) (string, error
 		return "", err
 	}
 	return saved, nil
-}
-
-// remove is step 8.
-func (r *run) remove(ctx context.Context) error {
-	if err := seal.RemoveRun(ctx, r.ID, r.Proxy); err != nil {
-		return err
-	}
-	return after("remove")
 }

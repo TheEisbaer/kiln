@@ -34,6 +34,10 @@ func printable(s string) string {
 	}, s)
 }
 
+// Printable is printable, for a caller that prints an error of this package's,
+// which can carry text of a run's.
+func Printable(s string) string { return printable(s) }
+
 // printableWriter passes on what is written to it through printable, as it
 // comes. A character can be split across two writes, so the bytes of one that
 // is not complete at the end of a write are held until the next.
