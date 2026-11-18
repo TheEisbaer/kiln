@@ -78,6 +78,12 @@ func handler(upstream *url.URL, credential string) http.Handler {
 			http.Error(w, "CONNECT is not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// Go's HTTP/1 server closes a request's body at the answer's first write,
+		// while the transport may still read from it, and the transport then cuts
+		// off the answer (Go's issue 40747). The server's own writer always
+		// supports this, and TestDoesNotCutOffAnAnswerItHasBegunToPassOn fails
+		// without it.
+		http.NewResponseController(w).EnableFullDuplex()
 		forward.ServeHTTP(w, r)
 	})
 }

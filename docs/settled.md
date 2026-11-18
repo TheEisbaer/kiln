@@ -42,6 +42,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - How a network is sealed on the developer's container engine (ADR 0041).
 - The checks runner is not covered by this decision; it is isolated, not sealed (ADR 0046).
 - "A second runtime later without rework" was given up for one place: placing files in a run and collecting them from it is rebuilt for Kubernetes (ADR 0038).
+- The proxy lets a request's body be read while its answer is passed on (`EnableFullDuplex`), so that Go's HTTP/1 server does not close the body at the answer's first write. What a run can reach or obtain does not change (card 10, 2026-11-18).
 
 ## ADR 0018: The POC runs on the developer's machine; Kubernetes is the second runtime
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -9,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -138,6 +141,100 @@ func TestStreamsAResponseAsItArrives(t *testing.T) {
 	line, err = r.ReadString('\n')
 	if err != nil || line != "second\n" {
 		t.Fatalf("second chunk: %q, %v", line, err)
+	}
+}
+
+// heldBody is the request body the proxy's transport reads. It passes reads
+// through until the request's Content-Length bytes have gone. It does not pass
+// on the io.EOF that comes with the last bytes, so that the transport makes the
+// one read after the body's last byte that HTTP/1 makes (net/http, transfer.go).
+// That read waits until release is closed, then reads from the server's body and
+// reports what that returned.
+type heldBody struct {
+	io.ReadCloser
+	remaining int64
+	ctx       context.Context
+	release   <-chan struct{}
+	done      chan struct{} // closed once err is set
+	err       error
+}
+
+func (b *heldBody) Read(p []byte) (int, error) {
+	if b.remaining > 0 {
+		n, err := b.ReadCloser.Read(p[:min(int64(len(p)), b.remaining)])
+		b.remaining -= int64(n)
+		if err == io.EOF {
+			err = nil
+		}
+		return n, err
+	}
+	select {
+	case <-b.release:
+	case <-b.ctx.Done():
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.err = err
+	close(b.done)
+	return n, err
+}
+
+// TestDoesNotCutOffAnAnswerItHasBegunToPassOn forces the order in which Go's
+// HTTP/1 server closes a request's body at the answer's first write and the
+// proxy's transport reads once more after the body's last byte (Go's issue
+// 40747). The proxy is handler, unchanged; the wrapper only replaces the body.
+// Every wait is on an event; the two 5 s limits only turn a hang into a failure.
+func TestDoesNotCutOffAnAnswerItHasBegunToPassOn(t *testing.T) {
+	const size = 50000
+	release := make(chan struct{})
+	var once sync.Once
+	releaseNow := func() { once.Do(func() { close(release) }) }
+	defer releaseNow()
+	held := &heldBody{release: release, done: make(chan struct{})}
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		io.WriteString(w, "first\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-held.done:
+			if held.err == io.EOF {
+				io.WriteString(w, "rest\n")
+				return
+			}
+		case <-r.Context().Done():
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(up.Close)
+	upURL, _ := url.Parse(up.URL)
+	proxy := handler(upURL, "the-credential")
+	px := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		held.ReadCloser, held.remaining, held.ctx = r.Body, r.ContentLength, r.Context()
+		r.Body = held
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(px.Close)
+	pxURL, _ := url.Parse(px.URL)
+	c := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(pxURL)}, Timeout: 5 * time.Second}
+
+	resp, err := c.Post("http://proxy.test/v1/messages", "application/octet-stream", bytes.NewReader(make([]byte, size)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// The client has the answer's headers, so the proxy's first write has happened.
+	releaseNow()
+	select {
+	case <-held.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the transport made no read after the body's last byte; the test no longer forces the order")
+	}
+	if held.err != io.EOF {
+		t.Errorf("the read after the body's last byte got %v, want EOF", held.err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if string(got) != "first\nrest\n" || err != nil {
+		t.Errorf("the run got %q, %v; want the whole answer", got, err)
 	}
 }
 
