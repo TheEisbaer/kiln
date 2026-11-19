@@ -70,6 +70,10 @@ const (
 // which fails the step.
 var afterStep func(step string) error
 
+// SetAfterStep sets afterStep, for the test of a package that calls this
+// one, such as internal/tick. Only a test calls it.
+func SetAfterStep(f func(step string) error) { afterStep = f }
+
 // checkFlags judges the inputs that need nothing but themselves: the run's ID,
 // the model and the effort.
 func checkFlags(in Inputs) error {
@@ -213,7 +217,7 @@ func Do(ctx context.Context, in Inputs, out, errOut io.Writer) int {
 }
 
 func do(ctx context.Context, in Inputs, out, errOut io.Writer) (int, error) {
-	rec, err := carry(ctx, in, out, errOut, func() error { return nil })
+	rec, err := carry(ctx, in, out, errOut, func() error { return nil }, false)
 	if errors.Is(err, ErrInterrupted) {
 		fmt.Fprintf(out, "following ended; the run goes on in kiln-run-%s, and the same command started again follows it and saves its work\n", in.ID)
 		return exitInterrupted, nil
@@ -239,14 +243,16 @@ func do(ctx context.Context, in Inputs, out, errOut io.Writer) (int, error) {
 // and returns ErrGone. A cancelled context while it follows returns
 // ErrInterrupted. It prints nothing: the run's output is in its record.
 func Carry(ctx context.Context, in Inputs, starting func() error) (Verdict, error) {
-	rec, err := carry(ctx, in, io.Discard, io.Discard, starting)
+	rec, err := carry(ctx, in, io.Discard, io.Discard, starting, true)
 	if err != nil {
 		return Verdict{}, err
 	}
 	return Verdict{Finished: rec.status() == 0, Reason: rec.reason()}, nil
 }
 
-func carry(ctx context.Context, in Inputs, out, errOut io.Writer, starting func() error) (*record, error) {
+// With stored, the run is known to be in the store once starting has
+// returned, or from the outset when starting is nil; see create.
+func carry(ctx context.Context, in Inputs, out, errOut io.Writer, starting func() error, stored bool) (*record, error) {
 	// 0: check the inputs, and look at what is there.
 	r, err := check(ctx, in)
 	if err != nil {
@@ -314,7 +320,7 @@ func carry(ctx context.Context, in Inputs, out, errOut io.Writer, starting func(
 
 	switch status {
 	case "", "created":
-		if err := r.create(ctx, starting); err != nil {
+		if err := r.create(ctx, starting, stored); err != nil {
 			return nil, err
 		}
 		fallthrough
@@ -370,7 +376,16 @@ func (r *run) undo(ctx context.Context, err error) error {
 
 // create is steps 1 to 3: create the run, place its files, and start it.
 // starting, when it is not nil, is called right before the start.
-func (r *run) create(ctx context.Context, starting func() error) error {
+//
+// With stored, a run that is in the store, because starting has returned or
+// because starting is nil, is not undone by an interrupt (ADR 0035, rule 1):
+// its steps up to the start go on with a context that is not cancelled, and
+// only the following ends. Otherwise an interrupt would remove a run the store
+// holds in flight, and the next tick would find it gone and fail it.
+func (r *run) create(ctx context.Context, starting func() error, stored bool) error {
+	if stored && starting == nil {
+		ctx = context.WithoutCancel(ctx)
+	}
 	// 1: CreateRun leaves nothing behind when it fails.
 	if err := seal.CreateRun(ctx, seal.Run{ID: r.ID, Image: r.Image, Proxy: r.Proxy,
 		Command: r.command(), Labels: r.labels(), Instance: r.Instance}); err != nil {
@@ -390,6 +405,9 @@ func (r *run) create(ctx context.Context, starting func() error) error {
 	}
 	if err == nil && starting != nil {
 		err = starting()
+		if err == nil && stored {
+			ctx = context.WithoutCancel(ctx)
+		}
 	}
 	if err != nil {
 		return r.undo(ctx, err)

@@ -180,6 +180,47 @@ func TestTick(t *testing.T) {
 		}
 	})
 
+	t.Run("interrupted, then started again", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			exitAt string // a first core's kill, before the interrupted one
+			at     string // where the interrupted core interrupts itself
+		}{
+			{"right after AddRun", "", "tick:after-add"},
+			{"while a stored run is created again", "after-add", "run:create"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c := f.newCase(t, f.standIn)
+				f.card(t, c, "Add a line to NOTES.md.")
+				if tc.exitAt != "" {
+					_, done := f.core(t, c, tc.exitAt)
+					if code := <-done; code != exitAtPoint {
+						t.Fatalf("the first core exited with %d, want %d at %s", code, exitAtPoint, tc.exitAt)
+					}
+				}
+				ch := child{Command: "core", Config: f.config(c), InterruptAt: tc.at}
+				if code, out, errOut := f.kiln(t, ch); code != 0 {
+					t.Fatalf("the interrupted core exited with %d\n%s%s", code, out, errOut)
+				}
+				// The run is in flight, and its container is there.
+				s := f.open(t, c)
+				inFlight, err := s.InFlight(1)
+				s.Close()
+				if err != nil || inFlight == nil || inFlight.ID != c.run {
+					t.Errorf("the run in flight is %+v (%v), want %s", inFlight, err, c.run)
+				}
+				if got := containerState(t, c.run); got == "" {
+					t.Error("the interrupt removed the run's container")
+				}
+
+				core, done := f.core(t, c, "")
+				f.waitEnded(t, c)
+				f.stop(t, core, done)
+				f.assertEnded(t, c, store.Finished)
+			})
+		}
+	})
+
 	t.Run("a vanished run", func(t *testing.T) {
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. "+gateWord)

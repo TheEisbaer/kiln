@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/TheEisbaer/kiln/internal/run"
 )
 
 // The variable by which the test runs its own binary as `kiln core` or `kiln
@@ -21,6 +24,11 @@ type child struct {
 	Config  Config // of core
 	Text    string // of card
 	ExitAt  string // the point of a tick at which core exits, as a kill there would
+	// Where core interrupts itself, as SIGINT or SIGTERM there would:
+	// tick:<point> at a point of the tick, run:<step> after a step of
+	// internal/run. The hook returns once the interrupt has cancelled the
+	// core's context.
+	InterruptAt string
 }
 
 // exitAtPoint is the status with which the binary exits at a point, as a kill
@@ -56,15 +64,31 @@ func asKiln(spec string) int {
 		return 0
 	case "core":
 		interval = testInterval
-		if c.ExitAt != "" {
-			atPoint = func(point string) {
-				if point == c.ExitAt {
-					os.Exit(exitAtPoint)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		interrupt := func() {
+			syscall.Kill(os.Getpid(), syscall.SIGINT)
+			<-ctx.Done()
+		}
+		where, what, _ := strings.Cut(c.InterruptAt, ":")
+		atPoint = func(point string) {
+			switch point {
+			case c.ExitAt:
+				os.Exit(exitAtPoint)
+			case what:
+				if where == "tick" {
+					interrupt()
 				}
 			}
 		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
+		if where == "run" {
+			run.SetAfterStep(func(step string) error {
+				if step == what {
+					interrupt()
+				}
+				return nil
+			})
+		}
 		if err := Core(ctx, c.Config, os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "kiln core:", err)
 			return 1
