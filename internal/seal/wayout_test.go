@@ -48,7 +48,10 @@ func testWayOut(t *testing.T, f fixture, credentials []string, published, other 
 	must(t, "network", "create", "--ipv6", private)
 
 	// The fake hosts: one public under two names, one private, and one on
-	// both networks.
+	// both networks. The engine's DNS answers a name from one network only
+	// (seen with Docker 29.9.3: mixed.kiln-test.example gets the private
+	// network's two addresses), so the probe cannot show a name with a public
+	// and a private answer; TestWayOut in cmd/wayout shows that.
 	publicName, privateName, mixedName := f.name("public-host"), f.name("private-host"), f.name("mixed-host")
 	start(t, publicName, public, f.webImage, "--network-alias", publicHost, "--network-alias", otherHost, "--", marker)
 	start(t, privateName, private, f.webImage, "--network-alias", privateHost, "--", marker)
