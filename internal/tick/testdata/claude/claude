@@ -3,9 +3,14 @@
 # not under test. It prints only the two events that internal/run reads
 # (events.go), with their fields as the pinned Claude Code 2.1.326 prints them:
 # system/init with the --model it was given, and a success result. In between
-# it appends a line to NOTES.md. A word in the instruction, which comes on
-# standard input, changes that: kiln-stand-in-gate makes it wait for
-# /tmp/gate first, and kiln-stand-in-fail makes it exit 1 with no result.
+# it writes a short spec to /kiln/out/spec.md, with the five headings and the
+# card's word kiln-case-<name>, if it has one, and appends a line to NOTES.md,
+# the change a spec run must not save. A word in the instruction, which comes
+# on standard input, changes that: kiln-stand-in-gate makes it wait for
+# /tmp/gate first; kiln-stand-in-nospec makes it write no spec,
+# kiln-stand-in-longspec one of 262,145 bytes, and kiln-stand-in-escape one
+# with ESC, CSI, OSC, a carriage return and a byte that is not UTF-8; and
+# kiln-stand-in-fail makes it exit 1 with no result, after the spec.
 #
 # The card that changes the pin in images/run/Dockerfile updates it. The tick
 # test's run of the real Claude Code fails when an event or a field printed
@@ -24,6 +29,14 @@ case "$instruction" in
     *kiln-stand-in-gate*)
         touch /tmp/waiting
         while [ ! -e /tmp/gate ]; do sleep 0.05; done ;;
+esac
+word=$(printf '%s\n' "$instruction" | grep -o 'kiln-case-[a-z0-9-]*' | head -n 1 || true)
+spec=/kiln/out/spec.md
+case "$instruction" in
+    *kiln-stand-in-nospec*) ;;
+    *kiln-stand-in-longspec*) head -c 262145 /dev/zero | tr '\0' x > "$spec" ;;
+    *kiln-stand-in-escape*) printf '# Spec\n\033[2J\033]0;kiln\007\r\377\n' > "$spec" ;;
+    *) printf '# Spec %s\n\n## 1. What will be built\n\n## 2. How to tell it works\n\n## 3. What was found\n\n## 4. Left out\n\n## 5. Questions\n' "$word" > "$spec" ;;
 esac
 case "$instruction" in
     *kiln-stand-in-fail*) exit 1 ;;
