@@ -7,6 +7,7 @@
 /cmd/launcher/ @TheEisbaer
 /internal/launcher/ @TheEisbaer
 /cmd/proxy/ @TheEisbaer
+/cmd/wayout/ @TheEisbaer
 /internal/seal/ @TheEisbaer
 /.claude/ @TheEisbaer
 /CLAUDE.md @TheEisbaer

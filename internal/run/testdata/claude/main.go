@@ -1,6 +1,10 @@
 // Command claude stands in for Claude in the run test. It answers Claude Code's
 // Messages requests from a script: a Bash call `sh run.sh` first, then the text
-// "Done." once a tool result has come. Its data follows the Claude Code version
+// "Done." once a tool result has come. A case whose word starts with
+// kiln-case-web has a script of four steps instead (ADR 0059): the Bash call,
+// then a WebFetch of the fake public host's page, then the answer to
+// WebFetch's own call, a request without tools that holds the page, which is
+// the page's marker, and "Done." once two tool results have come. Its data follows the Claude Code version
 // pinned in images/run/Dockerfile; the card that changes the pin updates it.
 //
 // For each request it writes one line of JSON to standard output: the model,
@@ -68,6 +72,7 @@ type logLine struct {
 	Marker     bool   `json:"marker"`
 	Case       string `json:"case"`
 	ToolResult bool   `json:"tool_result"`
+	Answer     string `json:"answer"` // the step of the script: bash, webfetch, page or done
 }
 
 func main() {
@@ -80,9 +85,11 @@ func main() {
 		body, _ := io.ReadAll(r.Body)
 		var req request
 		_ = json.Unmarshal(body, &req)
-		toolResult := hasToolResult(req)
+		results := toolResults(req)
+		toolResult := results > 0
 		start := time.Now()
 		caseName := caseWord.FindString(string(body))
+		block, stop, step := script(req, string(body), caseName, results)
 		out.Encode(logLine{
 			Kind:       "request",
 			Time:       start.UTC().Format(time.RFC3339Nano),
@@ -102,6 +109,7 @@ func main() {
 			Marker:     strings.Contains(string(body), marker),
 			Case:       caseName,
 			ToolResult: toolResult,
+			Answer:     step,
 		})
 
 		w.Header().Set("Content-Type", "application/json")
@@ -112,7 +120,7 @@ func main() {
 		case strings.HasSuffix(r.URL.Path, "/count_tokens"):
 			_, err = w.Write([]byte(`{"input_tokens":10}`))
 		case r.URL.Path == "/v1/messages":
-			err = answer(w, req, toolResult)
+			err = answer(w, req, block, stop)
 		default:
 			http.NotFound(w, r)
 		}
@@ -125,8 +133,9 @@ func main() {
 	})))
 }
 
-// hasToolResult reports whether a request carries a tool result.
-func hasToolResult(req request) bool {
+// toolResults counts the tool results a request carries.
+func toolResults(req request) int {
+	n := 0
 	for _, m := range req.Messages {
 		var blocks []struct {
 			Type string `json:"type"`
@@ -136,11 +145,11 @@ func hasToolResult(req request) bool {
 		}
 		for _, b := range blocks {
 			if b.Type == "tool_result" {
-				return true
+				n++
 			}
 		}
 	}
-	return false
+	return n
 }
 
 // The scripted answers. The text carries an escape sequence, which the test
@@ -148,21 +157,44 @@ func hasToolResult(req request) bool {
 const (
 	bashInput = `{"command":"sh run.sh","description":"Run the script"}`
 	doneText  = "Done.\x1b[2K"
+	// The page's address on the fake public host. The prompt carries the
+	// case's word, so that WebFetch's own call is told apart.
+	fetchURL = "https://public.kiln-test.example/page"
 )
 
-// answer writes the next answer of the script, streamed or whole, and returns
-// the first error of writing it.
-func answer(w http.ResponseWriter, req request, toolResult bool) error {
+// pageMarker is the marker of the fake public host's page.
+var pageMarker = regexp.MustCompile(`kiln-page-[a-z0-9-]+`)
+
+// script returns the next answer's content block, its stop reason, and the
+// step's name.
+func script(req request, body, caseName string, results int) (map[string]any, string, string) {
+	bash := map[string]any{"type": "tool_use", "id": "toolu_kiln_1", "name": "Bash", "input": json.RawMessage(bashInput)}
+	done := map[string]any{"type": "text", "text": doneText}
+	if !strings.HasPrefix(caseName, "kiln-case-web") {
+		if results > 0 {
+			return done, "end_turn", "done"
+		}
+		return bash, "tool_use", "bash"
+	}
+	if marker := pageMarker.FindString(body); len(req.Tools) == 0 && marker != "" {
+		return map[string]any{"type": "text", "text": "The page's marker is " + marker + "."}, "end_turn", "page"
+	}
+	switch results {
+	case 0:
+		return bash, "tool_use", "bash"
+	case 1:
+		input, _ := json.Marshal(map[string]string{"url": fetchURL, "prompt": "Give the page's marker. " + caseName})
+		return map[string]any{"type": "tool_use", "id": "toolu_kiln_2", "name": "WebFetch", "input": json.RawMessage(input)}, "tool_use", "webfetch"
+	default:
+		return done, "end_turn", "done"
+	}
+}
+
+// answer writes an answer, streamed or whole, and returns the first error of
+// writing it.
+func answer(w http.ResponseWriter, req request, block map[string]any, stop string) error {
 	usage := map[string]int{"input_tokens": 100, "output_tokens": 10,
 		"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
-	var block map[string]any
-	stop := "tool_use"
-	if toolResult {
-		block = map[string]any{"type": "text", "text": doneText}
-		stop = "end_turn"
-	} else {
-		block = map[string]any{"type": "tool_use", "id": "toolu_kiln_1", "name": "Bash", "input": json.RawMessage(bashInput)}
-	}
 	message := map[string]any{"id": "msg_kiln", "type": "message", "role": "assistant", "model": req.Model,
 		"stop_sequence": nil, "usage": usage}
 
@@ -186,16 +218,16 @@ func answer(w http.ResponseWriter, req request, toolResult bool) error {
 	message["content"] = []any{}
 	message["stop_reason"] = nil
 	event("message_start", map[string]any{"type": "message_start", "message": message})
-	if toolResult {
+	if block["type"] == "text" {
 		event("content_block_start", map[string]any{"type": "content_block_start", "index": 0,
 			"content_block": map[string]any{"type": "text", "text": ""}})
 		event("content_block_delta", map[string]any{"type": "content_block_delta", "index": 0,
-			"delta": map[string]any{"type": "text_delta", "text": doneText}})
+			"delta": map[string]any{"type": "text_delta", "text": block["text"]}})
 	} else {
 		event("content_block_start", map[string]any{"type": "content_block_start", "index": 0,
-			"content_block": map[string]any{"type": "tool_use", "id": "toolu_kiln_1", "name": "Bash", "input": map[string]any{}}})
+			"content_block": map[string]any{"type": "tool_use", "id": block["id"], "name": block["name"], "input": map[string]any{}}})
 		event("content_block_delta", map[string]any{"type": "content_block_delta", "index": 0,
-			"delta": map[string]any{"type": "input_json_delta", "partial_json": bashInput}})
+			"delta": map[string]any{"type": "input_json_delta", "partial_json": string(block["input"].(json.RawMessage))}})
 	}
 	event("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 	event("message_delta", map[string]any{"type": "message_delta",

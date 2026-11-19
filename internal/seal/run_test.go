@@ -30,14 +30,14 @@ const (
 
 // probeConfig and probeReport are testdata/probe's Config and Report.
 type probeConfig struct {
-	HTTP, Dial, Lookup, Files, List []string
+	HTTP, Dial, Lookup, Files, List, Connect []string
 }
 
 type probeReport struct {
-	HTTP, Dial, Lookup, Sockets, Files []probeResult
-	Entries                            []probeEntry
-	Init                               string
-	Env                                []string
+	HTTP, Dial, Lookup, Sockets, Files, Connect []probeResult
+	Entries                                     []probeEntry
+	Init                                        string
+	Env                                         []string
 }
 
 type probeEntry struct {
@@ -83,10 +83,17 @@ func TestRun(t *testing.T) {
 
 	// Images. The repo's root is the build context.
 	proxyImage, upstreamImage, runImage := name("proxy"), name("upstream"), name("run")
+	wayOutImage, webImage := name("wayout"), name("web")
 	build(t, proxyImage, "images/proxy/Dockerfile")
 	build(t, upstreamImage, "internal/seal/testdata/upstream/Dockerfile")
 	build(t, runImage, "images/run/Dockerfile")
+	build(t, wayOutImage, "images/wayout/Dockerfile")
+	build(t, webImage, "internal/seal/testdata/web/Dockerfile")
 	probe := buildProbe(t)
+	// The outward network of the test's ways out, which CreateRun makes. It
+	// goes after every run, whose cleanups are registered later.
+	web := name("outward")
+	cleanup(t, "network", "rm", "--force", web)
 
 	// The proxy, which creates its ordinary network, then the fake upstream and
 	// a container that publishes a port on every host address.
@@ -114,7 +121,8 @@ func TestRun(t *testing.T) {
 	createRun(t, Run{ID: runID("probe"), Image: runImage, Proxy: proxy.Name,
 		Command: []string{probePath, probeConfigPath}})
 	f := fixture{runImage: runImage, upstreamImage: upstreamImage, proxyImage: proxyImage,
-		proxy: proxy, probe: probe, name: name, runID: runID}
+		proxy: proxy, probe: probe, name: name, runID: runID,
+		wayOutImage: wayOutImage, webImage: webImage, web: web}
 	files := []string{"/proc/self/status", "/proc/self/mountinfo"}
 	for _, f := range cgroupFiles {
 		files = append(files, "/sys/fs/cgroup/"+f)
@@ -248,6 +256,24 @@ func TestRun(t *testing.T) {
 			if err := json.Unmarshal([]byte(got), &ports); err != nil || len(ports) != 0 {
 				t.Errorf("%s of the run's container is %s, want none", field, got)
 			}
+		}
+	})
+
+	// A run with an empty list is sealed as before: it has no way out, and
+	// nothing names one.
+	t.Run("no way out without a list", func(t *testing.T) {
+		if got := containerID(t, wayOutName(runID("probe"))); got != "" {
+			t.Errorf("the run without a list has a way out %s", got)
+		}
+		for _, env := range report.Env {
+			k, _, _ := strings.Cut(env, "=")
+			switch strings.ToUpper(k) {
+			case "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "ALL_PROXY":
+				t.Errorf("the run without a list has %s", env)
+			}
+		}
+		if got := must(t, "inspect", "--format", `{{index .Config.Labels "`+hostsLabel+`"}}`, probeRun); got != "<no value>" && got != "" {
+			t.Errorf("the run without a list has the label %s=%s", hostsLabel, got)
 		}
 	})
 
@@ -446,6 +472,9 @@ func TestRun(t *testing.T) {
 		})
 	})
 
+	t.Run("a run with a list", func(t *testing.T) {
+		testWayOut(t, f, []string{credential1, credential2}, published, other, noConnection)
+	})
 	t.Run("a run's life", func(t *testing.T) { testLife(t, f, runID("probe")) })
 	t.Run("PlaceRun refuses", func(t *testing.T) { testPlaceRefusals(t, f, runID("probe")) })
 	t.Run("the save", func(t *testing.T) { testSave(t, f) })
@@ -542,7 +571,7 @@ func cleanupRun(t *testing.T, r Run) {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		name := runName(r.ID)
-		for _, c := range []string{saveName(r.ID), name} {
+		for _, c := range []string{saveName(r.ID), name, wayOutName(r.ID)} {
 			if _, err := docker(ctx, nil, "rm", "--force", c); err != nil {
 				t.Errorf("cleanup: %v", err)
 			}

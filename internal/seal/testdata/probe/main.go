@@ -6,15 +6,19 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +31,9 @@ type Config struct {
 	Lookup []string // names to resolve
 	Files  []string // files to read
 	List   []string // directories whose every entry is listed, the directory itself not
+	// Targets to send to $HTTPS_PROXY: CONNECT <host:port>, or a GET of a URL
+	// that starts with http://, in absolute form.
+	Connect []string
 }
 
 // Report is what the probe found.
@@ -37,6 +44,10 @@ type Report struct {
 	Sockets []Result
 	Files   []Result
 	Entries []Entry
+	// Per target, the status and the body of the answer; after a 200 to a
+	// CONNECT, the status and body of GET /page over TLS through the tunnel,
+	// with the certificate unchecked.
+	Connect []Result
 	Init    string // process 1's program, from /proc/1/cmdline, with links resolved
 	Env     []string
 }
@@ -99,6 +110,9 @@ func main() {
 	for _, file := range config.Files {
 		data, err := os.ReadFile(file)
 		r.Files = append(r.Files, result(file, string(data), err))
+	}
+	for _, target := range config.Connect {
+		r.Connect = append(r.Connect, connect(target))
 	}
 	for _, dir := range config.List {
 		r.Entries = append(r.Entries, list(dir)...)
@@ -211,4 +225,57 @@ func result(what, value string, err error) Result {
 func fail(err error) {
 	os.Stderr.WriteString("probe: " + err.Error() + "\n")
 	os.Exit(2)
+}
+
+// connect sends one target to the way out named by $HTTPS_PROXY, and returns
+// its answer as "<status> <body>". The way out may have only just started, so
+// a connection to it is tried for up to ten seconds.
+func connect(target string) Result {
+	proxy, err := url.Parse(os.Getenv("HTTPS_PROXY"))
+	if err != nil || proxy.Host == "" {
+		return result(target, "", errors.New("HTTPS_PROXY is not set"))
+	}
+	var conn net.Conn
+	for range 40 {
+		if conn, err = net.DialTimeout("tcp", proxy.Host, 3*time.Second); err == nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if err != nil {
+		return result(target, "", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(20 * time.Second))
+
+	method, host := http.MethodConnect, target
+	if u, err := url.Parse(target); err == nil && u.Scheme == "http" {
+		method, host = http.MethodGet, u.Host
+	}
+	if _, err := io.WriteString(conn, method+" "+target+" HTTP/1.1\r\nHost: "+host+"\r\n\r\n"); err != nil {
+		return result(target, "", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: method})
+	if err != nil {
+		return result(target, "", err)
+	}
+	if method != http.MethodConnect || resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return Result{What: target, Value: strconv.Itoa(resp.StatusCode) + " " + strings.TrimSpace(string(body))}
+	}
+
+	name, _, _ := net.SplitHostPort(target)
+	tc := tls.Client(conn, &tls.Config{ServerName: name, InsecureSkipVerify: true})
+	req, _ := http.NewRequest(http.MethodGet, "https://"+target+"/page", nil)
+	req.Header.Set("Connection", "close")
+	if err := req.Write(tc); err != nil {
+		return result(target, "200 then", err)
+	}
+	page, err := http.ReadResponse(bufio.NewReader(tc), req)
+	if err != nil {
+		return result(target, "200 then", err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(page.Body, 4096))
+	return Result{What: target, Value: "200 " + strconv.Itoa(page.StatusCode) + " " + strings.TrimSpace(string(body))}
 }

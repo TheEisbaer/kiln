@@ -44,6 +44,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - The checks runner is not covered by this decision; it is isolated, not sealed (ADR 0046).
 - "A second runtime later without rework" was given up for one place: placing files in a run and collecting them from it is rebuilt for Kubernetes (ADR 0038).
 - The proxy lets a request's body be read while its answer is passed on (`EnableFullDuplex`), so that Go's HTTP/1 server does not close the body at the answer's first write. What a run can reach or obtain does not change (card 10, 2026-11-18).
+- A run with a list of hosts reaches HTTPS on port 443 of the hosts on it through a way out of its own, and the way out's address rule (item 1 of card 12's spec) is decided on the address after the name is resolved: a name with one refused answer is refused whole, and the address judged is the one connected to. An empty list is the seal as before. Only spec runs have a list, `kiln core --spec-hosts`, and a spec run may read the web (the developer's decision of 2026-11-18, ADR 0009, ADR 0059) (card 12, 2026-11-19).
 
 ## ADR 0018: The POC runs on the developer's machine; Kubernetes is the second runtime
 
@@ -63,6 +64,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - Which part of a run's image is Kiln's, and so where the pinned Claude Code version lives (ADR 0039).
 - How code and instructions get into a run and results out of it (ADR 0038).
 - A run's command line is `sh -c 'exec claude "$@" < /kiln/instruction.md' sh -p --output-format stream-json --verbose --permission-mode bypassPermissions --model <id> --effort <level>`, without `--bare`, so that the repo's `CLAUDE.md` reaches the prompt. The instruction comes on standard input.
+- A run with a list gets `HTTPS_PROXY` and `https_proxy`, which name its way out, and `NO_PROXY` and `no_proxy`, which name the proxy; `HTTP_PROXY` is not set. Claude Code 2.1.326 takes the first of these variables for all its traffic, the model's included, so without `NO_PROXY` its requests to `ANTHROPIC_BASE_URL` would go to the way out, with the placeholder key. The variables are a convenience: a repo's settings can change them and so break a run, never widen what it reaches, since the network decides (ADR 0059) (card 12, 2026-11-19).
 
 ## ADR 0022: The UI shows what needs the developer first; the board is second
 
@@ -71,6 +73,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 ## ADR 0025: Kiln's settings for a repo live in the instance; the repo's own Claude Code configuration is picked up from the repo
 
 - Protected paths and the required checks are not settings in the instance. For a repo that merges automatically the Git host enforces both, from the code owner file in the repo and from its own rules (ADR 0047, ADR 0049), and the checks are a command in the repo (ADR 0045). Each still has one place. The instance holds what a Git host cannot: whether automatic merging is used, the limit, branch naming and the toolchain image (ADR 0039).
+- The list of hosts of a stage is in the instance, as a flag of the core, `kiln core --spec-hosts`, until a settings file exists. `kiln run` has no list, so a run started by hand is sealed as before (ADR 0059) (card 12, 2026-11-19).
 
 ## ADR 0026: Kiln's repo lives in the developer's personal space on their company's GitHub; checks run on the developer's machine
 
@@ -110,6 +113,8 @@ A line says what was settled and, where it matters, when and by which card. The 
 - From the moment a run is in the store until its result is recorded, nothing in the core removes its container or network, and its container is never created again. A step that fails, an interrupt or a kill in between changes nothing, and the next tick goes on from what is there. Only the engine losing a container makes a run gone: one with no container and nothing recorded is failed (rule 4) (by the developer's decision of 2026-11-19, after card 8's second review).
 - At a run's end the work is saved, then `result.json` is written, then the store, and only then are the container and network removed (rule 3) (card 8).
 - A run's ID is `<instance>-<card>-<number of the card's runs + 1>`. It is the same on every tick until the run is in the store, and the engine allows one container per name, so a wait gets one run (card 8).
+- A run with a list has a way out, the container `kiln-wayout-<id>`, with the labels `kiln.run=<id>`, `kiln.wayout=1` and, with an instance, `kiln.instance`. `RemoveRun` removes the save container, then the run's container, then the way out, then the network, each skipped when it is missing. `ListRuns` lists a way out of the instance as well, so that one left by a kill between two removals is swept. A way out without `kiln.run=<id>` is refused and left as it is (ADR 0059) (card 12, 2026-11-19).
+- From the moment a run is in the store until its result is recorded, nothing in the core removes its way out or creates it again, as for its container and network. A stopped way out is started again before its run starts, and when a running run is carried again. A way out that is gone before its run has started leaves the run in flight, said on every tick; one that is gone while its run runs is said in the core's output, and the run goes on without the web (card 12, 2026-11-19).
 
 ## ADR 0037: Kiln is built in a sealed container, and the core contains no C code
 
@@ -122,6 +127,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - What is placed in a run, and how: the commit's files under `/work`, owned by the run's user, and the instruction at `/kiln/instruction.md`. The seal writes them as one archive into a container that has never started, and refuses absolute names, `..` and anything but files, directories and symlinks, so nothing else can be placed.
 - The change is collected by saving the working tree in a throwaway container from the run image, with no network, the run's user and limits, and no mounts. The engine pipes the tree from the run's container into it, so nothing of it is unpacked on the developer's machine; what comes back is a tree and a pack of its new objects.
 - A stage's documents and the run's sessions are kept as the archives the engine hands over, `documents.tar` and `session.tar` in the run's record, and are never unpacked on the developer's machine.
+- A run's `result.json` holds `hosts`, its list of hosts, empty without one. The record of a run with a list holds `wayout.jsonl`, the way out's line per request: the target, the addresses, whether it was allowed or refused, the reason and the status. A run whose way out was gone when it was collected has none, and its `result.json` says `"wayout": "gone"` (ADR 0059) (card 12, 2026-11-19).
 
 ## ADR 0039: A run image is a target repo's toolchain image with Kiln's layer on top
 
@@ -139,6 +145,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - As a non-root user a run has no effective capabilities whatever is dropped, and the bounding set matters only through setuid and file-capability programs. A run's container drops all capabilities and sets `no-new-privileges`, by the developer's decision of 2026-11-17.
 - A run's network carries the label `kiln.run` with the run's ID, as its container does. The seal removes or attaches to a network of a run's name only with that label, and refuses one without it. A proxy whose container does not exist is not attached, so a run's network is removed without it, by the developer's decision of 2026-11-17.
 - A run's network is created, and attached to, only for a proxy that carries the label `kiln.proxy`. One without it is refused before anything is created and left untouched, so that a mistyped proxy does not put another container on a run's network, by the developer's decision of 2026-11-17.
+- A run's way out shares the run's network and is on the outward network `kiln-web` as well. It has forwarding off in both families, no capabilities, `no-new-privileges` and a read-only root. `kiln-web` is an ordinary bridge with no traffic between its containers (`enable_icc=false`) and the label `kiln.web`; one of the name without the label is refused, so that a way out is never put on a network Kiln did not make. It is never removed (ADR 0059) (card 12, 2026-11-19).
 
 ## ADR 0042: A card's current state and its history are written together
 
@@ -171,6 +178,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - Only `internal/seal` runs the `docker` command. A step of the check command fails when a Go file outside it that is not a test contains the string literal `"docker"`; it stops a slip, not an evasion.
 - The core is `cmd/core`, built as `kiln`, and the steps of a run are `internal/run`, not `internal/core`: a package named after the whole core would take everything. Both call `internal/seal` and do not run the `docker` command.
 - The step of the check command also fails on a string literal whose first word is `docker`, as in a shell line, or that is a path ending in `/docker`.
+- `cmd/wayout/` is a place of the seal, and its image is under `images/` (ADR 0059) (card 12, 2026-11-19).
 
 ## ADR 0048: Tests that need the container engine are run by hand, behind the developer's approval
 
