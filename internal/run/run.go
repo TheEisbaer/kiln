@@ -234,13 +234,20 @@ func do(ctx context.Context, in Inputs, out, errOut io.Writer) (int, error) {
 // Carry is steps 0 to 7 of a run: it checks the inputs and looks at what is
 // there, creates, places, starts and follows the run as far as that is still
 // to do, collects it, saves its work and records it, and returns the verdict.
-// It removes nothing that has started; step 8 is Remove.
+// Step 8 is Remove.
 //
 // starting is called once, right before the container is started for the
-// first time. When it fails, the container is removed and nothing has
-// started. With starting nil, the run is known to have been started before:
-// Carry then never creates a container where there is none and no record,
-// and returns ErrGone. A cancelled context while it follows returns
+// first time, and puts the run in the store. When a step fails before
+// starting has returned, or starting itself fails, the container, which has
+// never started, is removed with its network. From the moment starting has
+// returned, nothing is removed: a step that fails returns its error and
+// leaves what is there for the next call.
+//
+// With starting nil, the run is in the store already; its container may
+// never have started. Carry then removes nothing and never creates a
+// container: one that never started has the proxy attached, its files placed
+// again and is started; where there is no container and no record, Carry
+// returns ErrGone. A cancelled context while it follows returns
 // ErrInterrupted. It prints nothing: the run's output is in its record.
 func Carry(ctx context.Context, in Inputs, starting func() error) (Verdict, error) {
 	rec, err := carry(ctx, in, io.Discard, io.Discard, starting, true)
