@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: superseded in part by ADR 0059
 ---
 
 # One repo with one Go module, divided by Kiln's parts, with guardrail files in a few named places
+
+> Revised in part by ADR 0059: the parts are no longer three. The way out is a part as well, and its program is a place of the seal.
 
 Kiln's repo is one repository holding one Go module at its root, laid out by Go's own convention for a repo with several programs and private packages, and divided by the parts of ADR 0034: the core, the proxy and the launcher. The UI has its own top-level directory and is built into the core's program (ADR 0044). This follows Go's official guidance, which shows a single module throughout and gives no rule for non-Go parts, and the layout of a comparable tool with a server, an agent and a web UI in one repo.
 

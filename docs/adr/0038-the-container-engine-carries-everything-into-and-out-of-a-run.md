@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: superseded in part by ADR 0059
 ---
 
 # The container engine carries everything into and out of a run
+
+> Revised in part by ADR 0059: "a run has no network but the proxy" no longer holds for a run that has a list of hosts. It also reaches the hosts on its list.
 
 Kiln and its runs share no filesystem (ADR 0018), and a run has no network but the proxy (ADR 0017). What crosses the boundary of a run is carried by the container engine: the core copies the code and the instructions into the container before it starts, follows its output through the engine, and collects the results from the container after it has stopped. Nothing is mounted, no script inside the run talks to Kiln, and no run holds a secret of its own.
 
@@ -18,7 +20,7 @@ Measured on 2026-11-14: after a hard kill the container's files could still be c
 ## Considered options
 
 - **Git over the network, through the proxy**, with a script in the run that fetches the code and pushes the result: the same on Docker and on Kubernetes. Rejected because the proxy would gain a second job and need the target repo copies, each run would need its own secret to push only to its own place, a run killed hard would have pushed nothing, and all of it would be built before any Kubernetes run exists.
-- **A host directory mounted into the run**: ruled out by ADR 0018, and it leaves stale working directories behind.
+- **A directory of the developer's machine mounted into the run**: ruled out by ADR 0018, and it leaves stale working directories behind.
 
 ## Consequences
 

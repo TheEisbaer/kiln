@@ -10,9 +10,13 @@ Kiln takes a developer's ideas and turns them into changes in the repos that dev
 The one person an instance belongs to and works for.
 _Avoid_: User, owner, team
 
+**Developer's machine**:
+The computer the developer works on. An instance's core runs on it.
+_Avoid_: Host, local machine, laptop
+
 **Git host**:
-The service that holds a target repo, runs its checks and governs its merges.
-_Avoid_: Remote, forge, provider, platform
+The service that holds a target repo, runs its checks and governs its merges. Always written in full.
+_Avoid_: Host, remote, forge, provider, platform
 
 **Instance**:
 One running Kiln, belonging to exactly one developer.
@@ -99,6 +103,26 @@ _Avoid_: Job, session, task, execution
 **Sealed**:
 Said of a run that can reach nothing on the developer's machine, no credentials and no network beyond what Kiln explicitly hands it.
 _Avoid_: Sandboxed, isolated, jailed
+
+**Proxy**:
+What carries a run's requests to Claude and puts the credential on them. A sealed run always reaches it.
+_Avoid_: Gateway, relay, credential proxy
+
+**Upstream**:
+Where the proxy sends a run's requests: Claude's API, or a service in front of it.
+_Avoid_: Backend, provider, origin; "upstream" for the project a dependency comes from
+
+**Host**:
+A named machine on a network that a run can be allowed to reach, such as `go.dev`.
+_Avoid_: Domain, site, server; "host" for the Git host or for the developer's machine
+
+**List of hosts**:
+The hosts that a run of one stage may reach besides the proxy. Empty unless the developer sets it; `*` stands for every public host.
+_Avoid_: Allow-list, whitelist, network policy
+
+**Way out**:
+What carries a run's connections to the hosts on its list. It holds no credential, and a run without a list has none.
+_Avoid_: Egress proxy, web proxy, tunnel
 
 **Ceiling**:
 A bound on a run (elapsed time, time without output, or budget) at which Kiln ends it.

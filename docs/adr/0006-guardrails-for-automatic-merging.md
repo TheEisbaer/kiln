@@ -15,7 +15,7 @@ A target repo that opts in to automatic merging (ADR 0005) merges a pull request
 
 ## Where checks run
 
-Left open here at first, under two constraints: no recurring cost for CI, and the principle above. Settled by ADR 0026: checks run in the Git host's CI on a runner on the developer's own machine, and the host enforces their result.
+Left open here at first, under two constraints: no recurring cost for CI, and the principle above. Settled by ADR 0026: checks run in the Git host's CI on a runner on the developer's own machine, and the Git host enforces their result.
 
 ## Consequences
 

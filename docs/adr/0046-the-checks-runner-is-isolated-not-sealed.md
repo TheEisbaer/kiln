@@ -4,7 +4,7 @@ status: superseded by ADR 0049
 
 # The checks runner is isolated like a hosted runner, not sealed like a run
 
-> Superseded by ADR 0049: Kiln's repo is public and its checks run on the host's own runners, so there is no runner on the developer's machine. The reasoning on run sealing in the last consequence below still stands.
+> Superseded by ADR 0049: Kiln's repo is public and its checks run on the Git host's own runners, so there is no runner on the developer's machine. The reasoning on run sealing in the last consequence below still stands.
 
 ADR 0017 seals runs, and ADR 0026 puts Kiln's checks on a runner on the developer's machine, which executes agent-written code before anyone has approved it. No decision said how that runner is protected. It is an isolated container: nothing from the developer's home directory, no access to the container engine, memory and CPU limits, and a workflow token that can only read. Its network stays open, and the core does not manage it.
 

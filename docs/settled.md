@@ -6,7 +6,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 ## ADR 0005: Kiln's work ends at "ready to merge"; merging belongs to the target repo's Git host
 
-- Where everything the host requires has already passed, the host refuses to switch on automatic merge, and Kiln asks the host to merge instead (ADR 0049). The host's rules decide in both cases; Kiln never merges past them.
+- Where everything the Git host requires has already passed, the Git host refuses to switch on automatic merge, and Kiln asks the Git host to merge instead (ADR 0049). The Git host's rules decide in both cases; Kiln never merges past them.
 
 ## ADR 0006: Guardrails for automatic merging
 
@@ -70,15 +70,15 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 ## ADR 0025: Kiln's settings for a repo live in the instance; the repo's own Claude Code configuration is picked up from the repo
 
-- Protected paths and the required checks are not settings in the instance. For a repo that merges automatically the Git host enforces both, from the code owner file in the repo and from its own rules (ADR 0047, ADR 0049), and the checks are a command in the repo (ADR 0045). Each still has one place. The instance holds what a host cannot: whether automatic merging is used, the limit, branch naming and the toolchain image (ADR 0039).
+- Protected paths and the required checks are not settings in the instance. For a repo that merges automatically the Git host enforces both, from the code owner file in the repo and from its own rules (ADR 0047, ADR 0049), and the checks are a command in the repo (ADR 0045). Each still has one place. The instance holds what a Git host cannot: whether automatic merging is used, the limit, branch naming and the toolchain image (ADR 0039).
 
 ## ADR 0026: Kiln's repo lives in the developer's personal space on their company's GitHub; checks run on the developer's machine
 
 - How the checks are defined (ADR 0045).
 - How the runner is protected: isolated like a hosted runner, not sealed like a run (ADR 0046).
 - Where tests run that need the container engine, which the runner does not have (ADR 0048).
-- Kiln cannot act as an app on a personal repo on this host, so the fallback this decision names was taken: a public repo on github.com under the developer's personal account, with checks on the host's own runners (ADR 0049). GitHub as the first Git host, Kiln building no checker, and Kiln acting under its own identity all stand.
-- Of this decision's cost rules, two stand: Kiln's repo causes no billable usage, and there are no hosted background jobs. The rules about the developer's own runner and its caches ended with that runner (ADR 0049). What may be stored on the host, and how CPU time per check run is recorded there (ADR 0031), is settled by the card that needs it.
+- Kiln cannot act as an app on a personal repo on this Git host, so the fallback this decision names was taken: a public repo on github.com under the developer's personal account, with checks on the Git host's own runners (ADR 0049). GitHub as the first Git host, Kiln building no checker, and Kiln acting under its own identity all stand.
+- Of this decision's cost rules, two stand: Kiln's repo causes no billable usage, and there are no hosted background jobs. The rules about the developer's own runner and its caches ended with that runner (ADR 0049). What may be stored on the Git host, and how CPU time per check run is recorded there (ADR 0031), is settled by the card that needs it.
 
 ## ADR 0030: Opus for spec and review, a model proposed per card for implement, Fable only as an advisor
 
@@ -95,7 +95,9 @@ A line says what was settled and, where it matters, when and by which card. The 
 - The file is SQLite, and `sqlite3 <file> .dump` is the readable export of rule 2 (ADR 0057).
 - The schema is version 2: besides cards and their entries, an `instance` table with one row, the instance's identity of eight hex digits, and a `runs` table with one row per run, with a run's ending empty while it is in flight. A run's row is kept for good, so that the measures can count it (ADR 0029, ADR 0030); the files of its record stay until its card is done or dropped (ADR 0053), and are removed by the card that first ends a card.
 
-## ADR 0034: Kiln is a core on the host, a proxy in a container, and one detached container per run
+## ADR 0034: Kiln is a core on the developer's machine, a proxy in a container, and one detached container per run
+
+> Since ADR 0059 a run with a list of hosts has a way out, a fourth kind of process. The lines below still hold.
 
 - The core is not started from a checkout but from a program built in a sealed container (ADR 0036, ADR 0037).
 
@@ -115,6 +117,8 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 ## ADR 0038: The container engine carries everything into and out of a run
 
+> Since ADR 0059 a run with a list of hosts also reaches the hosts on its list. The lines below still hold.
+
 - What is placed in a run, and how: the commit's files under `/work`, owned by the run's user, and the instruction at `/kiln/instruction.md`. The seal writes them as one archive into a container that has never started, and refuses absolute names, `..` and anything but files, directories and symlinks, so nothing else can be placed.
 - The change is collected by saving the working tree in a throwaway container from the run image, with no network, the run's user and limits, and no mounts. The engine pipes the tree from the run's container into it, so nothing of it is unpacked on the developer's machine; what comes back is a tree and a pack of its new objects.
 - A stage's documents and the run's sessions are kept as the archives the engine hands over, `documents.tar` and `session.tar` in the run's record, and are never unpacked on the developer's machine.
@@ -128,6 +132,8 @@ A line says what was settled and, where it matters, when and by which card. The 
 - Whether runs that lose the credential while the core is down use up a card's retry, or pause the instance as rule 3 of ADR 0016 says for a failure of the instance, is listed in docs/open-points.md.
 
 ## ADR 0041: A sealed network has no gateway and holds one run
+
+> Since ADR 0059 a run with a list of hosts shares its network with its way out as well. The lines below still hold; where one says that a run reaches the proxy and nothing else, it speaks of a run without a list.
 
 - This decision's measurements were IPv4 only. On 2026-11-17 a run network with IPv6 off turned out to keep IPv6 on its bridge on the virtual machine, with a link-local address; a container with Docker's default capabilities has `NET_RAW`, sent raw frames to it, and reached the virtual machine's remote login and a published port. A run network is now closed in both families: IPv6 on, with the gateway mode isolated for IPv4 and IPv6, which leaves the bridge with IPv6 off and no address. The proxy has forwarding off in both families, and the seal's test checks both.
 - As a non-root user a run has no effective capabilities whatever is dropped, and the bounding set matters only through setuid and file-capability programs. A run's container drops all capabilities and sets `no-new-privileges`, by the developer's decision of 2026-11-17.
@@ -153,10 +159,12 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 ## ADR 0045: Kiln's checks are one command that runs the tools directly in the toolchain image
 
-- "The same everywhere" holds for what the check command can run inside the toolchain image. Tests that need the container engine run in the checks on the host only (ADR 0049); how they are started there is settled by the first card that has such a test.
+- "The same everywhere" holds for what the check command can run inside the toolchain image. Tests that need the container engine run in the checks on the Git host only (ADR 0049); how they are started there is settled by the first card that has such a test.
 - The toolchain image carries the Go modules of `go.mod` and `go.sum`, downloaded when it is built, so that the check finds them with the network off (ADR 0057).
 
 ## ADR 0047: One repo with one Go module, divided by Kiln's parts, with guardrail files in a few named places
+
+> Since ADR 0059 the way out is a part as well, and its program is a place of the seal. The lines below still hold.
 
 - One more named place: Kiln's own stage instructions, in `instructions/` (ADR 0056).
 - The places of the seal, which ADR 0048 names as protected, are `cmd/proxy/` and `internal/seal/`; the image of the proxy is under `images/`.
@@ -170,4 +178,4 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 ## ADR 0049: Kiln's repo is public on GitHub, under the developer's personal account
 
-- The engine tests are started by `check/in-image`: always on the host's runner, and on the developer's machine only with `--engine`, so that a test built from a card's branch does not run there unasked (ADR 0048). They are compiled in the toolchain image with the network off and run on the host, since the image has no engine.
+- The engine tests are started by `check/in-image`: always on the Git host's runner, and on the developer's machine only with `--engine`, so that a test built from a card's branch does not run there unasked (ADR 0048). They are compiled in the toolchain image with the network off and run on the machine that runs the check, since the image has no engine.

@@ -16,7 +16,7 @@ A sealed run has:
 
 The proxy adds the Claude credential to requests and renews it in one place, so agents never hold a token and never renew one themselves. In the developer's setup the credential comes from a single browser sign-in and is renewed silently afterwards, so the proxy needs the renewable secret, not the developer's presence. Having each run ask a process on the developer's machine for tokens would fail in the middle of runs whenever that process is unreachable.
 
-Because the agent never pushes, the only thing that writes to a Git host is Kiln's own publishing. Kiln pushes only to branches that match the target repo's card branch pattern (ADR 0013) and never to any other branch, whatever the host would allow. Anthropic's self-hosted Managed Agents server restricts its agents' pushes to listed branch prefixes in the same way (ADR 0002).
+Because the agent never pushes, the only thing that writes to a Git host is Kiln's own publishing. Kiln pushes only to branches that match the target repo's card branch pattern (ADR 0013) and never to any other branch, whatever the Git host would allow. Anthropic's self-hosted Managed Agents server restricts its agents' pushes to listed branch prefixes in the same way (ADR 0002).
 
 ## Consequences
 

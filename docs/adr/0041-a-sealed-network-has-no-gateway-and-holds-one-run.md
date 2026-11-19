@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: superseded in part by ADR 0059
 ---
 
 # A sealed network has no gateway and holds one run
+
+> Revised in part by ADR 0059: point 2's "shared only with the proxy" no longer holds for a run that has a list of hosts. It shares its network with its way out as well.
 
 "No network except a proxy" (ADR 0017) is not what the container engine's internal networks give by themselves. Measured on the developer's container engine on 2026-11-14, where the engine's virtual machine also hosts a Kubernetes cluster with the developer's work applications: a container on a plain internal network could not reach the internet, the developer's machine or the cluster's pods, but through the network's gateway address it reached the virtual machine's own services, among them remote login, the cluster's API and a port published by a work application. Containers on the same network could also reach each other.
 
