@@ -153,6 +153,20 @@ func TestTick(t *testing.T) {
 					if got := containerState(t, c.run); got != "created" {
 						t.Errorf("the container is %q, want created and never started", got)
 					}
+					// A placing broken off halfway leaves a prefix of the same
+					// archive: some files written, the last of them cut short.
+					// Here, as root, which a placing never writes as: a cut
+					// NOTES.md, another CLAUDE.md, a cut instruction. Placing
+					// again must write each as the commit has it.
+					dir := t.TempDir()
+					for name, data := range map[string]string{"NOTES.md": "# No", "CLAUDE.md": "other\n", "instruction.md": "Add a"} {
+						if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					must(t, "cp", filepath.Join(dir, "NOTES.md"), "kiln-run-"+c.run+":/work/NOTES.md")
+					must(t, "cp", filepath.Join(dir, "CLAUDE.md"), "kiln-run-"+c.run+":/work/CLAUDE.md")
+					must(t, "cp", filepath.Join(dir, "instruction.md"), "kiln-run-"+c.run+":/kiln/instruction.md")
 				case "before-end":
 					if inFlight == nil {
 						t.Error("no run is in flight after result.json")
@@ -180,38 +194,59 @@ func TestTick(t *testing.T) {
 		}
 	})
 
-	t.Run("interrupted, then started again", func(t *testing.T) {
+	// From AddRun until the result is recorded, nothing removes the run's
+	// container: a core that fails at a step, is interrupted or is killed
+	// there leaves the run in flight with its container and network, and a
+	// later core ends it finished, with one start in all. The steps are those
+	// between AddRun and the first event of following, on the first start and
+	// for a run in the store whose container never started.
+	t.Run("a failure between AddRun and following", func(t *testing.T) {
 		for _, tc := range []struct {
-			name   string
-			exitAt string // a first core's kill, before the interrupted one
-			at     string // where the interrupted core interrupts itself
+			name     string
+			inStore  bool   // a first core was killed after AddRun, leaving the container created
+			hook     string // the faulty core's Hook
+			repo     string // the faulty core's --repo, when it differs
+			image    string // the faulty core's --image, when it differs
+			exitCode int    // the faulty core's exit status
 		}{
-			{"right after AddRun", "", "tick:after-add"},
-			{"while a stored run is created again", "after-add", "run:create"},
+			{name: "first start: the start, interrupted", hook: "tick:after-add:interrupt"},
+			{name: "first start: after the start", hook: "run:start:fail", exitCode: exitAtPoint},
+			{name: "in the store: step 0, with no repo", inStore: true, repo: "/nonexistent/repo.git", exitCode: exitAtPoint},
+			{name: "in the store: placing again", inStore: true, hook: "run:place:fail", exitCode: exitAtPoint},
+			{name: "in the store: the start, interrupted", inStore: true, hook: "run:place:interrupt"},
+			{name: "in the store: after the start", inStore: true, hook: "run:start:fail", exitCode: exitAtPoint},
+			{name: "in the store: with a missing image", inStore: true, image: "kiln-ticktest-no-such-image", exitCode: exitAtPoint},
+			{name: "in the store: killed after placing again", inStore: true, hook: "run:place:exit", exitCode: exitAtPoint},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				c := f.newCase(t, f.standIn)
 				f.card(t, c, "Add a line to NOTES.md.")
-				if tc.exitAt != "" {
-					_, done := f.core(t, c, tc.exitAt)
+				if tc.inStore {
+					_, done := f.core(t, c, "after-add")
 					if code := <-done; code != exitAtPoint {
-						t.Fatalf("the first core exited with %d, want %d at %s", code, exitAtPoint, tc.exitAt)
+						t.Fatalf("the first core exited with %d, want %d after AddRun", code, exitAtPoint)
 					}
 				}
-				ch := child{Command: "core", Config: f.config(c), InterruptAt: tc.at}
-				if code, out, errOut := f.kiln(t, ch); code != 0 {
-					t.Fatalf("the interrupted core exited with %d\n%s%s", code, out, errOut)
+				cfg := f.config(c)
+				if tc.repo != "" {
+					cfg.Repo = tc.repo
 				}
-				// The run is in flight, and its container is there.
+				if tc.image != "" {
+					cfg.Image = tc.image
+				}
+				// A core that does not end by its hook ends after one tick.
+				ch := child{Command: "core", Config: cfg, Hook: tc.hook, ExitAt: "ticked"}
+				if code, out, errOut := f.kiln(t, ch); code != tc.exitCode {
+					t.Fatalf("the faulty core exited with %d, want %d\n%s%s", code, tc.exitCode, out, errOut)
+				}
+
 				s := f.open(t, c)
 				inFlight, err := s.InFlight(1)
 				s.Close()
 				if err != nil || inFlight == nil || inFlight.ID != c.run {
 					t.Errorf("the run in flight is %+v (%v), want %s", inFlight, err, c.run)
 				}
-				if got := containerState(t, c.run); got == "" {
-					t.Error("the interrupt removed the run's container")
-				}
+				assertKept(t, c.run)
 
 				core, done := f.core(t, c, "")
 				f.waitEnded(t, c)
@@ -219,6 +254,35 @@ func TestTick(t *testing.T) {
 				f.assertEnded(t, c, store.Finished)
 			})
 		}
+	})
+
+	// Where the window was: a run in the store whose container is created
+	// again was removed first, and a kill before the new one existed lost the
+	// run. The core is killed at the first removal of the run's container,
+	// which must come only after the run has ended in the store.
+	t.Run("killed at the first removal of a stored run's container", func(t *testing.T) {
+		c := f.newCase(t, f.standIn)
+		f.card(t, c, "Add a line to NOTES.md.")
+		_, done := f.core(t, c, "after-add")
+		if code := <-done; code != exitAtPoint {
+			t.Fatalf("the first core exited with %d, want %d after AddRun", code, exitAtPoint)
+		}
+		destroyed := watchEvents(t, c.instance, "destroy", time.Now())
+		core, done := f.core(t, c, "")
+		waitUntil(t, "the run's container is removed", func() bool { return destroyed.count() > 0 })
+		core.Process.Signal(syscall.SIGKILL)
+		<-done
+
+		s := f.open(t, c)
+		inFlight, err := s.InFlight(1)
+		s.Close()
+		if err != nil || inFlight != nil {
+			t.Errorf("the run's container was removed while the run was in flight: %+v (%v)", inFlight, err)
+		}
+		core, done = f.core(t, c, "")
+		f.waitEnded(t, c)
+		f.stop(t, core, done)
+		f.assertEnded(t, c, store.Finished)
 	})
 
 	t.Run("a vanished run", func(t *testing.T) {
@@ -581,6 +645,11 @@ func (f *fixture) assertEnded(t *testing.T, c *testCase, ending store.Ending) st
 		if len(commits) != 1 {
 			t.Fatalf("kiln/card-1 holds %d commits on top of the start, want 1", len(commits))
 		}
+		// Only the run's change: files placed again over a container's earlier,
+		// or broken, placing are as the commit has them.
+		if got := gitIn(t, c.repo, "diff", "--name-only", c.commit, commits[0]); got != "NOTES.md" {
+			t.Errorf("the save changes %q, want only NOTES.md", got)
+		}
 		if got := gitIn(t, c.repo, "show", commits[0]+":NOTES.md"); got != "# Notes\nA line from the run." {
 			t.Errorf("NOTES.md of the save is %q", got)
 		}
@@ -615,6 +684,17 @@ func (f *fixture) snapshot(t *testing.T, c *testCase) string {
 		fmt.Fprintf(&b, "runs %d %v\n", n, err)
 	}
 	return b.String()
+}
+
+// assertKept asserts that a run's container and network are there.
+func assertKept(t *testing.T, id string) {
+	t.Helper()
+	if containerState(t, id) == "" {
+		t.Error("the run's container is gone")
+	}
+	if _, err := docker(t.Context(), "network", "inspect", "kiln-run-"+id); err != nil {
+		t.Error("the run's network is gone")
+	}
 }
 
 // containerState is the state of a run's container, or "" when there is none.
@@ -666,10 +746,17 @@ func (l *lines) count() int {
 // work on it can push a start out of them.
 func watchStarts(t *testing.T, instance string) *lines {
 	t.Helper()
+	return watchEvents(t, instance, "start", time.Now().Add(-5*time.Second))
+}
+
+// watchEvents follows the engine's events of one kind for an instance's
+// containers from since on, and collects them.
+func watchEvents(t *testing.T, instance, event string, since time.Time) *lines {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &lines{}
-	cmd := exec.CommandContext(ctx, "docker", "events", "--since", strconv.FormatInt(time.Now().Add(-5*time.Second).Unix(), 10),
-		"--filter", "type=container", "--filter", "label=kiln.instance="+instance, "--filter", "event=start",
+	cmd := exec.CommandContext(ctx, "docker", "events", "--since", strconv.FormatInt(since.Unix(), 10),
+		"--filter", "type=container", "--filter", "label=kiln.instance="+instance, "--filter", "event="+event,
 		"--format", "{{.Actor.ID}}")
 	cmd.Stdout = l
 	if err := cmd.Start(); err != nil {

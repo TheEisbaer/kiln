@@ -24,11 +24,12 @@ type child struct {
 	Config  Config // of core
 	Text    string // of card
 	ExitAt  string // the point of a tick at which core exits, as a kill there would
-	// Where core interrupts itself, as SIGINT or SIGTERM there would:
-	// tick:<point> at a point of the tick, run:<step> after a step of
-	// internal/run. The hook returns once the interrupt has cancelled the
-	// core's context.
-	InterruptAt string
+	// Hook is <where>:<point>:<how>. Where is tick, a point of the tick, or
+	// run, a step of internal/run, after which the hook is called. How is
+	// exit, as a kill there would end core; interrupt, as SIGINT or SIGTERM
+	// there would, returning once the interrupt has cancelled core's context;
+	// or fail, which fails the step (run only).
+	Hook string
 }
 
 // exitAtPoint is the status with which the binary exits at a point, as a kill
@@ -66,25 +67,31 @@ func asKiln(spec string) int {
 		interval = testInterval
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		interrupt := func() {
-			syscall.Kill(os.Getpid(), syscall.SIGINT)
-			<-ctx.Done()
-		}
-		where, what, _ := strings.Cut(c.InterruptAt, ":")
-		atPoint = func(point string) {
-			switch point {
-			case c.ExitAt:
+		where, point, how := hook(c.Hook)
+		act := func() error {
+			switch how {
+			case "exit":
 				os.Exit(exitAtPoint)
-			case what:
-				if where == "tick" {
-					interrupt()
-				}
+			case "interrupt":
+				syscall.Kill(os.Getpid(), syscall.SIGINT)
+				<-ctx.Done()
+			case "fail":
+				return fmt.Errorf("failed by the test after the step %s", point)
+			}
+			return nil
+		}
+		atPoint = func(p string) {
+			switch {
+			case p == c.ExitAt:
+				os.Exit(exitAtPoint)
+			case where == "tick" && p == point:
+				act()
 			}
 		}
 		if where == "run" {
 			run.SetAfterStep(func(step string) error {
-				if step == what {
-					interrupt()
+				if step == point {
+					return act()
 				}
 				return nil
 			})
@@ -97,6 +104,13 @@ func asKiln(spec string) int {
 	}
 	fmt.Fprintf(os.Stderr, "no command %q\n", c.Command)
 	return 2
+}
+
+// hook splits a child's Hook into where, the point and how.
+func hook(h string) (where, point, how string) {
+	where, rest, _ := strings.Cut(h, ":")
+	point, how, _ = strings.Cut(rest, ":")
+	return where, point, how
 }
 
 // names are the actions' names, for the test's messages.

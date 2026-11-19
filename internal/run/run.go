@@ -320,7 +320,7 @@ func carry(ctx context.Context, in Inputs, out, errOut io.Writer, starting func(
 
 	switch status {
 	case "", "created":
-		if err := r.create(ctx, starting, stored); err != nil {
+		if err := r.create(ctx, starting, stored, status); err != nil {
 			return nil, err
 		}
 		fallthrough
@@ -377,25 +377,38 @@ func (r *run) undo(ctx context.Context, err error) error {
 // create is steps 1 to 3: create the run, place its files, and start it.
 // starting, when it is not nil, is called right before the start.
 //
-// With stored, a run that is in the store, because starting has returned or
-// because starting is nil, is not undone by an interrupt (ADR 0035, rule 1):
-// its steps up to the start go on with a context that is not cancelled, and
-// only the following ends. Otherwise an interrupt would remove a run the store
-// holds in flight, and the next tick would find it gone and fail it.
-func (r *run) create(ctx context.Context, starting func() error, stored bool) error {
-	if stored && starting == nil {
-		ctx = context.WithoutCancel(ctx)
-	}
-	// 1: CreateRun leaves nothing behind when it fails.
-	if err := seal.CreateRun(ctx, seal.Run{ID: r.ID, Image: r.Image, Proxy: r.Proxy,
-		Command: r.command(), Labels: r.labels(), Instance: r.Instance}); err != nil {
-		return err
-	}
-	if err := after("create"); err != nil {
+// With stored, the run is in the store from the moment starting has returned,
+// or from the outset when starting is nil. From then on nothing here removes
+// its container or network (ADR 0035, rule 1): a step that fails returns its
+// error, and the next tick goes on from what is there. A run in the store whose
+// container never started is not created again, which would remove the
+// container first; its files are placed again into the container that is
+// there, and it is started. Without stored, as for `kiln run` by hand, a
+// container that never started is removed when a step fails, and one that is
+// there is created again.
+func (r *run) create(ctx context.Context, starting func() error, stored bool, status string) error {
+	inStore := stored && starting == nil
+	// undo removes what this call made, but never a run that is in the store.
+	undo := func(err error) error {
+		if inStore {
+			return err
+		}
 		return r.undo(ctx, err)
 	}
 
-	// 2
+	// 1: CreateRun leaves nothing behind when it fails.
+	if !(inStore && status == "created") {
+		if err := seal.CreateRun(ctx, seal.Run{ID: r.ID, Image: r.Image, Proxy: r.Proxy,
+			Command: r.command(), Labels: r.labels(), Instance: r.Instance}); err != nil {
+			return err
+		}
+		if err := after("create"); err != nil {
+			return undo(err)
+		}
+	}
+
+	// 2: the same files of the same commit, whose labels step 0 checked, are
+	// written again into a container that was placed into before.
 	files, err := placingTar(ctx, r.Repo, r.entries)
 	if err == nil {
 		err = seal.PlaceRun(ctx, r.ID, bytes.NewReader(files), r.instruction)
@@ -404,16 +417,16 @@ func (r *run) create(ctx context.Context, starting func() error, stored bool) er
 		err = after("place")
 	}
 	if err == nil && starting != nil {
-		err = starting()
-		if err == nil && stored {
-			ctx = context.WithoutCancel(ctx)
+		if err = starting(); err == nil {
+			inStore = stored
 		}
 	}
 	if err != nil {
-		return r.undo(ctx, err)
+		return undo(err)
 	}
 
-	// 3: a container that never started is removed; one that did stays.
+	// 3: a container that never started is removed, unless its run is in the
+	// store; one that did stays.
 	err = seal.StartRun(ctx, r.ID)
 	if err == nil {
 		err = after("start")
@@ -421,7 +434,7 @@ func (r *run) create(ctx context.Context, starting func() error, stored bool) er
 	if err != nil {
 		state, inspectErr := seal.InspectRun(context.WithoutCancel(ctx), r.ID)
 		if inspectErr == nil && state != nil && state.Status == "created" {
-			return r.undo(ctx, err)
+			return undo(err)
 		}
 		return err
 	}
