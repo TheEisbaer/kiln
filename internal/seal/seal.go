@@ -178,6 +178,12 @@ func createContainer(ctx context.Context, env []string, verb string, args ...str
 //
 // On failure nothing is left behind.
 func CreateRunNetwork(ctx context.Context, id, proxy string) error {
+	return createRunNetwork(ctx, id, proxy, "")
+}
+
+// createRunNetwork is CreateRunNetwork, with the label
+// kiln.instance=<instance> on the network when an instance is given.
+func createRunNetwork(ctx context.Context, id, proxy, instance string) error {
 	if err := checkRunID(id); err != nil {
 		return err
 	}
@@ -186,15 +192,19 @@ func CreateRunNetwork(ctx context.Context, id, proxy string) error {
 		return err
 	}
 	name := runName(id)
-	_, err = docker(ctx, nil,
+	args := []string{
 		"network", "create",
 		"--driver", "bridge",
 		"--internal",
 		"--ipv6",
 		"--opt", "com.docker.network.bridge.gateway_mode_ipv4=isolated",
 		"--opt", "com.docker.network.bridge.gateway_mode_ipv6=isolated",
-		"--label", runLabel+"="+id,
-		name)
+		"--label", runLabel + "=" + id,
+	}
+	if instance != "" {
+		args = append(args, "--label", instanceLabel+"="+instance)
+	}
+	_, err = docker(ctx, nil, append(args, name)...)
 	if err != nil {
 		return err
 	}

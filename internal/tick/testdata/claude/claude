@@ -1,0 +1,32 @@
+#!/bin/sh
+# Stands in for Claude Code in the tick test, where Claude Code's behaviour is
+# not under test. It prints only the two events that internal/run reads
+# (events.go), with their fields as the pinned Claude Code 2.1.326 prints them:
+# system/init with the --model it was given, and a success result. In between
+# it appends a line to NOTES.md. A word in the instruction, which comes on
+# standard input, changes that: kiln-stand-in-gate makes it wait for
+# /tmp/gate first, and kiln-stand-in-fail makes it exit 1 with no result.
+#
+# The card that changes the pin in images/run/Dockerfile updates it. The tick
+# test's run of the real Claude Code fails when an event or a field printed
+# here has no counterpart of the same JSON type in the real output.
+set -eu
+model=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --model) model=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+instruction=$(cat)
+printf '{"type":"system","subtype":"init","model":"%s","claude_code_version":"2.1.326"}\n' "$model"
+case "$instruction" in
+    *kiln-stand-in-gate*)
+        touch /tmp/waiting
+        while [ ! -e /tmp/gate ]; do sleep 0.05; done ;;
+esac
+case "$instruction" in
+    *kiln-stand-in-fail*) exit 1 ;;
+esac
+printf 'A line from the run.\n' >> NOTES.md
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.0001}\n'

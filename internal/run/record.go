@@ -92,6 +92,24 @@ func (rec *record) status() int {
 	return exitFailed
 }
 
+// reason is the verdict's line: the container's ending, the result's subtype,
+// turns and cost, and the saved commit or "no change".
+func (rec *record) reason() string {
+	ending := fmt.Sprintf("exit %d", rec.Ending.ExitCode)
+	if rec.Ending.OOMKilled {
+		ending += ", killed for memory"
+	}
+	result := "no result"
+	if rec.Result != nil {
+		result = fmt.Sprintf("result %s, %d turns, $%.4f", printable(rec.Result.Subtype), rec.Result.NumTurns, rec.Result.TotalCostUSD)
+	}
+	saved := rec.Saved
+	if saved != noChange {
+		saved = "saved " + saved
+	}
+	return ending + ", " + result + ", " + saved
+}
+
 // partialDir is where a run is collected before it is recorded.
 func partialDir(runs, id string) string { return filepath.Join(runs, id+".partial") }
 

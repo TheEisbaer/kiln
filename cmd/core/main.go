@@ -1,7 +1,9 @@
-// Command core is Kiln's core (ADR 0034), built as kiln. For now it has two
-// commands: `kiln run` carries out one run started by hand, and `kiln proxy`
+// Command core is Kiln's core (ADR 0034), built as kiln. Its commands: `kiln
+// core` ticks, and gives every card that waits for a run its run; `kiln card`
+// writes a card that waits for a run, standing in for the API until it comes
+// (ADR 0044); `kiln run` carries out one run started by hand; and `kiln proxy`
 // starts the proxy with a credential from the credential command (ADR 0040).
-// It only parses flags and calls internal/run and the seal.
+// It only parses flags and calls internal/tick, internal/run and the seal.
 package main
 
 import (
@@ -11,9 +13,11 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/seal"
+	"github.com/TheEisbaer/kiln/internal/tick"
 )
 
 // The proxy that `kiln proxy` starts: its container's name, its image, and the
@@ -31,6 +35,9 @@ const (
 )
 
 const usage = `usage:
+  kiln core --data <dir> --repo <bare repo> --model <id> --effort <low|medium|high>
+            [--image kiln-run] [--proxy kiln-proxy]
+  kiln card --data <dir> <text>
   kiln run --repo <bare repo> --commit <commit> --branch <branch> --run <id>
            --instruction <file> --model <id> --effort <low|medium|high> --runs <dir>
            [--image kiln-run] [--proxy kiln-proxy]
@@ -43,6 +50,10 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "core":
+		os.Exit(coreCommand(os.Args[2:], os.Stdout, os.Stderr))
+	case "card":
+		os.Exit(cardCommand(os.Args[2:], os.Stdout, os.Stderr))
 	case "run":
 		os.Exit(runCommand(os.Args[2:], os.Stdout, os.Stderr))
 	case "proxy":
@@ -51,6 +62,55 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+}
+
+// coreCommand is `kiln core`. SIGINT or SIGTERM ends it, after the following
+// of a run, which goes on.
+func coreCommand(args []string, stdout, stderr io.Writer) int {
+	var cfg tick.Config
+	fs := flag.NewFlagSet("kiln core", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.StringVar(&cfg.Data, "data", "", "the instance's data directory")
+	fs.StringVar(&cfg.Repo, "repo", "", "the instance's copy of the repo, a bare repo")
+	fs.StringVar(&cfg.Model, "model", "", "the model of the runs it starts, an exact identifier")
+	fs.StringVar(&cfg.Effort, "effort", "", "the effort of the runs it starts: low, medium or high")
+	fs.StringVar(&cfg.Image, "image", "kiln-run", "the run image")
+	fs.StringVar(&cfg.Proxy, "proxy", proxyName, "the proxy container")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 || cfg.Data == "" || cfg.Repo == "" || cfg.Model == "" || cfg.Effort == "" {
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := tick.Core(ctx, cfg, stdout, stderr); err != nil {
+		fmt.Fprintln(stderr, "kiln core:", err)
+		return 1
+	}
+	return 0
+}
+
+// cardCommand is `kiln card`: it prints the ID of the card it wrote.
+func cardCommand(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("kiln card", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	data := fs.String("data", "", "the instance's data directory")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 || *data == "" {
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	id, err := tick.AddCard(*data, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(stderr, "kiln card:", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, id)
+	return 0
 }
 
 // runCommand is `kiln run`. Ctrl-C ends the following only: the run goes on.
