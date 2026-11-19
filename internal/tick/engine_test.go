@@ -285,6 +285,35 @@ func TestTick(t *testing.T) {
 		f.assertEnded(t, c, store.Finished)
 	})
 
+	// A stored run's container that is used again gets the proxy on its
+	// network, as one that runs does: a proxy replaced since is on no earlier
+	// run's network. The stand-in never calls the proxy, so the attachment
+	// itself is asserted, while the run waits at its gate.
+	t.Run("a stored run started after the proxy was replaced", func(t *testing.T) {
+		c := f.newCase(t, f.standIn)
+		f.card(t, c, "Add a line to NOTES.md. "+gateWord)
+		_, done := f.core(t, c, "after-add")
+		if code := <-done; code != exitAtPoint {
+			t.Fatalf("the first core exited with %d, want %d after AddRun", code, exitAtPoint)
+		}
+		if err := seal.ReplaceProxy(t.Context(), f.proxy, "echo fake-credential-"+f.id); err != nil {
+			t.Fatal(err)
+		}
+		if proxyOn(t, f.proxy.Name, "kiln-run-"+c.run) {
+			t.Fatal("the replaced proxy is on the run's network already")
+		}
+
+		core, done := f.core(t, c, "")
+		f.waitAtGate(t, c)
+		if !proxyOn(t, f.proxy.Name, "kiln-run-"+c.run) {
+			t.Error("the run started without the proxy on its network")
+		}
+		must(t, "exec", "kiln-run-"+c.run, "touch", "/tmp/gate")
+		f.waitEnded(t, c)
+		f.stop(t, core, done)
+		f.assertEnded(t, c, store.Finished)
+	})
+
 	t.Run("a vanished run", func(t *testing.T) {
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. "+gateWord)
@@ -684,6 +713,17 @@ func (f *fixture) snapshot(t *testing.T, c *testCase) string {
 		fmt.Fprintf(&b, "runs %d %v\n", n, err)
 	}
 	return b.String()
+}
+
+// proxyOn reports whether a proxy container is attached to a network.
+func proxyOn(t *testing.T, proxy, network string) bool {
+	t.Helper()
+	var networks map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(must(t, "inspect", "--format", "{{json .NetworkSettings.Networks}}", proxy)), &networks); err != nil {
+		t.Fatal(err)
+	}
+	_, ok := networks[network]
+	return ok
 }
 
 // assertKept asserts that a run's container and network are there.

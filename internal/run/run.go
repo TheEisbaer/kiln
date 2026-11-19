@@ -396,8 +396,14 @@ func (r *run) create(ctx context.Context, starting func() error, stored bool, st
 		return r.undo(ctx, err)
 	}
 
-	// 1: CreateRun leaves nothing behind when it fails.
-	if !(inStore && status == "created") {
+	// 1: CreateRun leaves nothing behind when it fails. A container that is
+	// used again keeps everything CreateRun gave it but the proxy on its
+	// network: a proxy replaced since is on no earlier run's network.
+	if inStore && status == "created" {
+		if err := seal.AttachProxy(ctx, r.ID, r.Proxy); err != nil {
+			return err
+		}
+	} else {
 		if err := seal.CreateRun(ctx, seal.Run{ID: r.ID, Image: r.Image, Proxy: r.Proxy,
 			Command: r.command(), Labels: r.labels(), Instance: r.Instance}); err != nil {
 			return err
