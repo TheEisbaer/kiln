@@ -224,7 +224,7 @@ func send(t *testing.T, srv *httptest.Server, method, target string) (int, strin
 func TestWayOut(t *testing.T) {
 	answers := map[string][]string{
 		"public.example":   {"3ffe:c12::1", "8.8.8.8"},
-		"mapped.example":   {"::ffff:8.8.8.8"}, // as Go's resolver gives an A record
+		"mapped.example":   {"::ffff:8.8.8.8"}, // an AAAA record in mapped form
 		"private.example":  {"172.18.0.3"},
 		"inmapped.example": {"::ffff:10.0.0.1"},
 		"mixed.example":    {"172.18.0.4", "3ffe:c12::2"},

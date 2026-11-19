@@ -35,7 +35,7 @@ type connectWant struct {
 // test's networks, not in the way out. The other cases create, repeat and
 // remove runs with a list, and refuse what Kiln did not make.
 func testWayOut(t *testing.T, f fixture, credentials []string, published, other string, noConnection []string) {
-	marker := "kiln-page-" + f.name("")
+	marker := "kiln-page-" + strings.TrimSuffix(f.name(""), "-")
 
 	// The test's networks: the "public" one in 3ffe::/16, IPv6 only, with no
 	// gateway, and an ordinary private one with IPv6.

@@ -279,7 +279,10 @@ func (w *web) testInStore(t *testing.T) {
 		killedAt(t, c, "place")
 		must(t, "rm", "--force", "kiln-wayout-"+c.id)
 		before := ids(t, c.id)
-		_, err := Carry(t.Context(), c.in, nil, &bytes.Buffer{})
+		// Bounded: a run that started by mistake would wait at its gate.
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+		defer cancel()
+		_, err := Carry(ctx, c.in, nil, &bytes.Buffer{})
 		if err == nil || !strings.Contains(err.Error(), "is gone; the run is left alone") {
 			t.Errorf("Carry: %v, want that the way out is gone", err)
 		}
