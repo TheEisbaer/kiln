@@ -21,4 +21,4 @@ Kiln is developed with Kiln first, to drive it forward on a repo the developer f
 
 ## Consequences
 
-- The first Git host Kiln supports is whichever one hosts Kiln's own repo. ADR 0026 settles that as GitHub. The work repo is on Azure DevOps today and is moving to the same GitHub, so a second host is needed only if Kiln is wanted on the work repo before that move.
+- The first Git host Kiln supports is whichever one hosts Kiln's own repo. ADR 0026 settles that as GitHub. The work repo is on Azure DevOps today and is moving to the same GitHub, so a second Git host is needed only if Kiln is wanted on the work repo before that move.

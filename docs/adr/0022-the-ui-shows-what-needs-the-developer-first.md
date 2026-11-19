@@ -19,7 +19,7 @@ In the POC Kiln sends no notifications. The "needs you" screen is where the deve
 ## Considered options
 
 - **A full board first**: rejected for the POC; it is the picture of the flow, not the place where the developer's attention is spent.
-- **No UI of its own (a command-line tool, or cards as issues on the Git host)**: rejected; issues would tie what a card is to one host's features while the host is still undecided.
+- **No UI of its own (a command-line tool, or cards as issues on the Git host)**: rejected; issues would tie what a card is to one Git host's features while the Git host is still undecided.
 
 ## Consequences
 

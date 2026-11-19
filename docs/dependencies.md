@@ -22,7 +22,7 @@ not read by the check command.
 
 ### The Go image
 
-- **For:** The toolchain image of this repo (`images/toolchain/`), in which the check runs on the host's runner and on the developer's machine. The image also carries the Go modules of `go.mod` and `go.sum`, downloaded when it is built, and has the module proxy turned off (ADR 0057).
+- **For:** The toolchain image of this repo (`images/toolchain/`), in which the check runs on the Git host's runner and on the developer's machine. The image also carries the Go modules of `go.mod` and `go.sum`, downloaded when it is built, and has the module proxy turned off (ADR 0057).
 - **Looked at:** Installing Go from its release archive onto a plain base image, which would make the image ours to maintain for no gain; the Alpine variant of the Go image, which has no advantage for a program without C code.
 - **Why this one:** It is the Go project's own official image, it carries the toolchain that builds the core (ADR 0037), and it is pinned by digest so that a moved tag changes nothing.
 - **Licence:** Go is BSD-3-Clause. The Debian packages in the image carry their own licences; none of them becomes part of Kiln's programs.
@@ -52,5 +52,5 @@ not read by the check command.
 
 - **For:** Driving the container engine from `internal/seal` and from `check/in-image`: networks, containers, images, and copying files into a run's container.
 - **Looked at:** The engine's Go client library, a Go module with many dependencies of its own; the engine's HTTP API over its socket directly, which would be Kiln's own client to write and keep up.
-- **Why this one:** It is there wherever the engine is, on the developer's machine and on the host's runner, adds no Go module, and is the interface every measurement in the ADRs was made with. Kiln does not pin it; the engine's stable API is what the seal relies on.
+- **Why this one:** It is there wherever the engine is, on the developer's machine and on the Git host's runner, adds no Go module, and is the interface every measurement in the ADRs was made with. Kiln does not pin it; the engine's stable API is what the seal relies on.
 - **Licence:** Apache-2.0. It is not part of Kiln's programs; they run it.
