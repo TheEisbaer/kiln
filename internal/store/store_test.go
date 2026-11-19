@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 3"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 4"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 3 was opened")
+		t.Fatal("a store of version 4 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 3") || !strings.Contains(msg, "version 2") {
+	if msg := err.Error(); !strings.Contains(msg, "version 4") || !strings.Contains(msg, "version 3") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 3 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 3 and 0", v, tables)
+	if v != 4 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 4 and 0", v, tables)
 	}
 }
 
@@ -410,10 +410,10 @@ func TestEndRun(t *testing.T) {
 
 	// What cannot be written leaves the run in flight and the card as it was.
 	for name, call := range map[string]func() error{
-		"an unknown ending": func() error { _, err := s.EndRun(run.ID, "withdrawn", "", State{Spec, Approval}); return err },
-		"no ending":         func() error { _, err := s.EndRun(run.ID, "", "", State{Spec, Approval}); return err },
-		"an invalid state":  func() error { _, err := s.EndRun(run.ID, Finished, "", State{Done, Run}); return err },
-		"an unknown run":    func() error { _, err := s.EndRun("nothing", Finished, "", State{Spec, Approval}); return err },
+		"an unknown ending": func() error { _, err := s.EndRun(run.ID, "withdrawn", "", State{Spec, Approval}, nil); return err },
+		"no ending":         func() error { _, err := s.EndRun(run.ID, "", "", State{Spec, Approval}, nil); return err },
+		"an invalid state":  func() error { _, err := s.EndRun(run.ID, Finished, "", State{Done, Run}, nil); return err },
+		"an unknown run":    func() error { _, err := s.EndRun("nothing", Finished, "", State{Spec, Approval}, nil); return err },
 	} {
 		if err := call(); err == nil {
 			t.Errorf("EndRun with %s was accepted", name)
@@ -426,7 +426,7 @@ func TestEndRun(t *testing.T) {
 		t.Fatalf("a refused EndRun changed the card: %+v", got)
 	}
 
-	moved, err := s.EndRun(run.ID, Finished, "saved abc123", State{Spec, Approval})
+	moved, err := s.EndRun(run.ID, Finished, "saved abc123", State{Spec, Approval}, nil)
 	if err != nil || moved.State != (State{Spec, Approval}) || moved.Text != "a card" {
 		t.Fatalf("EndRun returned %+v, %v", moved, err)
 	}
@@ -450,7 +450,7 @@ func TestEndRun(t *testing.T) {
 	}
 
 	// A repeat, even with other arguments, writes nothing and finds the card.
-	again, err := s.EndRun(run.ID, Failed, "other", State{Spec, Developer})
+	again, err := s.EndRun(run.ID, Failed, "other", State{Spec, Developer}, nil)
 	if err != nil || again.State != (State{Spec, Approval}) {
 		t.Errorf("the repeated EndRun returned %+v, %v", again, err)
 	}
@@ -475,7 +475,7 @@ func TestEndRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s2, theRun(c2.ID, "r"))
-	if _, err := s2.EndRun("r", Failed, "", State{Spec, Developer}); err != nil {
+	if _, err := s2.EndRun("r", Failed, "", State{Spec, Developer}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if r, _ := s2.Run("r"); r.Ending != Failed {
@@ -483,6 +483,260 @@ func TestEndRun(t *testing.T) {
 	}
 	if h := mustHistory(t, s2, c2.ID); len(h) != 3 || h[2].Run != "r" || h[2].Reason != "" {
 		t.Errorf("history: %+v", h)
+	}
+}
+
+func ptr(s string) *string { return &s }
+
+func TestSpec(t *testing.T) {
+	s := open(t)
+	card := mustCreate(t, s, "a card")
+	if _, err := s.Move(card.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Spec(card.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("Spec of a card without one: %v", err)
+	}
+
+	// Kept exactly as written, a byte that is not UTF-8 and an escape included.
+	text := "# Spec\n\nNot UTF-8: \xff, an escape: \x1b]0;title\x07, a return: \r.\n"
+	first := RunRow{ID: "ab12cd34-1-1", Card: card.ID, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}
+	mustAddRun(t, s, first)
+	if _, err := s.EndRun(first.ID, Finished, "the reason", State{Spec, Approval}, ptr(text)); err != nil {
+		t.Fatal(err)
+	}
+	want := SpecRow{Run: first.ID, Commit: "c0ffee", Text: text}
+	if got, err := s.Spec(card.ID); err != nil || got != want {
+		t.Errorf("Spec is %+v (%v), want %+v", got, err, want)
+	}
+	h := mustHistory(t, s, card.ID)
+	if e := h[len(h)-1]; e.Run != first.ID || e.State != (State{Spec, Approval}) {
+		t.Errorf("the entry is %+v", e)
+	}
+
+	// A second EndRun, with another spec, leaves the first.
+	if _, err := s.EndRun(first.ID, Finished, "the reason", State{Spec, Approval}, ptr("another")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Spec(card.ID); err != nil || got != want || countRows(t, s, "specs") != 1 {
+		t.Errorf("after a second EndRun the spec is %+v (%v), with %d rows", got, err, countRows(t, s, "specs"))
+	}
+
+	// A later run's spec is the newest; a run ended without one adds none.
+	if _, err := s.Move(card.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
+	second := RunRow{ID: "ab12cd34-1-2", Card: card.ID, Commit: "beef", Model: "claude-opus-5-5", Effort: "high"}
+	mustAddRun(t, s, second)
+	if _, err := s.EndRun(second.ID, Finished, "", State{Spec, Developer}, ptr("the second")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Spec(card.ID); got != (SpecRow{Run: second.ID, Commit: "beef", Text: "the second"}) {
+		t.Errorf("the newest spec is %+v", got)
+	}
+	if _, err := s.Move(card.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
+	mustAddRun(t, s, theRun(card.ID, "ab12cd34-1-3"))
+	if _, err := s.EndRun("ab12cd34-1-3", Failed, "exit 1", State{Spec, Developer}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Spec(card.ID); got.Run != second.ID || countRows(t, s, "specs") != 2 {
+		t.Errorf("after a run without a spec the newest is %+v, with %d rows", got, countRows(t, s, "specs"))
+	}
+
+	// Another card's spec is its own.
+	other := mustCreate(t, s, "another")
+	if _, err := s.Spec(other.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("Spec of another card: %v", err)
+	}
+}
+
+// schemaV2 is the store of version 2 as card 8's code on main makes it, with
+// two cards, their entries and three runs, one of them in flight.
+const schemaV2 = `
+CREATE TABLE cards (
+	id INTEGER PRIMARY KEY,
+	text TEXT NOT NULL,
+	stage TEXT NOT NULL,
+	waits_for TEXT NOT NULL
+) STRICT;
+CREATE TABLE entries (
+	number INTEGER PRIMARY KEY,
+	card INTEGER NOT NULL,
+	at TEXT NOT NULL,
+	cause TEXT NOT NULL,
+	stage TEXT NOT NULL,
+	waits_for TEXT NOT NULL
+, run TEXT, reason TEXT) STRICT;
+CREATE TABLE instance (id TEXT NOT NULL) STRICT;
+CREATE TABLE runs (
+	id TEXT PRIMARY KEY,
+	card INTEGER NOT NULL,
+	commit_id TEXT NOT NULL,
+	model TEXT NOT NULL,
+	effort TEXT NOT NULL,
+	ending TEXT
+) STRICT;
+CREATE UNIQUE INDEX runs_in_flight ON runs(card) WHERE ending IS NULL;
+PRAGMA user_version = 2;
+INSERT INTO instance (id) VALUES ('ab12cd34');
+INSERT INTO cards (text, stage, waits_for) VALUES ('first card', 'spec', 'approval'), ('second card', 'spec', 'run');
+INSERT INTO entries (card, at, cause, stage, waits_for, run, reason) VALUES
+	(1, '2026-11-18T10:00:00Z', 'developer', 'backlog', 'developer', NULL, NULL),
+	(1, '2026-11-18T10:00:01Z', 'developer', 'spec', 'run', NULL, NULL),
+	(1, '2026-11-18T10:05:00Z', 'run', 'spec', 'developer', 'ab12cd34-1-1', 'exit 1, no result, no change'),
+	(1, '2026-11-18T10:06:00Z', 'developer', 'spec', 'run', NULL, NULL),
+	(1, '2026-11-18T10:09:00Z', 'run', 'spec', 'approval', 'ab12cd34-1-2', 'exit 0, saved c0ffee'),
+	(2, '2026-11-18T11:00:00Z', 'developer', 'backlog', 'developer', NULL, NULL),
+	(2, '2026-11-18T11:00:01Z', 'developer', 'spec', 'run', NULL, NULL);
+INSERT INTO runs (id, card, commit_id, model, effort, ending) VALUES
+	('ab12cd34-1-1', 1, 'c0ffee', 'claude-opus-5-5', 'high', 'failed'),
+	('ab12cd34-1-2', 1, 'c0ffee', 'claude-opus-5-5', 'high', 'finished'),
+	('ab12cd34-2-1', 2, 'beef', 'claude-opus-5-5', 'high', NULL);
+`
+
+// makeV2 writes a store of version 2 to a new file and returns its path.
+func makeV2(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "store.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// dump is every table of a store, its version and its schema, as text.
+func dump(t *testing.T, path string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var b strings.Builder
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(&b, "version %d\n", v)
+	for _, q := range []string{
+		"SELECT name, sql FROM sqlite_master ORDER BY name",
+		"SELECT * FROM instance",
+		"SELECT * FROM cards ORDER BY id",
+		"SELECT * FROM entries ORDER BY number",
+		"SELECT * FROM runs ORDER BY id",
+	} {
+		rows, err := db.Query(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cols, _ := rows.Columns()
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				t.Fatal(err)
+			}
+			// One line per row, the schema's white space collapsed.
+			var parts []string
+			for _, v := range vals {
+				parts = append(parts, strings.Join(strings.Fields(fmt.Sprint(v)), " "))
+			}
+			fmt.Fprintln(&b, strings.Join(parts, " | "))
+		}
+		rows.Close()
+	}
+	return b.String()
+}
+
+// TestMigrateV2 moves a store of version 2 forward: every card, entry and run
+// is kept, and the store has the shape of one made at version 3.
+func TestMigrateV2(t *testing.T) {
+	path := makeV2(t)
+
+	// schemaV2 is what main's code makes: the shape of a store made by the
+	// first two migrations, which are main's and unchanged.
+	made := filepath.Join(t.TempDir(), "made.db")
+	db, err := sql.Open("sqlite3", made)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migrate := range migrations[:2] {
+		if err := migrate(tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	madeDump, v2Dump := dump(t, made), dump(t, path)
+	schemaOf := func(d string) string {
+		var out []string
+		for _, line := range strings.Split(d, "\n") {
+			if strings.Contains(line, "CREATE ") {
+				out = append(out, line)
+			}
+		}
+		return strings.Join(out, "\n")
+	}
+	if got, want := schemaOf(v2Dump), schemaOf(madeDump); got != want {
+		t.Fatalf("schemaV2 differs from what main's migrations make:\n%s\n%s", got, want)
+	}
+
+	before := dump(t, path)
+	s := reopen(t, path)
+	if v := userVersion(t, s); v != 3 {
+		t.Fatalf("the store is version %d after Open, want 3", v)
+	}
+	after := dump(t, path)
+	// Every row is kept, and only the version and the new table differ.
+	keep := func(d string) string {
+		var out []string
+		for _, line := range strings.Split(d, "\n") {
+			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") && !strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") {
+				out = append(out, line)
+			}
+		}
+		return strings.Join(out, "\n")
+	}
+	if keep(after) != keep(before) {
+		t.Errorf("the move forward changed what version 2 held:\n%s\nwas\n%s", after, before)
+	}
+	if id, err := s.Instance(); err != nil || id != "ab12cd34" {
+		t.Errorf("the instance is %q, %v", id, err)
+	}
+	if r, err := s.InFlight(2); err != nil || r == nil || r.ID != "ab12cd34-2-1" {
+		t.Errorf("the run in flight is %+v, %v", r, err)
+	}
+	if h := mustHistory(t, s, 1); len(h) != 5 || h[4].Run != "ab12cd34-1-2" || h[4].Reason != "exit 0, saved c0ffee" {
+		t.Errorf("the history of card 1: %+v", h)
+	}
+	if _, err := s.Spec(1); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("a card of version 2 has a spec: %v", err)
+	}
+	// The run in flight ends with its spec.
+	if _, err := s.EndRun("ab12cd34-2-1", Finished, "done", State{Spec, Approval}, ptr("the spec")); err != nil {
+		t.Fatal(err)
+	}
+	if sp, err := s.Spec(2); err != nil || sp != (SpecRow{Run: "ab12cd34-2-1", Commit: "beef", Text: "the spec"}) {
+		t.Errorf("the spec is %+v, %v", sp, err)
+	}
+	if got, want := shape(t, s), shape(t, open(t)); !reflect.DeepEqual(got, want) {
+		t.Errorf("a migrated store differs from a new one:\n%v\n%v", got, want)
 	}
 }
 
@@ -556,8 +810,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 2 {
-		t.Fatalf("the store is version %d after Open, want 2", v)
+	if v := userVersion(t, s); v != version || version != 3 {
+		t.Fatalf("the store is version %d after Open, want 3", v)
 	}
 	// What version 1 held is still there, and has no run or reason.
 	card, err := s.Card(1)
@@ -573,7 +827,7 @@ func TestMigrate(t *testing.T) {
 	}
 	// The old card takes a run and ends it.
 	mustAddRun(t, s, theRun(1, "r1"))
-	if _, err := s.EndRun("r1", Finished, "done", State{Spec, Approval}); err != nil {
+	if _, err := s.EndRun("r1", Finished, "done", State{Spec, Approval}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -588,7 +842,7 @@ func TestMigrate(t *testing.T) {
 		t.Errorf("after a reopen the instance is %q, want %q", again, id)
 	}
 
-	// A store moved forward has the shape of one made at version 2.
+	// A store moved forward has the shape of one made at version 3.
 	fresh := open(t)
 	if got, want := shape(t, s), shape(t, fresh); !reflect.DeepEqual(got, want) {
 		t.Errorf("a migrated store differs from a new one:\n%v\n%v", got, want)
@@ -663,7 +917,7 @@ func TestKill(t *testing.T) {
 		}
 		for _, f := range files {
 			s := reopen(t, f)
-			if _, err := s.Create("x"); err != nil { // version 0 was created again, version 2 opened
+			if _, err := s.Create("x"); err != nil { // version 0 was created again, version 3 opened
 				t.Errorf("%s: %v", f, err)
 			}
 			s.Close()
@@ -684,7 +938,7 @@ func TestKill(t *testing.T) {
 		if r, err := s.InFlight(1); err != nil || r == nil || r.ID != "r1" {
 			t.Fatalf("an EndRun killed before the commit left the run %v, %v, want it in flight", r, err)
 		}
-		moved, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}) // repeated, it ends the run
+		moved, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}, nil) // repeated, it ends the run
 		if err != nil || moved.State != (State{Spec, Approval}) || len(mustHistory(t, s, 1)) != 3 {
 			t.Errorf("the repeated EndRun: %+v, %v", moved, err)
 		}
@@ -701,8 +955,52 @@ func TestKill(t *testing.T) {
 		if card.State != (State{Spec, Approval}) || r.Ending != Finished || len(h) != 3 || h[2].Run != "r1" {
 			t.Fatalf("after a kill after the commit: %+v, %+v, %+v", card, r, h)
 		}
-		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}); err != nil || len(mustHistory(t, s, 1)) != 3 {
+		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}, nil); err != nil || len(mustHistory(t, s, 1)) != 3 {
 			t.Errorf("the repeated EndRun: %v, %d entries", err, len(mustHistory(t, s, 1)))
+		}
+	})
+	t.Run("ending a run with a spec, at the hook", func(t *testing.T) {
+		path := killAt(t, "endrun-spec-hook")
+		s := reopen(t, path)
+		card, _ := s.Card(1)
+		r, _ := s.Run("r1")
+		if card.State != (State{Spec, Run}) || r.Ending != "" || len(mustHistory(t, s, 1)) != 2 || countRows(t, s, "specs") != 0 {
+			t.Fatalf("an EndRun killed before the commit left %+v, the run %+v, %d entries and %d specs, want nothing of it",
+				card, r, len(mustHistory(t, s, 1)), countRows(t, s, "specs"))
+		}
+		// Repeated, it ends the run and writes the spec, once.
+		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}, ptr("the spec")); err != nil {
+			t.Fatal(err)
+		}
+		if sp, err := s.Spec(1); err != nil || sp.Text != "the spec" || sp.Run != "r1" || countRows(t, s, "specs") != 1 {
+			t.Errorf("after the repeat the spec is %+v (%v), with %d rows", sp, err, countRows(t, s, "specs"))
+		}
+	})
+	t.Run("moving a store of version 2 forward", func(t *testing.T) {
+		path := makeV2(t)
+		before := dump(t, path)
+		cmd := child(t, "migrate", path)
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		if line, err := bufio.NewReader(out).ReadString('\n'); err != nil || line != "stopped\n" {
+			cmd.Process.Kill()
+			cmd.Wait()
+			t.Fatalf("the child said %q, %v", line, err)
+		}
+		cmd.Process.Signal(syscall.SIGKILL)
+		cmd.Wait()
+		// The store is as version 2 left it: no specs, the old version, every row.
+		if got := dump(t, path); got != before {
+			t.Fatalf("after a kill in the move forward the store is\n%s\nwas\n%s", got, before)
+		}
+		s := reopen(t, path) // and it is moved forward when it is opened again
+		if userVersion(t, s) != version || countRows(t, s, "specs") != 0 {
+			t.Errorf("after the repeat: version %d, %d specs", userVersion(t, s), countRows(t, s, "specs"))
 		}
 	})
 	t.Run("moving a store of version 1 forward", func(t *testing.T) {
@@ -737,7 +1035,7 @@ func TestKill(t *testing.T) {
 			t.Fatalf("after a kill in the move forward: version %d, %d tables, %d columns in entries, want 1, 2, 6", v, tables, cols)
 		}
 		s := reopen(t, path) // and it is moved forward when it is opened again
-		if _, err := s.Instance(); err != nil || userVersion(t, s) != 2 || len(mustHistory(t, s, 1)) != 2 {
+		if _, err := s.Instance(); err != nil || userVersion(t, s) != version || len(mustHistory(t, s, 1)) != 2 {
 			t.Errorf("after the repeat: version %d, %v", userVersion(t, s), err)
 		}
 	})
@@ -836,7 +1134,8 @@ func reopen(t *testing.T, path string) *Store {
 //	after   after the Create and the Move have returned
 //	endrun-hook   at the commit of EndRun, after a Create, a Move and an AddRun
 //	endrun-after  after EndRun has returned
-//	migrate       in the move forward of the store at path, which is of version 1
+//	endrun-spec-hook  as endrun-hook, with a spec given to EndRun
+//	migrate       in the move forward of the store at path, of version 1 or 2
 //	loop    never: it moves card 1 through valid states, printing a line each time
 //	open    never: it opens a new store in the directory path, again and again
 func asChild(mode, path string) {
@@ -909,10 +1208,14 @@ func asChild(mode, path string) {
 		if err := s.AddRun(theRun(1, "r1")); err != nil {
 			fail(err)
 		}
-		if mode == "endrun-hook" {
+		var spec *string
+		if mode == "endrun-spec-hook" {
+			spec = ptr("the spec")
+		}
+		if mode == "endrun-hook" || mode == "endrun-spec-hook" {
 			afterCardWritten = func() error { stop(); return nil }
 		}
-		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}); err != nil {
+		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}, spec); err != nil {
 			fail(err)
 		}
 		stop()

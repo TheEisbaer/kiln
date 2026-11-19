@@ -18,7 +18,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 2
+const version = 3
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -103,6 +103,14 @@ const (
 	Failed   Ending = "failed"
 )
 
+// SpecRow is a card's spec, as the store keeps it: its text, exactly as the run
+// wrote it, and the run that wrote it, with that run's commit.
+type SpecRow struct {
+	Run    string
+	Commit string
+	Text   string
+}
+
 // RunRow is one run of a card, as the store keeps it. An empty Ending means
 // the run is in flight.
 type RunRow struct {
@@ -163,6 +171,11 @@ ALTER TABLE entries ADD COLUMN reason TEXT;`); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`INSERT INTO instance (id) VALUES (?)`, hex.EncodeToString(b[:]))
+		return err
+	},
+	func(tx *sql.Tx) error {
+		// One row per spec, written with the ending of the run that wrote it.
+		_, err := tx.Exec(`CREATE TABLE specs (run TEXT PRIMARY KEY, card INTEGER NOT NULL, text TEXT NOT NULL) STRICT`)
 		return err
 	},
 }
@@ -274,11 +287,12 @@ func (s *Store) History(id int64) ([]Entry, error) {
 var afterCardWritten func() error
 
 // runEnd is the ending of a run, written by change together with the card's
-// new state.
+// new state, and the spec it wrote, if any.
 type runEnd struct {
 	id     string
 	ending Ending
 	reason string
+	spec   *string
 }
 
 // change is the one place every change to a card goes through (ADR 0042). In
@@ -286,8 +300,8 @@ type runEnd struct {
 // and then the entry, and commits. It creates a card with the text when create
 // is set, and changes the card id otherwise. When end is set, the card is the
 // one of that run, and the run's ending is written in the same transaction,
-// with the run and the reason on the entry; a run that has ended already
-// writes nothing.
+// with the run and the reason on the entry, and with the run's spec when it is
+// given; a run that has ended already writes nothing, its spec included.
 func (s *Store) change(create bool, id int64, text string, to State, cause Cause, end *runEnd) (Card, error) {
 	if !valid[to] {
 		return Card{}, fmt.Errorf("a card cannot be in %s waiting for %s (ADR 0043)", to.Stage, to.WaitsFor)
@@ -312,6 +326,11 @@ func (s *Store) change(create bool, id int64, text string, to State, cause Cause
 		id = run.Card
 		if _, err := tx.Exec(`UPDATE runs SET ending = ? WHERE id = ?`, end.ending, end.id); err != nil {
 			return Card{}, err
+		}
+		if end.spec != nil {
+			if _, err := tx.Exec(`INSERT INTO specs (run, card, text) VALUES (?, ?, ?)`, end.id, id, *end.spec); err != nil {
+				return Card{}, err
+			}
 		}
 	}
 
@@ -444,14 +463,28 @@ func (s *Store) AddRun(r RunRow) error {
 
 // EndRun ends a run in flight, finished or failed, and moves its card to the
 // state to, in one transaction through change: the run's ending, the card's
-// state and an entry with the cause run, the run's ID and the reason are
-// written together or not at all. A run that has ended already writes nothing,
-// so a repeat after a kill is safe (ADR 0035).
-func (s *Store) EndRun(id string, ending Ending, reason string, to State) (Card, error) {
+// state, an entry with the cause run, the run's ID and the reason, and the
+// run's spec when it is given, are written together or not at all. A run that
+// has ended already writes nothing, so a repeat after a kill is safe
+// (ADR 0035), and a spec is written once.
+func (s *Store) EndRun(id string, ending Ending, reason string, to State, spec *string) (Card, error) {
 	if ending != Finished && ending != Failed {
 		return Card{}, fmt.Errorf("%q is not an ending of a run (ADR 0043)", ending)
 	}
-	return s.change(false, 0, "", to, CauseRun, &runEnd{id, ending, reason})
+	return s.change(false, 0, "", to, CauseRun, &runEnd{id, ending, reason, spec})
+}
+
+// Spec reads the newest spec of a card, the one written last, with its run's
+// ID and commit.
+func (s *Store) Spec(card int64) (SpecRow, error) {
+	var sp SpecRow
+	err := s.db.QueryRow(`SELECT specs.run, runs.commit_id, specs.text FROM specs
+		JOIN runs ON runs.id = specs.run WHERE specs.card = ? ORDER BY specs.rowid DESC LIMIT 1`, card).
+		Scan(&sp.Run, &sp.Commit, &sp.Text)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SpecRow{}, fmt.Errorf("card %d has no spec: %w", card, err)
+	}
+	return sp, err
 }
 
 // querier is a database or a transaction.

@@ -13,8 +13,12 @@ import (
 	"github.com/TheEisbaer/kiln/internal/seal"
 )
 
-// noChange is the record's save when the run changed nothing.
-const noChange = "no change"
+// The record's save when the run changed nothing, and when its inputs said
+// to skip the save.
+const (
+	noChange = "no change"
+	notSaved = "not saved"
+)
 
 // record is result.json, the record of one run in <runs>/<id>/.
 type record struct {
@@ -25,7 +29,7 @@ type record struct {
 	// Lines of output.jsonl longer than maxLine, which were not read as events:
 	// with one, a missing result may have been too long.
 	TooLongLines int    `json:"too_long_lines"`
-	Saved        string `json:"saved"` // the saved commit, or "no change"
+	Saved        string `json:"saved"` // the saved commit, "no change" or "not saved"
 	// The run's list of hosts, from its container's label kiln.hosts; empty
 	// without a list. wayout.jsonl holds what its way out let through and
 	// refused, unless WayOut is "gone": the way out was not there at collect.
@@ -92,7 +96,8 @@ func (in RecordInputs) matches(r *run) error {
 
 // status is the command's exit status for a recorded run: 0 only when the
 // container exited with 0, the result is success, and the model matched. The
-// work is saved, or nothing changed, or there would be no record.
+// work is saved, or nothing changed, or the save was skipped, or there would be
+// no record.
 func (rec *record) status() int {
 	if rec.Ending.ExitCode == 0 && rec.Result != nil && rec.Result.Subtype == "success" &&
 		rec.ModelSeen == rec.Inputs.Model && rec.Saved != "" {
@@ -102,7 +107,7 @@ func (rec *record) status() int {
 }
 
 // reason is the verdict's line: the container's ending, the result's subtype,
-// turns and cost, and the saved commit or "no change".
+// turns and cost, and the saved commit, "no change" or "not saved".
 func (rec *record) reason() string {
 	ending := fmt.Sprintf("exit %d", rec.Ending.ExitCode)
 	if rec.Ending.OOMKilled {
@@ -113,7 +118,7 @@ func (rec *record) reason() string {
 		result = fmt.Sprintf("result %s, %d turns, $%.4f", printable(rec.Result.Subtype), rec.Result.NumTurns, rec.Result.TotalCostUSD)
 	}
 	saved := rec.Saved
-	if saved != noChange {
+	if saved != noChange && saved != notSaved {
 		saved = "saved " + saved
 	}
 	return ending + ", " + result + ", " + saved

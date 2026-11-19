@@ -1,16 +1,20 @@
 package tick
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TheEisbaer/kiln/instructions"
 	"github.com/TheEisbaer/kiln/internal/seal"
 	"github.com/TheEisbaer/kiln/internal/store"
 )
@@ -30,9 +35,45 @@ const (
 
 // The words in a card's text that change what the stand-in does.
 const (
-	gateWord = "kiln-stand-in-gate"
-	failWord = "kiln-stand-in-fail"
+	gateWord     = "kiln-stand-in-gate"
+	failWord     = "kiln-stand-in-fail"
+	noSpecWord   = "kiln-stand-in-nospec"
+	longSpecWord = "kiln-stand-in-longspec"
+	escapeWord   = "kiln-stand-in-escape"
 )
+
+// The spec the stand-in writes with kiln-stand-in-escape.
+const escapeSpec = "# Spec\n\x1b[2J\x1b]0;kiln\x07\r\xff\n"
+
+// The spec the scripted upstream has the real Claude Code write in the case
+// kiln-case-tick-spec (internal/run/testdata/claude).
+const scriptedSpec = "# Spec of the scripted run\n\n## 1. What will be built\n\nNothing; kiln-case-tick-spec.\n"
+
+// hosts is the list of hosts of the test's cores: a run has a way out, and its
+// card waits for approval. The stand-in does not use it, and the name resolves
+// nowhere, so nothing leaves the engine.
+var hosts = []string{"public.kiln-test.example"}
+
+// caseWord is a card's word kiln-case-<name>.
+var caseWord = regexp.MustCompile(`kiln-case-[a-z0-9-]+`)
+
+// standInSpec is the spec the stand-in writes for a card's text, or nil for
+// none.
+func standInSpec(text string) *string {
+	var spec string
+	switch {
+	case strings.Contains(text, noSpecWord):
+		return nil
+	case strings.Contains(text, longSpecWord):
+		spec = strings.Repeat("x", 262145)
+	case strings.Contains(text, escapeWord):
+		spec = escapeSpec
+	default:
+		spec = "# Spec " + caseWord.FindString(text) + "\n\n## 1. What will be built\n\n## 2. How to tell it works\n\n" +
+			"## 3. What was found\n\n## 4. Left out\n\n## 5. Questions\n"
+	}
+	return &spec
+}
 
 // upstreamPort is where internal/run's scripted upstream listens.
 const upstreamPort = "8081"
@@ -49,6 +90,8 @@ type fixture struct {
 	proxy      seal.Proxy
 	upstream   string
 	marker     string
+	// The way out's image and the outward network of the test's ways out.
+	wayOutImage, outward string
 	// The output.jsonl of the stand-in's run in the first case, which the
 	// real case compares with its own.
 	standInOutput []byte
@@ -59,7 +102,8 @@ type fixture struct {
 // a fresh data directory, instance and repo per case, and watches the store
 // and the starts of the instance's containers. Every case but one runs the
 // stand-in for Claude Code; the last runs the pinned Claude Code against
-// internal/run's scripted upstream.
+// internal/run's scripted upstream. Every run is a spec run with a list of
+// hosts, unless a case says otherwise, and nothing of it is saved.
 //
 // It runs only with KILN_ENGINE_TESTS=1, and then fails, not skips, when the
 // engine cannot be reached. Every name it uses carries a random id, and
@@ -81,10 +125,14 @@ func TestTick(t *testing.T) {
 	// Images. The repo's root is the build context, except for the stand-in's.
 	f.proxyImage, f.runImage, f.standIn = name("proxy"), name("run"), name("stand-in")
 	upstreamImage := name("upstream")
+	f.wayOutImage, f.outward = name("wayout"), name("outward")
 	build(t, f.proxyImage, "../..", "images/proxy/Dockerfile")
+	build(t, f.wayOutImage, "../..", "images/wayout/Dockerfile")
 	build(t, upstreamImage, "../..", "internal/run/testdata/claude/Dockerfile")
 	build(t, f.runImage, "../..", "images/run/Dockerfile")
 	build(t, f.standIn, "testdata/claude", "internal/tick/testdata/claude/Dockerfile", "--build-arg", "RUN="+f.runImage)
+	// The seal creates the outward network with the first way out.
+	t.Cleanup(func() { dockerQuiet("network", "rm", f.outward) })
 
 	// The proxy creates its ordinary network; the upstream joins it.
 	ordinary := name("ordinary")
@@ -101,8 +149,11 @@ func TestTick(t *testing.T) {
 
 	t.Run("a card that waits gets one run", func(t *testing.T) {
 		c := f.newCase(t, f.standIn)
-		f.card(t, c, "Add a line to NOTES.md. kiln-case-happy")
+		f.card(t, c, "Add a line to NOTES.md. kiln-case-happy "+gateWord)
 		core, done := f.core(t, c, "")
+		f.waitAtGate(t, c)
+		f.assertInstruction(t, c)
+		must(t, "exec", "kiln-run-"+c.run, "touch", "/tmp/gate")
 		f.waitEnded(t, c)
 		f.stop(t, core, done)
 		f.assertEnded(t, c, store.Finished)
@@ -110,21 +161,29 @@ func TestTick(t *testing.T) {
 	})
 
 	t.Run("killed, then started again", func(t *testing.T) {
-		for _, point := range []string{"before-add", "after-add", "following", "before-end", "after-end"} {
+		for _, point := range []string{"after-instruction", "before-add", "after-add", "following",
+			"record", "record, damaged", "before-end", "after-end"} {
 			t.Run(point, func(t *testing.T) {
 				c := f.newCase(t, f.standIn)
 				text := "Add a line to NOTES.md."
-				if point == "following" {
+				if point == "following" || point == "after-add" {
 					text += " " + gateWord
 				}
 				f.card(t, c, text)
-				if point == "following" {
+				switch point {
+				case "record", "record, damaged":
+					// Killed after the record, before ReadSpec.
+					ch := child{Command: "core", Config: f.config(c), Hook: "run:record:exit"}
+					if code, out, errOut := f.kiln(t, ch); code != exitAtPoint {
+						t.Fatalf("the core exited with %d, want %d after the record\n%s%s", code, exitAtPoint, out, errOut)
+					}
+				case "following":
 					core, done := f.core(t, c, "")
 					f.waitAtGate(t, c)
 					core.Process.Signal(syscall.SIGKILL)
 					<-done
 					must(t, "exec", "kiln-run-"+c.run, "touch", "/tmp/gate")
-				} else {
+				default:
 					_, done := f.core(t, c, point)
 					if code := <-done; code != exitAtPoint {
 						t.Fatalf("the core exited with %d, want %d at %s", code, exitAtPoint, point)
@@ -139,6 +198,16 @@ func TestTick(t *testing.T) {
 					t.Fatal(err)
 				}
 				switch point {
+				case "after-instruction":
+					if inFlight != nil {
+						t.Errorf("a run is in flight: %+v", inFlight)
+					}
+					if got := containerState(t, c.run); got != "" {
+						t.Errorf("the container is %q, want none", got)
+					}
+					if got := string(readFile(t, c.instruction())); got != c.wantInstruction() {
+						t.Errorf("the instruction is %q", got)
+					}
 				case "before-add":
 					if inFlight != nil {
 						t.Errorf("a run is in flight: %+v", inFlight)
@@ -167,7 +236,7 @@ func TestTick(t *testing.T) {
 					must(t, "cp", filepath.Join(dir, "NOTES.md"), "kiln-run-"+c.run+":/work/NOTES.md")
 					must(t, "cp", filepath.Join(dir, "CLAUDE.md"), "kiln-run-"+c.run+":/work/CLAUDE.md")
 					must(t, "cp", filepath.Join(dir, "instruction.md"), "kiln-run-"+c.run+":/kiln/instruction.md")
-				case "before-end":
+				case "record", "record, damaged", "before-end":
 					if inFlight == nil {
 						t.Error("no run is in flight after result.json")
 					}
@@ -176,6 +245,12 @@ func TestTick(t *testing.T) {
 					}
 					if got := containerState(t, c.run); got != "exited" {
 						t.Errorf("the container is %q while the run is in flight, want exited", got)
+					}
+					if n := countSpecs(t, c); n != 0 {
+						t.Errorf("%d specs in the store before EndRun, want none", n)
+					}
+					if point == "record, damaged" {
+						damage(t, c)
 					}
 				case "after-end":
 					if inFlight != nil {
@@ -187,8 +262,27 @@ func TestTick(t *testing.T) {
 				}
 
 				core, done := f.core(t, c, "")
+				if point == "after-add" {
+					// Placing again wrote each file as the commit has it.
+					f.waitAtGate(t, c)
+					for name, want := range map[string]string{"/work/NOTES.md": "# Notes\n",
+						"/work/CLAUDE.md": "# Try\n\nThe marker is " + f.marker + ".\n"} {
+						if got := must(t, "exec", "kiln-run-"+c.run, "cat", name); got != strings.TrimSpace(want) {
+							t.Errorf("%s is %q after placing again, want %q", name, got, want)
+						}
+					}
+					f.assertInstruction(t, c)
+					must(t, "exec", "kiln-run-"+c.run, "touch", "/tmp/gate")
+				}
 				f.waitEnded(t, c)
 				f.stop(t, core, done)
+				if point == "record, damaged" {
+					e := f.assertEndedAt(t, c, store.Finished, store.Developer, nil)
+					if !strings.HasPrefix(e.Reason, "the run's documents.tar is damaged: ") {
+						t.Errorf("the reason is %q, want the archive damaged", e.Reason)
+					}
+					return
+				}
 				f.assertEnded(t, c, store.Finished)
 			})
 		}
@@ -208,6 +302,10 @@ func TestTick(t *testing.T) {
 			repo     string // the faulty core's --repo, when it differs
 			image    string // the faulty core's --image, when it differs
 			exitCode int    // the faulty core's exit status
+			// The faulty core ends the run itself: a spec run in the store
+			// uses the image neither for its container, which is there, nor
+			// for a save, which it does not make.
+			ends bool
 		}{
 			{name: "first start: the start, interrupted", hook: "tick:after-add:interrupt"},
 			{name: "first start: after the start", hook: "run:start:fail", exitCode: exitAtPoint},
@@ -215,7 +313,7 @@ func TestTick(t *testing.T) {
 			{name: "in the store: placing again", inStore: true, hook: "run:place:fail", exitCode: exitAtPoint},
 			{name: "in the store: the start, interrupted", inStore: true, hook: "run:place:interrupt"},
 			{name: "in the store: after the start", inStore: true, hook: "run:start:fail", exitCode: exitAtPoint},
-			{name: "in the store: with a missing image", inStore: true, image: "kiln-ticktest-no-such-image", exitCode: exitAtPoint},
+			{name: "in the store: with a missing image", inStore: true, image: "kiln-ticktest-no-such-image", exitCode: exitAtPoint, ends: true},
 			{name: "in the store: killed after placing again", inStore: true, hook: "run:place:exit", exitCode: exitAtPoint},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -238,6 +336,10 @@ func TestTick(t *testing.T) {
 				ch := child{Command: "core", Config: cfg, Hook: tc.hook, ExitAt: "ticked"}
 				if code, out, errOut := f.kiln(t, ch); code != tc.exitCode {
 					t.Fatalf("the faulty core exited with %d, want %d\n%s%s", code, tc.exitCode, out, errOut)
+				}
+				if tc.ends {
+					f.assertEnded(t, c, store.Finished)
+					return
 				}
 
 				s := f.open(t, c)
@@ -267,9 +369,9 @@ func TestTick(t *testing.T) {
 		if code := <-done; code != exitAtPoint {
 			t.Fatalf("the first core exited with %d, want %d after AddRun", code, exitAtPoint)
 		}
-		destroyed := watchEvents(t, c.instance, "destroy", time.Now())
+		destroyed := watchEvents(t, "label=kiln.instance="+c.instance, "destroy", time.Now())
 		core, done := f.core(t, c, "")
-		waitUntil(t, "the run's container is removed", func() bool { return destroyed.count() > 0 })
+		waitUntil(t, "the run's container is removed", func() bool { return destroyed.count("kiln-run-") > 0 })
 		core.Process.Signal(syscall.SIGKILL)
 		<-done
 
@@ -332,6 +434,7 @@ func TestTick(t *testing.T) {
 		}
 	})
 
+	// The stand-in writes its spec before it fails; a failed run's is not read.
 	t.Run("a run that fails", func(t *testing.T) {
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. "+failWord)
@@ -341,6 +444,61 @@ func TestTick(t *testing.T) {
 		e := f.assertEnded(t, c, store.Failed)
 		if !strings.Contains(e.Reason, "exit 1") || !strings.Contains(e.Reason, "no result") {
 			t.Errorf("the reason is %q, want exit 1 and no result", e.Reason)
+		}
+	})
+
+	// A finished run whose spec cannot be taken, or that had no web: the run
+	// is finished, and the card goes under needs you with the reason.
+	for _, tc := range []struct {
+		name   string
+		text   string
+		hosts  bool   // the core has the list
+		reason string // the reason's start
+	}{
+		{"no spec", "Write no spec. " + noSpecWord, true, "the run wrote no spec (/kiln/out/spec.md); exit 0, "},
+		{"a spec too long", "Write a long spec. " + longSpecWord, true, "the spec is 262145 bytes, more than 262144; exit 0, "},
+		{"without a list of hosts", "Write a spec. kiln-case-nolist", false, "the spec was written without the web: no list of hosts; exit 0, "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := f.newCase(t, f.standIn)
+			c.noHosts = !tc.hosts
+			f.card(t, c, tc.text)
+			core, done := f.core(t, c, "")
+			f.waitEnded(t, c)
+			f.stop(t, core, done)
+			var kept *string
+			if !tc.hosts {
+				kept = standInSpec(tc.text) // the spec is kept
+			}
+			e := f.assertEndedAt(t, c, store.Finished, store.Developer, kept)
+			if !strings.HasPrefix(e.Reason, tc.reason) || !strings.HasSuffix(e.Reason, ", not saved") {
+				t.Errorf("the reason is %q, want it to begin %q and end with not saved", e.Reason, tc.reason)
+			}
+		})
+	}
+
+	// The store keeps the spec exactly as written.
+	t.Run("a spec with escapes and a byte that is not UTF-8", func(t *testing.T) {
+		c := f.newCase(t, f.standIn)
+		f.card(t, c, "Write a spec. "+escapeWord)
+		core, done := f.core(t, c, "")
+		f.waitEnded(t, c)
+		f.stop(t, core, done)
+		f.assertEnded(t, c, store.Finished)
+	})
+
+	t.Run("its way out gone while it runs", func(t *testing.T) {
+		c := f.newCase(t, f.standIn)
+		f.card(t, c, "Write a spec. kiln-case-gone "+gateWord)
+		core, done := f.core(t, c, "")
+		f.waitAtGate(t, c)
+		must(t, "rm", "--force", "kiln-wayout-"+c.run)
+		must(t, "exec", "kiln-run-"+c.run, "touch", "/tmp/gate")
+		f.waitEnded(t, c)
+		f.stop(t, core, done)
+		e := f.assertEndedAt(t, c, store.Finished, store.Developer, standInSpec(c.text))
+		if !strings.HasPrefix(e.Reason, "the spec was written without the web: its way out was gone; exit 0, ") {
+			t.Errorf("the reason is %q, want that its way out was gone", e.Reason)
 		}
 	})
 
@@ -430,17 +588,19 @@ func TestTick(t *testing.T) {
 			t.Fatal("needs the stand-in's output of the first case")
 		}
 		c := f.newCase(t, f.runImage)
-		f.card(t, c, "Run sh run.sh and report its result. kiln-case-tick-real")
+		f.card(t, c, "Run sh run.sh, then write the spec. kiln-case-tick-spec")
 		core, done := f.core(t, c, "")
 		f.waitEnded(t, c)
 		f.stop(t, core, done)
-		f.assertEnded(t, c, store.Finished)
+		// Claude Code wrote the spec with Write, outside /work.
+		spec := scriptedSpec
+		f.assertEndedAt(t, c, store.Finished, store.Approval, &spec)
 
-		// The card's text reached Claude Code as the instruction.
+		// The card's text reached Claude Code with the instruction.
 		reached := false
 		for _, line := range strings.Split(must(t, "logs", f.upstream), "\n") {
 			var r map[string]any
-			if json.Unmarshal([]byte(line), &r) == nil && r["kind"] == "request" && r["case"] == "kiln-case-tick-real" {
+			if json.Unmarshal([]byte(line), &r) == nil && r["kind"] == "request" && r["case"] == "kiln-case-tick-spec" {
 				reached = true
 			}
 		}
@@ -484,7 +644,22 @@ type testCase struct {
 	commit   string
 	image    string
 	run      string
-	starts   *lines // the IDs of the instance's containers, once per start
+	text     string // card 1's text
+	noHosts  bool   // the core has no list of hosts
+	starts   *lines // the names of the instance's containers, once per start
+	saves    *lines // the names of the run's containers, its save's included, once per start
+	// What the instance's copy holds before the run: its refs and its objects.
+	refs, objects string
+}
+
+// instruction is the file of the run's instruction in the data directory.
+func (c *testCase) instruction() string {
+	return filepath.Join(c.data, "instructions", c.run+".md")
+}
+
+// wantInstruction is what a spec run of card 1 is told.
+func (c *testCase) wantInstruction() string {
+	return instructions.Spec + "## The card\n\n" + c.text
 }
 
 // newCase makes a case's data directory with its store, and its repo, and
@@ -501,18 +676,30 @@ func (f *fixture) newCase(t *testing.T, image string) *testCase {
 	}
 	c.run = c.instance + "-1-1"
 	t.Cleanup(func() { removeInstance(f.proxy.Name, c.instance) })
-	c.starts = watchStarts(t, c.instance)
+	c.starts = watchEvents(t, "label=kiln.instance="+c.instance, "start", time.Now().Add(-5*time.Second))
+	c.saves = watchEvents(t, "label=kiln.run="+c.run, "start", time.Now().Add(-5*time.Second))
 	c.repo, c.commit = bareRepo(t, map[string]string{
 		"CLAUDE.md": "# Try\n\nThe marker is " + f.marker + ".\n",
 		"NOTES.md":  "# Notes\n",
 		"run.sh":    "set -eu\nprintf 'A line from the run.\\n' >> NOTES.md\necho checked\n",
 	})
+	c.refs, c.objects = copyHolds(t, c.repo)
 	return c
+}
+
+// copyHolds is what a bare repo holds: its refs, and the count of its objects.
+func copyHolds(t *testing.T, repo string) (refs, objects string) {
+	t.Helper()
+	return gitIn(t, repo, "for-each-ref"), gitIn(t, repo, "count-objects", "-v")
 }
 
 // config is the configuration of a case's core.
 func (f *fixture) config(c *testCase) Config {
-	return Config{Data: c.data, Repo: c.repo, Model: model, Effort: effort, Image: c.image, Proxy: f.proxy.Name}
+	cfg := Config{Data: c.data, Repo: c.repo, Model: model, Effort: effort, Image: c.image, Proxy: f.proxy.Name}
+	if !c.noHosts {
+		cfg.Hosts, cfg.WayOutImage, cfg.WayOutNetwork = hosts, f.wayOutImage, f.outward
+	}
+	return cfg
 }
 
 // open opens a case's store. A core may be writing it, so a busy store is
@@ -542,6 +729,7 @@ func (f *fixture) card(t *testing.T, c *testCase, text string) {
 	if code != 0 || strings.TrimSpace(out) != "1" {
 		t.Fatalf("kiln card: exit status %d\n%s\n%s", code, out, errOut)
 	}
+	c.text = text
 }
 
 // start starts the test binary as a child, and returns the command and a
@@ -621,8 +809,8 @@ func (f *fixture) waitAtGate(t *testing.T, c *testCase) {
 func (f *fixture) waitEnded(t *testing.T, c *testCase) {
 	t.Helper()
 	waitUntil(t, "the card's run has ended and is removed", func() bool {
-		if n := c.starts.count(); n > 1 {
-			t.Fatalf("the instance's containers started %d times, want 1", n)
+		if n := c.starts.count("kiln-run-"); n > 1 {
+			t.Fatalf("the instance's run containers started %d times, want 1", n)
 		}
 		s := f.open(t, c)
 		card, err := s.Card(1)
@@ -632,12 +820,25 @@ func (f *fixture) waitEnded(t *testing.T, c *testCase) {
 }
 
 // assertEnded asserts the end state of a case with one run of card 1, ended
-// as given, and returns the entry that ended it.
+// as given: finished, with the stand-in's spec kept and the card waiting for
+// approval, or failed, with no spec and the card under needs you. It returns
+// the entry that ended the run.
 func (f *fixture) assertEnded(t *testing.T, c *testCase, ending store.Ending) store.Entry {
+	t.Helper()
+	if ending == store.Finished {
+		return f.assertEndedAt(t, c, ending, store.Approval, standInSpec(c.text))
+	}
+	return f.assertEndedAt(t, c, ending, store.Developer, nil)
+}
+
+// assertEndedAt asserts the end state of a case with one run of card 1, ended
+// as given, with the card waiting for want and the spec kept, or none when it
+// is nil. Nothing of the run is in the instance's copy, and its save
+// container never started. It returns the entry that ended the run.
+func (f *fixture) assertEndedAt(t *testing.T, c *testCase, ending store.Ending, want store.WaitsFor, spec *string) store.Entry {
 	t.Helper()
 	s := f.open(t, c)
 	defer s.Close()
-	want := map[store.Ending]store.WaitsFor{store.Finished: store.Approval, store.Failed: store.Developer}[ending]
 	card, err := s.Card(1)
 	if err != nil {
 		t.Fatal(err)
@@ -668,32 +869,104 @@ func (f *fixture) assertEnded(t *testing.T, c *testCase, ending store.Ending) st
 		t.Errorf("the run is %+v (%v), want %s from %s", r, err, ending, c.commit)
 	}
 
-	if ending == store.Finished {
-		// kiln/card-1 holds the save, one commit on top of the start.
-		commits := strings.Fields(gitIn(t, c.repo, "rev-list", c.commit+"..refs/heads/kiln/card-1"))
-		if len(commits) != 1 {
-			t.Fatalf("kiln/card-1 holds %d commits on top of the start, want 1", len(commits))
+	// The spec, exactly as written, in one row under the run's ID; or none.
+	switch got, err := s.Spec(1); {
+	case spec == nil && !errors.Is(err, sql.ErrNoRows):
+		t.Errorf("a spec is kept (%v), want none", err)
+	case spec != nil && (err != nil || got.Run != c.run || got.Commit != c.commit || got.Text != *spec):
+		t.Errorf("the spec kept is %d bytes from %q (%v), want %d bytes from %s", len(got.Text), got.Run, err, len(*spec), c.run)
+	}
+	if n, want := countSpecs(t, c), map[bool]int{false: 0, true: 1}[spec != nil]; n != want {
+		t.Errorf("%d rows in specs, want %d", n, want)
+	}
+
+	// Nothing of the run in the instance's copy: no branch, no new object.
+	if refs, objects := copyHolds(t, c.repo); refs != c.refs || objects != c.objects {
+		t.Errorf("the copy holds\n%s\n%s\nwas\n%s\n%s", refs, objects, c.refs, c.objects)
+	}
+	if at := gitIn(t, c.repo, "for-each-ref", "refs/heads/kiln/card-1"); at != "" {
+		t.Errorf("refs/heads/kiln/card-1 exists: %s", at)
+	}
+	if n := c.saves.count("kiln-save-"); n != 0 {
+		t.Errorf("the run's save container started %d times, want never", n)
+	}
+	if !strings.HasSuffix(last.Reason, ", not saved") && !strings.Contains(last.Reason, "container is gone") {
+		t.Errorf("the reason %q does not end with not saved", last.Reason)
+	}
+	if data, err := os.ReadFile(filepath.Join(c.data, "runs", c.run, "result.json")); err == nil {
+		var rec struct{ Saved string }
+		if err := json.Unmarshal(data, &rec); err != nil || rec.Saved != "not saved" {
+			t.Errorf("result.json has the save %q (%v), want not saved", rec.Saved, err)
 		}
-		// Only the run's change: files placed again over a container's earlier,
-		// or broken, placing are as the commit has them.
-		if got := gitIn(t, c.repo, "diff", "--name-only", c.commit, commits[0]); got != "NOTES.md" {
-			t.Errorf("the save changes %q, want only NOTES.md", got)
-		}
-		if got := gitIn(t, c.repo, "show", commits[0]+":NOTES.md"); got != "# Notes\nA line from the run." {
-			t.Errorf("NOTES.md of the save is %q", got)
-		}
-		if !strings.Contains(last.Reason, "saved "+commits[0]) {
-			t.Errorf("the reason %q does not name the save %s", last.Reason, commits[0])
-		}
+	} else if !strings.Contains(last.Reason, "container is gone") {
+		t.Error(err)
+	}
+
+	// The run's instruction, written once, is kept.
+	if got := string(readFile(t, c.instruction())); got != c.wantInstruction() {
+		t.Errorf("the instruction is %q, want %q", got, c.wantInstruction())
 	}
 
 	if left := instanceLeft(t, c.instance); left != "" {
 		t.Errorf("left of the instance: %s", left)
 	}
-	if n := c.starts.count(); n != 1 {
-		t.Errorf("the instance's containers started %d times, want 1", n)
+	if n := c.starts.count("kiln-run-"); n != 1 {
+		t.Errorf("the instance's run containers started %d times, want 1", n)
 	}
 	return last
+}
+
+// assertInstruction asserts, while the run waits at its gate, that it was
+// told the installed Kiln's instruction, then the card's text.
+func (f *fixture) assertInstruction(t *testing.T, c *testCase) {
+	t.Helper()
+	got := must(t, "exec", "kiln-run-"+c.run, "cat", "/kiln/instruction.md")
+	first, _, _ := strings.Cut(instructions.Spec, "\n")
+	if !strings.HasPrefix(got, first+"\n") || !strings.HasSuffix(got, "\n## The card\n\n"+c.text) {
+		t.Errorf("the run was told\n%s\nwant %q first and %q last", got, first, "## The card\n\n"+c.text)
+	}
+}
+
+// countSpecs counts the rows in a case's specs.
+func countSpecs(t *testing.T, c *testCase) int {
+	t.Helper()
+	db, err := sql.Open("sqlite3", filepath.Join(c.data, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM specs").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// damage cuts the record's documents.tar off inside the spec's data, as a
+// disk or a hand on the record would.
+func damage(t *testing.T, c *testCase) {
+	t.Helper()
+	name := filepath.Join(c.data, "runs", c.run, "documents.tar")
+	data := readFile(t, name)
+	r := bytes.NewReader(data)
+	tr := tar.NewReader(r)
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			t.Fatalf("no out/spec.md in documents.tar: %v", err)
+		}
+		if h.Name == "out/spec.md" {
+			cut := int64(len(data)) - int64(r.Len()) + h.Size/2
+			t.Logf("documents.tar of %d bytes, cut to %d, inside the spec of %d bytes", len(data), cut, h.Size)
+			if err := os.Truncate(name, cut); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if _, err := io.Copy(io.Discard, tr); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // snapshot is what a case's store holds of its cards and runs, as text.
@@ -774,30 +1047,31 @@ func (l *lines) Write(p []byte) (int, error) {
 	return l.buf.Write(p)
 }
 
-func (l *lines) count() int {
+// count counts the lines that begin with prefix.
+func (l *lines) count(prefix string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(strings.Fields(l.buf.String()))
+	n := 0
+	for _, line := range strings.Fields(l.buf.String()) {
+		if strings.HasPrefix(line, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
-// watchStarts follows the engine's events from now on, and collects the
-// starts of an instance's containers. The events are followed as they come:
-// the engine keeps only the last few hundred for a later --since, and other
-// work on it can push a start out of them.
-func watchStarts(t *testing.T, instance string) *lines {
-	t.Helper()
-	return watchEvents(t, instance, "start", time.Now().Add(-5*time.Second))
-}
-
-// watchEvents follows the engine's events of one kind for an instance's
-// containers from since on, and collects them.
-func watchEvents(t *testing.T, instance, event string, since time.Time) *lines {
+// watchEvents follows the engine's events of one kind for the containers that
+// match a filter, such as label=kiln.instance=<instance>, from since on, and
+// collects the containers' names. The events are followed as they come: the
+// engine keeps only the last few hundred for a later --since, and other work
+// on it can push one out of them.
+func watchEvents(t *testing.T, filter, event string, since time.Time) *lines {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &lines{}
 	cmd := exec.CommandContext(ctx, "docker", "events", "--since", strconv.FormatInt(since.Unix(), 10),
-		"--filter", "type=container", "--filter", "label=kiln.instance="+instance, "--filter", "event="+event,
-		"--format", "{{.Actor.ID}}")
+		"--filter", "type=container", "--filter", filter, "--filter", "event="+event,
+		"--format", "{{.Actor.Attributes.name}}")
 	cmd.Stdout = l
 	if err := cmd.Start(); err != nil {
 		cancel()

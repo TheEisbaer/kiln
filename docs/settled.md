@@ -22,6 +22,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 ## ADR 0013: Work is saved after every implement round and published only when review has passed
 
 - Runs reach nothing. The core places the code in a run and collects the change from it through the container engine (ADR 0038), so "reachable from them" now means reachable from the core.
+- A spec run's working tree is not saved. No save container, nothing taken into the instance's copy, no branch; `result.json` says `"saved": "not saved"` (card 11).
 
 ## ADR 0015: Review blocks only on the spec, a concrete failure or a written standard
 
@@ -66,6 +67,10 @@ A line says what was settled and, where it matters, when and by which card. The 
 - A run's command line is `sh -c 'exec claude "$@" < /kiln/instruction.md' sh -p --output-format stream-json --verbose --permission-mode bypassPermissions --model <id> --effort <level>`, without `--bare`, so that the repo's `CLAUDE.md` reaches the prompt. The instruction comes on standard input.
 - A run with a list gets `HTTPS_PROXY` and `https_proxy`, which name its way out, and `NO_PROXY` and `no_proxy`, which name the proxy; `HTTP_PROXY` is not set. Claude Code 2.1.326 takes the first of these variables for all its traffic, the model's included, so without `NO_PROXY` its requests to `ANTHROPIC_BASE_URL` would go to the way out, with the placeholder key. The variables are a convenience: a repo's settings can change them and so break a run, never widen what it reaches, since the network decides (ADR 0059) (card 12, 2026-11-19).
 
+## ADR 0021: A spec is one short document of Kiln's own, borrowed once from Spec Kit
+
+- A spec run is told `instructions/spec.md` and the card's text, and writes one file, `/kiln/out/spec.md`, of at most 256 KiB. The core reads no line of it (card 11).
+
 ## ADR 0022: The UI shows what needs the developer first; the board is second
 
 - The first screen shows everything that waits for the developer: specs to approve, drops to confirm, and cards in the state "needs you". The term itself keeps its narrower meaning from CONTEXT.md, a card that has stopped outside the planned approval.
@@ -74,6 +79,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 - Protected paths and the required checks are not settings in the instance. For a repo that merges automatically the Git host enforces both, from the code owner file in the repo and from its own rules (ADR 0047, ADR 0049), and the checks are a command in the repo (ADR 0045). Each still has one place. The instance holds what a Git host cannot: whether automatic merging is used, the limit, branch naming and the toolchain image (ADR 0039).
 - The list of hosts of a stage is in the instance, as a flag of the core, `kiln core --spec-hosts`, until a settings file exists. `kiln run` has no list, so a run started by hand is sealed as before (ADR 0059) (card 12, 2026-11-19).
+- Kiln's own repo has a `CLAUDE.md` with its rules for every run and every session in it: the docs to read, Conventional Commits for commit messages and pull request titles, and that the repo is public. A run reads it from what is merged (rule 2). It is a protected place (ADR 0047) (card 11).
 
 ## ADR 0026: Kiln's repo lives in the developer's personal space on their company's GitHub; checks run on the developer's machine
 
@@ -97,6 +103,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 - The file is SQLite, and `sqlite3 <file> .dump` is the readable export of rule 2 (ADR 0057).
 - The schema is version 2: besides cards and their entries, an `instance` table with one row, the instance's identity of eight hex digits, and a `runs` table with one row per run, with a run's ending empty while it is in flight. A run's row is kept for good, so that the measures can count it (ADR 0029, ADR 0030); the files of its record stay until its card is done or dropped (ADR 0053), and are removed by the card that first ends a card.
+- The schema is version 3, with `specs`, one row per spec, written in the transaction that ends its run (card 11).
 
 ## ADR 0034: Kiln is a core on the developer's machine, a proxy in a container, and one detached container per run
 
@@ -158,6 +165,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - A card carries two more facts beside the two lists: its number of send-backs and whether its run was retried (ADR 0054).
 - `change` in `internal/store` is the one place of rule 4, and the 11 valid pairings are one table in its code (ADR 0057).
 - A run's ending is read off its record: finished when its container exited with 0, the result is `success`, the model is the one asked for, and the work is saved or nothing changed; failed otherwise. Until the retry card a failed run moves its card to "needs you" (ADR 0016). Until the stage cards a card waits in spec for a run, which is told the card's text; a finished run moves it to wait for the developer's approval (card 8, 2026-11-18).
+- A finished spec run moves its card to wait for approval only with a spec it could read and a run that had the web. Otherwise the card goes under "needs you" with the reason, and the run stays finished (card 11).
 
 ## ADR 0044: The UI sends requests; the core tells it about changes over one one-way event stream
 
@@ -187,3 +195,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 ## ADR 0049: Kiln's repo is public on GitHub, under the developer's personal account
 
 - The engine tests are started by `check/in-image`: always on the Git host's runner, and on the developer's machine only with `--engine`, so that a test built from a card's branch does not run there unasked (ADR 0048). They are compiled in the toolchain image with the network off and run on the machine that runs the check, since the image has no engine.
+
+## ADR 0056: Kiln's stage instructions live in one protected place
+
+- The instructions are embedded in the core's program by the package `instructions`. A run's instruction is written once, when it starts, and a run in flight keeps it (card 11).

@@ -3,8 +3,9 @@
 // one run, carried to its end before the tick goes on.
 //
 // The data directory holds the store, store.db; the lock, lock; the runs'
-// records, runs/<id>/, as internal/run writes them; and the cards' text as
-// the runs' instructions, instructions/<id>.md.
+// records, runs/<id>/, as internal/run writes them; and the runs'
+// instructions, instructions/<id>.md: the installed Kiln's instruction for a
+// spec run, followed by the card's text.
 //
 // Only internal/seal drives the container engine; this package calls it and
 // internal/run.
@@ -24,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TheEisbaer/kiln/instructions"
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/seal"
 	"github.com/TheEisbaer/kiln/internal/store"
@@ -60,7 +62,8 @@ func at(point string) {
 
 // The states a run moves its card to, until the stage cards: a card waits in
 // spec for a run, and goes on to wait for the developer's approval when the
-// run finished, or for the developer, "needs you", when it failed.
+// run finished with a spec and the web, or for the developer, "needs you",
+// otherwise (see destination).
 var (
 	waiting  = store.State{Stage: store.Spec, WaitsFor: store.Run}
 	finished = store.State{Stage: store.Spec, WaitsFor: store.Approval}
@@ -269,9 +272,12 @@ func (c *core) card(ctx context.Context, id int64) error {
 		row = &store.RunRow{ID: fmt.Sprintf("%s-%d-%d", c.instance, id, n+1), Card: id,
 			Commit: commit, Model: c.Model, Effort: c.Effort}
 	}
-	in, err := c.inputs(*row, card.Text)
+	in, err := c.inputs(*row, card.Text, inFlight)
 	if err != nil {
 		return err
+	}
+	if !inFlight {
+		at("after-instruction")
 	}
 
 	state, err := seal.InspectRun(ctx, row.ID)
@@ -307,32 +313,87 @@ func (c *core) card(ctx context.Context, id int64) error {
 		return fmt.Errorf("the container kiln-run-%s is %s; it is left alone", row.ID, container)
 	}
 
-	ending, to := store.Failed, failed
 	verdict, err := run.Carry(ctx, in, starting, c.errOut)
 	switch {
 	case errors.Is(err, run.ErrGone):
-		verdict.Reason = run.ErrGone.Error()
+		verdict = run.Verdict{Reason: run.ErrGone.Error()}
 	case err != nil:
 		return err
-	case verdict.Finished:
-		ending, to = store.Finished, finished
+	}
+	var spec []byte
+	var problem string
+	var readErr error
+	if verdict.Finished {
+		spec, problem, readErr = run.ReadSpec(in.Runs, row.ID)
+	}
+	d, err := destination(verdict, spec, problem, readErr)
+	if err != nil {
+		return fmt.Errorf("the spec of run %s: %w; it is read again on the next tick", row.ID, err)
 	}
 
 	at("before-end")
-	if _, err := c.store.EndRun(row.ID, ending, verdict.Reason, to); err != nil {
+	if _, err := c.store.EndRun(row.ID, d.ending, d.reason, d.to, d.spec); err != nil {
 		return err
 	}
 	at("after-end")
-	fmt.Fprintf(c.out, "card %d: run %s %s: %s\n", id, row.ID, ending, verdict.Reason)
+	fmt.Fprintf(c.out, "card %d: run %s %s: %s\n", id, row.ID, d.ending, d.reason)
 	return run.Remove(ctx, in)
 }
 
-// inputs are the inputs of a card's run, from its row, and with the card's
-// text written as the run's instruction.
-func (c *core) inputs(row store.RunRow, text string) (run.Inputs, error) {
+// end is how a run's end moves its card: the run's ending, the card's new
+// state, the reason on its entry, and the spec that is kept, if any.
+type end struct {
+	ending store.Ending
+	to     store.State
+	reason string
+	spec   *string
+}
+
+// destination is the table of where a card goes at its run's end, from the
+// run's verdict and, for a finished run, what ReadSpec gave. A run that
+// finished without a spec it could read, or without the web, is still
+// finished (ADR 0043): it produced its stage's result, and its card stops
+// under "needs you". A file that could not be read from the disk changes
+// nothing: the error is returned, and the run stays in flight.
+func destination(v run.Verdict, spec []byte, problem string, readErr error) (end, error) {
+	switch {
+	case !v.Finished:
+		return end{store.Failed, failed, v.Reason, nil}, nil
+	case readErr != nil:
+		return end{}, readErr
+	case problem != "":
+		return end{store.Finished, failed, problem + "; " + v.Reason, nil}, nil
+	}
+	text := string(spec)
+	switch {
+	case len(v.Hosts) == 0:
+		return end{store.Finished, failed, "the spec was written without the web: no list of hosts; " + v.Reason, &text}, nil
+	case v.WayOutGone:
+		return end{store.Finished, failed, "the spec was written without the web: its way out was gone; " + v.Reason, &text}, nil
+	}
+	return end{store.Finished, finished, v.Reason, &text}, nil
+}
+
+// inputs are the inputs of a card's run, from its row. A run that starts is
+// told the installed Kiln's instruction for a spec run, then the card's text,
+// written to its file before AddRun. A run in flight keeps the file it was
+// started with, which is written again only when it is missing: a core rebuilt
+// with another instruction would otherwise write another text, which the run's
+// label kiln.instruction would refuse for ever.
+func (c *core) inputs(row store.RunRow, text string, inFlight bool) (run.Inputs, error) {
 	instruction := filepath.Join(c.Data, "instructions", row.ID+".md")
-	if err := writeAtomically(instruction, []byte(text)); err != nil {
-		return run.Inputs{}, err
+	write := !inFlight
+	if inFlight {
+		there, err := exists(instruction)
+		if err != nil {
+			return run.Inputs{}, err
+		}
+		write = !there
+	}
+	if write {
+		if err := writeAtomically(instruction, []byte(instructions.Spec+"## The card\n\n"+text)); err != nil {
+			return run.Inputs{}, err
+		}
 	}
 	return run.Inputs{
 		Repo:          c.Repo,
@@ -349,6 +410,7 @@ func (c *core) inputs(row store.RunRow, text string) (run.Inputs, error) {
 		Hosts:         c.Hosts,
 		WayOutImage:   c.WayOutImage,
 		WayOutNetwork: c.WayOutNetwork,
+		SkipSave:      true, // until the stage cards, every run is a spec run
 	}, nil
 }
 
