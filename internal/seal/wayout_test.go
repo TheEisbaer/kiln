@@ -181,6 +181,17 @@ func testWayOut(t *testing.T, f fixture, credentials []string, published, other 
 		if want := webID + ` 1 true ["ALL"] ["no-new-privileges"]`; got != want {
 			t.Errorf("the way out has %s, want %s", got, want)
 		}
+		// Both flags as given, since IPv6 forwarding is off by default in a
+		// container's namespace, and reading it there cannot tell.
+		var sysctls map[string]string
+		if err := json.Unmarshal([]byte(must(t, "inspect", "--format", "{{json .HostConfig.Sysctls}}", wayOut)), &sysctls); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []string{"net.ipv4.ip_forward", "net.ipv6.conf.all.forwarding"} {
+			if sysctls[k] != "0" {
+				t.Errorf("the way out's sysctls are %v, want %s=0", sysctls, k)
+			}
+		}
 		// Read in the way out's own namespaces, from a container that joins them.
 		state := must(t, "run", "--rm", "--network", "container:"+wayOut, "--pid", "container:"+wayOut,
 			"--entrypoint", "sh", toolchainImage, "-c",
