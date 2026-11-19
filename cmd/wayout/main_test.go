@@ -331,3 +331,34 @@ func TestJudgeSocket(t *testing.T) {
 		}
 	}
 }
+
+// TestDialTCP calls the real dialler with judgeSocket against a listener of
+// the test's own on 127.0.0.1: the socket's address is judged right before
+// the connect, and nothing is connected.
+func TestDialTCP(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan struct{}, 1)
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			c.Close()
+			accepted <- struct{}{}
+		}
+	}()
+	c, err := dialTCP(t.Context(), ln.Addr().String(), judgeSocket)
+	if err == nil {
+		c.Close()
+		t.Fatal("the dialler connected to 127.0.0.1")
+	}
+	if !strings.Contains(err.Error(), "127.0.0.1 is not public") {
+		t.Errorf("the error is %v, want the refusal that 127.0.0.1 is not public", err)
+	}
+	select {
+	case <-accepted:
+		t.Error("the listener accepted a connection")
+	default:
+	}
+}
