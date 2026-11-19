@@ -78,6 +78,10 @@ func TestReadSpec(t *testing.T) {
 		{"262144 bytes", makeTar(t, outDir, entry{"out/spec.md", tar.TypeReg, atLimit}), atLimit, ""},
 		{"262145 bytes", makeTar(t, outDir, entry{"out/spec.md", tar.TypeReg, atLimit + "x"}), "",
 			"the spec is 262145 bytes, more than 262144"},
+		// Nothing of a spec over the limit is read: its header alone, with no
+		// data after it, gives the same problem.
+		{"a header over the limit, and no data", makeTar(t, outDir, entry{"out/spec.md", tar.TypeReg, atLimit + "x"})[:1024], "",
+			"the spec is 262145 bytes, more than 262144"},
 		{"no spec", makeTar(t, outDir, entry{"out/notes.md", tar.TypeReg, spec}), "",
 			"the run wrote no spec (/kiln/out/spec.md)"},
 		{"an empty documents.tar", nil, "", "the run wrote no spec (/kiln/out/spec.md)"},
