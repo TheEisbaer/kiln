@@ -26,7 +26,16 @@ type record struct {
 	// with one, a missing result may have been too long.
 	TooLongLines int    `json:"too_long_lines"`
 	Saved        string `json:"saved"` // the saved commit, or "no change"
+	// The run's list of hosts, from its container's label kiln.hosts; empty
+	// without a list. wayout.jsonl holds what its way out let through and
+	// refused, unless WayOut is "gone": the way out was not there at collect.
+	Hosts  []string `json:"hosts"`
+	WayOut string   `json:"wayout,omitempty"`
 }
+
+// wayOutGone is the record's WayOut for a run with a list that had no way out
+// when it was collected.
+const wayOutGone = "gone"
 
 // RecordInputs are the inputs a run was started with.
 type RecordInputs struct {

@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/TheEisbaer/kiln/internal/run"
@@ -28,6 +29,13 @@ const (
 	proxyNetwork = "kiln"
 )
 
+// A run's way out (ADR 0059): its image, and the outward network it reaches
+// the hosts on its list on.
+const (
+	wayOutImage   = "kiln-wayout"
+	wayOutNetwork = "kiln-web"
+)
+
 // The variables `kiln proxy` reads, the same as the seal's test reads.
 const (
 	upstreamVar = "KILN_CLAUDE_UPSTREAM"
@@ -36,7 +44,7 @@ const (
 
 const usage = `usage:
   kiln core --data <dir> --repo <bare repo> --model <id> --effort <low|medium|high>
-            [--image kiln-run] [--proxy kiln-proxy]
+            [--image kiln-run] [--proxy kiln-proxy] [--spec-hosts <* or names, by commas>]
   kiln card --data <dir> <text>
   kiln run --repo <bare repo> --commit <commit> --branch <branch> --run <id>
            --instruction <file> --model <id> --effort <low|medium|high> --runs <dir>
@@ -76,6 +84,7 @@ func coreCommand(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.Effort, "effort", "", "the effort of the runs it starts: low, medium or high")
 	fs.StringVar(&cfg.Image, "image", "kiln-run", "the run image")
 	fs.StringVar(&cfg.Proxy, "proxy", proxyName, "the proxy container")
+	hosts := fs.String("spec-hosts", "", "the hosts a spec run may reach: * for every public host, or names separated by commas; none by default")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -83,6 +92,10 @@ func coreCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
+	if *hosts != "" {
+		cfg.Hosts = strings.Split(*hosts, ",")
+	}
+	cfg.WayOutImage, cfg.WayOutNetwork = wayOutImage, wayOutNetwork
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := tick.Core(ctx, cfg, stdout, stderr); err != nil {

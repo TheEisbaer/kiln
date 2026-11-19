@@ -40,6 +40,13 @@ type Inputs struct {
 	// container; none for a run started by hand. A container of another
 	// instance, or of none when one is given, is refused and left alone.
 	Instance string
+	// The list of hosts the run may reach, and its way out's image and
+	// outward network (ADR 0059). Empty, the run is sealed as before. The
+	// list is not among the labels a repeat must match: a run keeps the way
+	// out it was created with.
+	Hosts         []string
+	WayOutImage   string
+	WayOutNetwork string
 }
 
 // Exit statuses.
@@ -56,6 +63,7 @@ const (
 	labelEffort      = "kiln.effort"
 	labelInstruction = "kiln.instruction" // the instruction's SHA-256
 	labelInstance    = "kiln.instance"    // set by the seal from Inputs.Instance
+	labelHosts       = "kiln.hosts"       // set by the seal from Inputs.Hosts
 )
 
 // Where Claude Code writes in a run: the documents of a stage (ADR 0038) and
@@ -217,7 +225,7 @@ func Do(ctx context.Context, in Inputs, out, errOut io.Writer) int {
 }
 
 func do(ctx context.Context, in Inputs, out, errOut io.Writer) (int, error) {
-	rec, err := carry(ctx, in, out, errOut, func() error { return nil }, false)
+	rec, err := carry(ctx, in, out, errOut, errOut, func() error { return nil }, false)
 	if errors.Is(err, ErrInterrupted) {
 		fmt.Fprintf(out, "following ended; the run goes on in kiln-run-%s, and the same command started again follows it and saves its work\n", in.ID)
 		return exitInterrupted, nil
@@ -248,9 +256,11 @@ func do(ctx context.Context, in Inputs, out, errOut io.Writer) (int, error) {
 // container: one that never started has the proxy attached, its files placed
 // again and is started; where there is no container and no record, Carry
 // returns ErrGone. A cancelled context while it follows returns
-// ErrInterrupted. It prints nothing: the run's output is in its record.
-func Carry(ctx context.Context, in Inputs, starting func() error) (Verdict, error) {
-	rec, err := carry(ctx, in, io.Discard, io.Discard, starting, true)
+// ErrInterrupted. It prints nothing of the run: the run's output is in its
+// record. What a step notes and goes on after, such as a way out that is gone
+// while its run runs, goes to notes.
+func Carry(ctx context.Context, in Inputs, starting func() error, notes io.Writer) (Verdict, error) {
+	rec, err := carry(ctx, in, io.Discard, io.Discard, notes, starting, true)
 	if err != nil {
 		return Verdict{}, err
 	}
@@ -259,7 +269,7 @@ func Carry(ctx context.Context, in Inputs, starting func() error) (Verdict, erro
 
 // With stored, the run is known to be in the store once starting has
 // returned, or from the outset when starting is nil; see create.
-func carry(ctx context.Context, in Inputs, out, errOut io.Writer, starting func() error, stored bool) (*record, error) {
+func carry(ctx context.Context, in Inputs, out, errOut, notes io.Writer, starting func() error, stored bool) (*record, error) {
 	// 0: check the inputs, and look at what is there.
 	r, err := check(ctx, in)
 	if err != nil {
@@ -337,6 +347,14 @@ func carry(ctx context.Context, in Inputs, out, errOut io.Writer, starting func(
 			if err := seal.AttachProxy(ctx, r.ID, r.Proxy); err != nil {
 				return nil, err
 			}
+			// A way out stopped since, as by a restart of the engine, is
+			// started again; one that is gone is noted, and the run goes on
+			// without the web.
+			if err := seal.StartWayOut(ctx, r.ID); errors.Is(err, seal.ErrWayOutGone) {
+				fmt.Fprintf(notes, "run %s: %v\n", r.ID, err)
+			} else if err != nil {
+				return nil, err
+			}
 		}
 		if err := r.follow(ctx); err != nil {
 			return nil, err
@@ -412,7 +430,8 @@ func (r *run) create(ctx context.Context, starting func() error, stored bool, st
 		}
 	} else {
 		if err := seal.CreateRun(ctx, seal.Run{ID: r.ID, Image: r.Image, Proxy: r.Proxy,
-			Command: r.command(), Labels: r.labels(), Instance: r.Instance}); err != nil {
+			Command: r.command(), Labels: r.labels(), Instance: r.Instance,
+			Hosts: r.Hosts, WayOutImage: r.WayOutImage, WayOutNetwork: r.WayOutNetwork}); err != nil {
 			return err
 		}
 		if err := after("create"); err != nil {
@@ -527,6 +546,26 @@ func (r *run) collect(ctx context.Context) (*record, error) {
 		}
 	}
 
+	// A run with a list keeps what its way out let through and refused
+	// (ADR 0038, ADR 0059). One whose way out is gone has none.
+	var hosts []string
+	if l := state.Labels[labelHosts]; l != "" {
+		hosts = strings.Split(l, ",")
+	}
+	wayOut := ""
+	if len(hosts) > 0 {
+		err := writeFile(filepath.Join(partial, "wayout.jsonl"), func(w io.Writer) error {
+			return seal.ReadWayOut(ctx, r.ID, w)
+		})
+		if errors.Is(err, seal.ErrNoWayOut) {
+			wayOut = wayOutGone
+			err = os.Remove(filepath.Join(partial, "wayout.jsonl"))
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	output, err := os.Open(filepath.Join(partial, "output.jsonl"))
 	if err != nil {
 		return nil, err
@@ -539,12 +578,17 @@ func (r *run) collect(ctx context.Context) (*record, error) {
 	if err := after("collect"); err != nil {
 		return nil, err
 	}
+	if hosts == nil {
+		hosts = []string{}
+	}
 	return &record{
 		Inputs:       r.recordInputs(),
 		Ending:       endingOf(state),
 		ModelSeen:    s.model,
 		Result:       s.result,
 		TooLongLines: s.tooLong,
+		Hosts:        hosts,
+		WayOut:       wayOut,
 	}, nil
 }
 

@@ -20,6 +20,13 @@ type Run struct {
 	// its network and container, by which ListRuns finds it. A run started by
 	// hand has none, so no core lists it.
 	Instance string
+	// The list of hosts the run may reach (ADR 0059): `*` alone, or names.
+	// Empty, the run is sealed as before and gets no way out. With a list,
+	// the run gets a way out of its own from WayOutImage, which is also on
+	// the outward network WayOutNetwork.
+	Hosts         []string
+	WayOutImage   string
+	WayOutNetwork string
 }
 
 // runLabel carries a run's ID on its container (ADR 0035, point 2), and marks
@@ -70,6 +77,15 @@ var runLimits = []string{
 // container. With an instance, both carry the label kiln.instance=<instance>. The container is created, not started: the caller places files in
 // it and starts it.
 //
+// With a list of hosts, the list is checked first, and the outward network is
+// created if it is missing; one of its name without the label kiln.web is
+// refused. After the run's network the way out kiln-wayout-<ID> is created on
+// it, connected to the outward network and started (createWayOut). The run's
+// container then gets HTTPS_PROXY and https_proxy, which name the way out,
+// NO_PROXY and no_proxy, which name the proxy so that the model traffic does
+// not take the web's path, and the label kiln.hosts with the list. Without a
+// list none of this is done.
+//
 // Before it creates anything it looks at what is there, so that it can be
 // repeated after a failure or a kill at any step (ADR 0035):
 //
@@ -77,6 +93,9 @@ var runLimits = []string{
 //     started is removed, and its network with it.
 //   - A container of the name that has started, or that lacks the label, is
 //     refused, and nothing is touched.
+//   - A way out of the run with the label kiln.run=<ID> is removed with such
+//     a container, or alone. One without the label is refused, and nothing is
+//     touched.
 //   - A network of the name without a container is removed. A network left
 //     behind is never reused, since its options cannot be trusted. One without
 //     the label kiln.run=<ID> is refused, and nothing is touched.
@@ -94,12 +113,20 @@ func CreateRun(ctx context.Context, r Run) error {
 			return err
 		}
 	}
+	if len(r.Hosts) > 0 {
+		if err := checkHosts(r.Hosts); err != nil {
+			return err
+		}
+		if r.WayOutImage == "" || r.WayOutNetwork == "" {
+			return fmt.Errorf("a run with a list of hosts needs the way out's image and network")
+		}
+	}
 	if _, err := kilnProxy(ctx, r.Proxy); err != nil {
 		return err
 	}
 	keys := make([]string, 0, len(r.Labels))
 	for k := range r.Labels {
-		if k == "" || k == runLabel || k == instanceLabel || strings.Contains(k, "=") {
+		if k == "" || k == runLabel || k == instanceLabel || k == hostsLabel || strings.Contains(k, "=") {
 			return fmt.Errorf("the label %q cannot be given for a run", k)
 		}
 		keys = append(keys, k)
@@ -110,9 +137,35 @@ func CreateRun(ctx context.Context, r Run) error {
 	if err := removeLeftovers(ctx, name, r.ID, r.Proxy); err != nil {
 		return err
 	}
+	if len(r.Hosts) > 0 {
+		if err := webNetwork(ctx, r.WayOutNetwork); err != nil {
+			return err
+		}
+	}
 
 	if err := createRunNetwork(ctx, r.ID, r.Proxy, r.Instance); err != nil {
 		return err // createRunNetwork leaves nothing behind
+	}
+	// undo removes what this call made after the network, by IDs, also when
+	// the context is what failed the step.
+	wayOut := ""
+	undo := func(err error) error {
+		ctx := context.WithoutCancel(ctx)
+		if wayOut != "" {
+			if _, rmErr := docker(ctx, nil, "rm", "--force", wayOut); rmErr != nil {
+				return fmt.Errorf("%w (and removing the way out failed: %v)", err, rmErr)
+			}
+		}
+		if rmErr := RemoveRunNetwork(ctx, r.ID, r.Proxy); rmErr != nil {
+			err = fmt.Errorf("%w (and removing the network failed: %v)", err, rmErr)
+		}
+		return err
+	}
+	if len(r.Hosts) > 0 {
+		var err error
+		if wayOut, err = createWayOut(ctx, r); err != nil {
+			return undo(err) // createWayOut leaves no way out behind
+		}
 	}
 
 	args := []string{
@@ -125,6 +178,9 @@ func CreateRun(ctx context.Context, r Run) error {
 	}
 	for _, k := range keys {
 		args = append(args, "--label", k+"="+r.Labels[k])
+	}
+	if len(r.Hosts) > 0 {
+		args = append(args, "--label", hostsLabel+"="+strings.Join(r.Hosts, ","))
 	}
 	args = append(args,
 		"--network", name,
@@ -139,18 +195,26 @@ func CreateRun(ctx context.Context, r Run) error {
 		// Not a credential: the proxy replaces it (ADR 0017).
 		"--env", "ANTHROPIC_BASE_URL=http://"+r.Proxy+":"+proxyPort,
 		"--env", "ANTHROPIC_API_KEY=kiln-placeholder",
-		"--env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", // ADR 0041, point 3
-		// Whatever follows is the image and its arguments, never an option.
-		"--", r.Image)
+		"--env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1") // ADR 0041, point 3
+	if len(r.Hosts) > 0 {
+		// Claude Code takes the first of these for all its traffic, the model's
+		// included, unless NO_PROXY names the proxy (ADR 0059). HTTP_PROXY is
+		// not set: the way out answers only CONNECT.
+		wayOutURL := "http://" + wayOutName(r.ID) + ":" + wayOutPort
+		args = append(args,
+			"--env", "HTTPS_PROXY="+wayOutURL,
+			"--env", "https_proxy="+wayOutURL,
+			"--env", "NO_PROXY="+r.Proxy,
+			"--env", "no_proxy="+r.Proxy)
+	}
+	// Whatever follows is the image and its arguments, never an option.
+	args = append(args, "--", r.Image)
 	args = append(args, r.Command...)
 
 	if _, err := createContainer(ctx, nil, "create", args...); err != nil {
-		// createContainer removed the container; the network must go as well,
-		// also when the context is what failed the create.
-		if rmErr := RemoveRunNetwork(context.WithoutCancel(ctx), r.ID, r.Proxy); rmErr != nil {
-			err = fmt.Errorf("%w (and removing the network failed: %v)", err, rmErr)
-		}
-		return err
+		// createContainer removed the container; the way out and the network
+		// must go as well.
+		return undo(err)
 	}
 	return nil
 }
@@ -170,10 +234,23 @@ func removeLeftovers(ctx context.Context, name, id, proxy string) error {
 		case c.state != "created":
 			return fmt.Errorf("the container %s has started (it is %s); it is left alone", name, c.state)
 		}
+	}
+	// A way out is looked at before anything is removed, so that one without
+	// the label leaves everything as it was.
+	w, err := findWayOut(ctx, id)
+	if err != nil {
+		return err
+	}
+	if c != nil {
 		// By ID, so that a container that took the name in between is not
 		// touched, and without --force, so that one that started in between is
 		// refused.
 		if _, err := docker(ctx, nil, "rm", c.id); err != nil {
+			return err
+		}
+	}
+	if w != nil {
+		if _, err := docker(ctx, nil, "rm", "--force", w.id); err != nil {
 			return err
 		}
 	}
@@ -183,9 +260,10 @@ func removeLeftovers(ctx context.Context, name, id, proxy string) error {
 	return RemoveRunNetwork(ctx, id, proxy)
 }
 
-// ListRuns returns the IDs of the runs of an instance that have a container or
-// a network on the engine: those named kiln-run-<id> that carry both the label
-// kiln.run=<id> and kiln.instance=<instance>. Nothing without both labels is
+// ListRuns returns the IDs of the runs of an instance that have a container,
+// a way out or a network on the engine: those named kiln-run-<id> or
+// kiln-wayout-<id> that carry both the label kiln.run=<id> and
+// kiln.instance=<instance>. Nothing without both labels is
 // listed, so a run started by hand, which has no instance, and another
 // instance's runs are never listed. Each ID is listed once, in order.
 func ListRuns(ctx context.Context, instance string) ([]string, error) {
@@ -206,7 +284,7 @@ func ListRuns(ctx context.Context, instance string) ([]string, error) {
 	var ids []string
 	for _, line := range strings.Split(containers+"\n"+networks, "\n") {
 		name, id, ok := strings.Cut(line, "\t")
-		if !ok || id == "" || name != runName(id) || checkRunID(id) != nil || seen[id] {
+		if !ok || id == "" || (name != runName(id) && name != wayOutName(id)) || checkRunID(id) != nil || seen[id] {
 			continue
 		}
 		seen[id] = true

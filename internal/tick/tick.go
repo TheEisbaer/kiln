@@ -37,6 +37,12 @@ type Config struct {
 	Effort string // the effort of a run that starts
 	Image  string // the run image
 	Proxy  string // the proxy container's name
+	// The list of hosts of a spec run (ADR 0059), which until the stage cards
+	// is every run the tick starts, and its way out's image and outward
+	// network. An empty list seals a run as before.
+	Hosts         []string
+	WayOutImage   string
+	WayOutNetwork string
 }
 
 // interval is the time between two ticks. Only the test changes it.
@@ -302,7 +308,7 @@ func (c *core) card(ctx context.Context, id int64) error {
 	}
 
 	ending, to := store.Failed, failed
-	verdict, err := run.Carry(ctx, in, starting)
+	verdict, err := run.Carry(ctx, in, starting, c.errOut)
 	switch {
 	case errors.Is(err, run.ErrGone):
 		verdict.Reason = run.ErrGone.Error()
@@ -329,17 +335,20 @@ func (c *core) inputs(row store.RunRow, text string) (run.Inputs, error) {
 		return run.Inputs{}, err
 	}
 	return run.Inputs{
-		Repo:        c.Repo,
-		Commit:      row.Commit,
-		Branch:      fmt.Sprintf("kiln/card-%d", row.Card),
-		ID:          row.ID,
-		Instruction: instruction,
-		Runs:        filepath.Join(c.Data, "runs"),
-		Image:       c.Image,
-		Proxy:       c.Proxy,
-		Model:       row.Model,
-		Effort:      row.Effort,
-		Instance:    c.instance,
+		Repo:          c.Repo,
+		Commit:        row.Commit,
+		Branch:        fmt.Sprintf("kiln/card-%d", row.Card),
+		ID:            row.ID,
+		Instruction:   instruction,
+		Runs:          filepath.Join(c.Data, "runs"),
+		Image:         c.Image,
+		Proxy:         c.Proxy,
+		Model:         row.Model,
+		Effort:        row.Effort,
+		Instance:      c.instance,
+		Hosts:         c.Hosts,
+		WayOutImage:   c.WayOutImage,
+		WayOutNetwork: c.WayOutNetwork,
 	}, nil
 }
 

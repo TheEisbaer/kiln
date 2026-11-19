@@ -14,8 +14,8 @@ import (
 )
 
 // A run's life after CreateRun. Every function here acts only on the container
-// kiln-run-<id> and the network kiln-run-<id> that carry the label
-// kiln.run=<id>. Anything else of those names was not made for the run: it is
+// kiln-run-<id>, the way out kiln-wayout-<id> and the network kiln-run-<id>
+// that carry the label kiln.run=<id>. Anything else of those names was not made for the run: it is
 // refused, and nothing is touched.
 
 // What PlaceRun writes into a run's container (ADR 0038): the working tree under
@@ -209,6 +209,11 @@ func placeName(name string) (string, error) {
 // StartRun starts a run's container. It never starts one a second time: a
 // container that has started already, whether it still runs or has exited, is
 // left as it is, so that StartRun can be repeated.
+//
+// Before it starts a container that has never started, it starts the run's
+// way out when that is stopped, as after a restart of the engine; one that
+// runs is left as it is. A container with the label kiln.hosts whose way out
+// is gone is refused, and nothing is started or removed.
 func StartRun(ctx context.Context, id string) error {
 	c, err := existingRun(ctx, id)
 	if err != nil {
@@ -216,6 +221,19 @@ func StartRun(ctx context.Context, id string) error {
 	}
 	if c.state != "created" {
 		return nil
+	}
+	found, err := startWayOut(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !found {
+		withHosts, err := hasHosts(ctx, c.id)
+		if err != nil {
+			return err
+		}
+		if withHosts {
+			return fmt.Errorf("the way out %s is gone; the run is left alone", wayOutName(id))
+		}
 	}
 	_, err = docker(ctx, nil, "start", c.id)
 	return err
@@ -344,15 +362,16 @@ func CopyFromRun(ctx context.Context, id, from string, w io.Writer) error {
 	return dockerIO(ctx, nil, w, "cp", c.id+":"+from, "-")
 }
 
-// RemoveRun removes the save container kiln-save-<id>, then the run's container
-// by its ID with `rm --force`, then the network with RemoveRunNetwork. Anything
-// missing is fine, so that it can be repeated (ADR 0035). Anything without the
-// label kiln.run=<id> is refused, and nothing of it is touched.
+// RemoveRun removes the save container kiln-save-<id>, then the run's container,
+// then its way out kiln-wayout-<id>, each by its ID with `rm --force`, then the
+// network with RemoveRunNetwork. Anything missing is fine, so that it can be
+// repeated (ADR 0035). Anything without the label kiln.run=<id> is refused, and
+// nothing of it is touched.
 func RemoveRun(ctx context.Context, id, proxy string) error {
 	if err := checkRunID(id); err != nil {
 		return err
 	}
-	for _, name := range []string{saveName(id), runName(id)} {
+	for _, name := range []string{saveName(id), runName(id), wayOutName(id)} {
 		c, err := findContainer(ctx, name, runLabel)
 		if err != nil {
 			return err

@@ -397,6 +397,8 @@ func TestSteps(t *testing.T) {
 		})
 	})
 
+	t.Run("a run with a list", func(t *testing.T) { testWeb(t, f) })
+
 	t.Run("the proxy is on no run network", func(t *testing.T) {
 		got := must(t, "inspect", "--format", "{{json .NetworkSettings.Networks}}", f.proxy.Name)
 		var networks map[string]json.RawMessage
@@ -455,7 +457,7 @@ func (f *fixture) newCase(t *testing.T, name string) testCase {
 	instruction := filepath.Join(f.dir, name+".md")
 	writeIn(t, f.dir, name+".md", "Run sh run.sh and report its result. kiln-case-"+name+"\n", 0o644)
 	t.Cleanup(func() {
-		dockerQuiet("rm", "--force", "kiln-save-"+id, "kiln-run-"+id)
+		dockerQuiet("rm", "--force", "kiln-save-"+id, "kiln-run-"+id, "kiln-wayout-"+id)
 		dockerQuiet("network", "disconnect", "--force", "kiln-run-"+id, f.proxy.Name)
 		dockerQuiet("network", "rm", "kiln-run-"+id)
 	})
@@ -584,8 +586,16 @@ func (f *fixture) assertDone(t *testing.T, c testCase) {
 		t.Errorf("session.tar holds %d sessions, want 1", sessions)
 	}
 	var rec record
-	if err := json.Unmarshal([]byte(readAll(t, filepath.Join(dir, "result.json"))), &rec); err != nil {
+	data := readAll(t, filepath.Join(dir, "result.json"))
+	if err := json.Unmarshal([]byte(data), &rec); err != nil {
 		t.Fatal(err)
+	}
+	// A run without a list records no hosts and no way out.
+	if !strings.Contains(data, `"hosts": []`) || strings.Contains(data, `"wayout"`) {
+		t.Errorf("result.json of a run without a list:\n%s", data)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "wayout.jsonl")); err == nil {
+		t.Error("a run without a list has wayout.jsonl")
 	}
 	if rec.Result == nil || rec.Result.Subtype != "success" || rec.ModelSeen != model || rec.Saved != save ||
 		rec.Ending.ExitCode != 0 || rec.Inputs.Commit != f.commit || rec.Inputs.Effort != effort {

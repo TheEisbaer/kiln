@@ -22,6 +22,9 @@ type fixture struct {
 	proxy                               Proxy
 	probe                               []byte
 	name, runID                         func(string) string
+	// The way out's image, the fake web host's, and the outward network of
+	// the test's ways out.
+	wayOutImage, webImage, web string
 }
 
 // placedExtra is placed with the probe in the probe run: a file in a directory
