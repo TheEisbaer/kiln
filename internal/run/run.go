@@ -47,6 +47,11 @@ type Inputs struct {
 	Hosts         []string
 	WayOutImage   string
 	WayOutNetwork string
+	// SkipSave leaves step 6 out: no save container, nothing taken into the
+	// instance's copy, and the branch neither created nor moved. The record's
+	// save is "not saved". The tick sets it for a spec run; `kiln run` by hand
+	// never does.
+	SkipSave bool
 }
 
 // Exit statuses.
@@ -202,8 +207,12 @@ type Verdict struct {
 	// nothing changed.
 	Finished bool
 	// Reason is one line: the container's ending, the result's subtype,
-	// turns and cost, and the saved commit or "no change".
+	// turns and cost, and the saved commit, "no change" or "not saved".
 	Reason string
+	// Hosts is the run's list of hosts, empty without one, and WayOutGone is
+	// set when its way out was gone when it was collected (ADR 0059).
+	Hosts      []string
+	WayOutGone bool
 }
 
 // Do carries out one run, or the rest of one started before with the same
@@ -241,8 +250,8 @@ func do(ctx context.Context, in Inputs, out, errOut io.Writer) (int, error) {
 
 // Carry is steps 0 to 7 of a run: it checks the inputs and looks at what is
 // there, creates, places, starts and follows the run as far as that is still
-// to do, collects it, saves its work and records it, and returns the verdict.
-// Step 8 is Remove.
+// to do, collects it, saves its work unless SkipSave is set, and records it,
+// and returns the verdict. Step 8 is Remove.
 //
 // starting is called once, right before the container is started for the
 // first time, and puts the run in the store. When a step fails before
@@ -264,7 +273,8 @@ func Carry(ctx context.Context, in Inputs, starting func() error, notes io.Write
 	if err != nil {
 		return Verdict{}, err
 	}
-	return Verdict{Finished: rec.status() == 0, Reason: rec.reason()}, nil
+	return Verdict{Finished: rec.status() == 0, Reason: rec.reason(),
+		Hosts: rec.Hosts, WayOutGone: rec.WayOut == wayOutGone}, nil
 }
 
 // With stored, the run is known to be in the store once starting has
@@ -368,7 +378,9 @@ func carry(ctx context.Context, in Inputs, out, errOut, notes io.Writer, startin
 	if err != nil {
 		return nil, err
 	}
-	if rec.Saved, err = r.save(ctx, rec.Ending, guard); err != nil {
+	if r.SkipSave {
+		rec.Saved = notSaved
+	} else if rec.Saved, err = r.save(ctx, rec.Ending, guard); err != nil {
 		return nil, err
 	}
 	if err := r.record(rec); err != nil {

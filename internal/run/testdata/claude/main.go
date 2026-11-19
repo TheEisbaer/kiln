@@ -4,7 +4,9 @@
 // kiln-case-web has a script of four steps instead (ADR 0059): the Bash call,
 // then a WebFetch of the fake public host's page, then the answer to
 // WebFetch's own call, a request without tools that holds the page, which is
-// the page's marker, and "Done." once two tool results have come. Its data follows the Claude Code version
+// the page's marker, and "Done." once two tool results have come. The case
+// kiln-case-tick-spec has three steps: the Bash call, then a Write of the spec
+// to /kiln/out/spec.md, then "Done.". Its data follows the Claude Code version
 // pinned in images/run/Dockerfile; the card that changes the pin updates it.
 //
 // For each request it writes one line of JSON to standard output: the model,
@@ -72,7 +74,7 @@ type logLine struct {
 	Marker     bool   `json:"marker"`
 	Case       string `json:"case"`
 	ToolResult bool   `json:"tool_result"`
-	Answer     string `json:"answer"` // the step of the script: bash, webfetch, page or done
+	Answer     string `json:"answer"` // the step of the script: bash, webfetch, page, write or done
 }
 
 func main() {
@@ -160,6 +162,9 @@ const (
 	// The page's address on the fake public host. The prompt carries the
 	// case's word, so that WebFetch's own call is told apart.
 	fetchURL = "https://public.kiln-test.example/page"
+	// The spec of the case kiln-case-tick-spec, which the tick test expects in
+	// the store.
+	specText = "# Spec of the scripted run\n\n## 1. What will be built\n\nNothing; kiln-case-tick-spec.\n"
 )
 
 // pageMarker is the marker of the fake public host's page.
@@ -170,6 +175,17 @@ var pageMarker = regexp.MustCompile(`kiln-page-[a-z0-9-]+`)
 func script(req request, body, caseName string, results int) (map[string]any, string, string) {
 	bash := map[string]any{"type": "tool_use", "id": "toolu_kiln_1", "name": "Bash", "input": json.RawMessage(bashInput)}
 	done := map[string]any{"type": "text", "text": doneText}
+	if caseName == "kiln-case-tick-spec" {
+		switch results {
+		case 0:
+			return bash, "tool_use", "bash"
+		case 1:
+			input, _ := json.Marshal(map[string]string{"file_path": "/kiln/out/spec.md", "content": specText})
+			return map[string]any{"type": "tool_use", "id": "toolu_kiln_2", "name": "Write", "input": json.RawMessage(input)}, "tool_use", "write"
+		default:
+			return done, "end_turn", "done"
+		}
+	}
 	if !strings.HasPrefix(caseName, "kiln-case-web") {
 		if results > 0 {
 			return done, "end_turn", "done"
