@@ -16,12 +16,18 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 ## ADR 0008: One planned intervention per card: approval before any code is written
 
-- The developer approves a spec with a move on the screen: it moves the card from spec, waiting for approval, to implement, waiting for a run. The developer's moves are one table in the store (`Decide` in `internal/store`): approve, again, send back and done. Since no state of ADR 0043 is "review, waits for approval", done is the move from review waiting for the Git host (ready to merge), until Kiln publishes (card 13, 2026-11-19). Card 14 adds "review, waits for approval" for a review that passed, and done is the move from it; ready to merge comes with publishing (card 14, 2026-11-19).
+- The developer approves a spec with a move on the screen: it moves the card from spec, waiting for approval, to implement, waiting for a run. The developer's moves are one table in the store (`Decide` in `internal/store`): approve, again, send back and done (card 13, 2026-11-19). Done is the move from review, waiting for approval, where a review that passed leaves the card; ready to merge comes with publishing (card 14, 2026-11-19).
+- The developer's moves carry a note, at most 16 KiB, trimmed, kept as the reason of the move's entry; no column is added. A spec that waits for approval is sent back to a spec run with a note it cannot go without (`again`), a review that passed is sent back to implement the same way (`send-back`), the moves of a stage that needs you take one or none, and approve and done refuse one. The run that follows a move with a note is told it last, under `## The developer's note`, and the note wins where it differs from the spec (card 16, 2026-11-20).
+
+## ADR 0011: A card ends as done or dropped, and only the developer drops it
+
+- The developer drops a card with a move on the screen, `drop`, from every state but done, with one confirmation that names the card and an optional note. A card with a run in flight is not dropped (409) until stopping a run comes. The branch of a dropped card stays (card 16, 2026-11-20).
 
 ## ADR 0012: A moving repo sends a card back to implement; a spec that cannot be built sends it back to spec
 
 - A card that returns to implement from the Git host counts as a send-back, for a conflict as for a failed check (ADR 0054).
 - A card that returns to spec has its spec session resumed, since that stage gets its own work back; after the new approval implement starts in a fresh session and the number of send-backs starts again (ADR 0053, ADR 0054). That approval is not the planned one and is the intervention counted here (ADR 0042). How a run reports that the spec cannot be built is listed in docs/open-points.md.
+- Until a run can say that its spec cannot be built, the developer sends a card back to spec by hand: `to-spec`, from implement or review that needs you, to a spec run, with a note or without. That run starts fresh, not resumed: it is told the spec it replaces (`## The last spec`), the card's newest report or review (`## The last report` or `## The last review`), and the note, if any. A spec run after any note is told the spec it replaces as well (card 16, 2026-11-20).
 
 ## ADR 0013: Work is saved after every implement round and published only when review has passed
 
@@ -122,6 +128,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 > Since ADR 0059 a run with a list of hosts has a way out, a fourth kind of process. The lines below still hold.
 
 - The core is not started from a checkout but from a program built in a sealed container (ADR 0036, ADR 0037).
+- The core does not depend on the directory it was started in: it makes its paths absolute at its start, runs git in the instance's copy of the repo and every other command, through the seal, in the data directory (card 16, 2026-11-20).
 
 ## ADR 0035: The core keeps nothing in memory that matters; it reconciles the store, the container engine and the Git host
 
@@ -179,6 +186,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - A run's ending is read off its record: finished when its container exited with 0, the result is `success`, the model is the one asked for, and the work is saved or nothing changed; failed otherwise. Until the retry card a failed run moves its card to "needs you" (ADR 0016). Until the stage cards a card waits in spec for a run, which is told the card's text; a finished run moves it to wait for the developer's approval (card 8, 2026-11-18).
 - A finished spec run moves its card to wait for approval only with a spec it could read and a run that had the web. Otherwise the card goes under "needs you" with the reason, and the run stays finished (card 11).
 - A card whose review passed waits in review for the developer's approval, a twelfth pairing, until the core publishes; ready to merge, review waiting for the Git host, comes with publishing. A finished implement run moves its card to review only with a commit saved; one that changed nothing stops under "needs you". A finished review run's card goes by the review's first line (card 14, 2026-11-19).
+- Until dropped is a mark on the card, a dropped card is in done, waiting for nothing, and the reason of its last entry, the developer's, begins with "dropped by the developer", followed by the note; the board tells it apart by that entry. No column is added. `AddRun` refuses a run of a card that does not wait for one, and the tick's hold moves a card only from the state it read, so that a drop between the tick's read and the run's start wins (card 16, 2026-11-20).
 
 ## ADR 0044: The UI sends requests; the core tells it about changes over one one-way event stream
 

@@ -14,6 +14,7 @@
 package web
 
 import (
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/base64"
@@ -53,11 +54,38 @@ var policy = func() string {
 // maxBody is the largest body of a request that is read.
 const maxBody = 1 << 20
 
-// Info is what the board says about the core.
+// Info is what the board says about the core, and where the card's page gets
+// a card's change from.
 type Info struct {
 	Instance string
 	Repo     string
-	Model    string
+	// The models of the spec runs, the implement runs and the review runs the
+	// core starts.
+	Model, ImplementModel, ReviewModel string
+	// Change is the change on a card's branch, or nil when the card has no
+	// branch. The tick hands it in, so that this package runs no command. Nil
+	// shows no change on any card.
+	Change func(ctx context.Context, card int64) (*Change, error)
+}
+
+// Change is where a card's change is and what it is: its branch in the
+// instance's copy of the repo, the branch's commits since it left main, newest
+// first, and the diff from where it left main to its tip. A diff over the
+// limit is not given: only its size, and the command that prints it.
+type Change struct {
+	Branch   string
+	Repo     string
+	Commits  []Commit
+	Diff     string
+	Size     int64
+	TooLarge bool
+	Command  string
+}
+
+// Commit is one commit of a card's branch: its short hash and its title.
+type Commit struct {
+	Hash  string
+	Title string
 }
 
 // CheckAddress refuses a listen address whose host is not loopback: an IP
@@ -140,9 +168,14 @@ type (
 	boardJSON struct {
 		Instance string     `json:"instance"`
 		Repo     string     `json:"repo"`
-		Model    string     `json:"model"`
+		Models   modelsJSON `json:"models"`
 		Now      time.Time  `json:"now"`
 		Cards    []tileJSON `json:"cards"`
+	}
+	modelsJSON struct {
+		Spec      string `json:"spec"`
+		Implement string `json:"implement"`
+		Review    string `json:"review"`
 	}
 	tileJSON struct {
 		ID        int64          `json:"id"`
@@ -150,6 +183,7 @@ type (
 		Stage     store.Stage    `json:"stage"`
 		WaitsFor  store.WaitsFor `json:"waits_for"`
 		Reason    string         `json:"reason"`
+		Dropped   bool           `json:"dropped"`
 		Run       *flightJSON    `json:"run"`
 		Documents []string       `json:"documents"`
 	}
@@ -161,12 +195,32 @@ type (
 	cardJSON struct {
 		tileJSON
 		Text      string         `json:"text"`
-		Moves     []store.Action `json:"moves"`
+		Moves     []moveJSON     `json:"moves"`
+		Note      string         `json:"note"`
 		History   []entryJSON    `json:"history"`
 		Runs      []runJSON      `json:"runs"`
 		Documents []documentJSON `json:"documents"`
 		Activity  []activityJSON `json:"activity"`
+		Change    *changeJSON    `json:"change"`
 		Now       time.Time      `json:"now"`
+	}
+	moveJSON struct {
+		Action store.Action `json:"action"`
+		Note   store.Note   `json:"note"`
+	}
+	changeJSON struct {
+		Branch   string       `json:"branch"`
+		Repo     string       `json:"repo"`
+		Commits  []commitJSON `json:"commits"`
+		Diff     string       `json:"diff"`
+		Size     int64        `json:"size"`
+		TooLarge bool         `json:"too_large"`
+		Command  string       `json:"command"`
+		Error    string       `json:"error,omitempty"`
+	}
+	commitJSON struct {
+		Hash  string `json:"hash"`
+		Title string `json:"title"`
 	}
 	entryJSON struct {
 		Number   int64          `json:"number"`
@@ -176,6 +230,8 @@ type (
 		WaitsFor store.WaitsFor `json:"waits_for"`
 		Run      string         `json:"run"`
 		Reason   string         `json:"reason"`
+		Note     string         `json:"note"`
+		Dropped  bool           `json:"dropped"`
 	}
 	runJSON struct {
 		ID      string       `json:"id"`
@@ -217,7 +273,7 @@ func started(t time.Time) *time.Time {
 
 func tile(s store.Summary) tileJSON {
 	t := tileJSON{ID: s.ID, Title: title(s.Text), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
-		Documents: s.Kinds}
+		Dropped: s.Dropped, Documents: s.Kinds}
 	if t.Documents == nil {
 		t.Documents = []string{}
 	}
@@ -233,12 +289,24 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	b := boardJSON{Instance: h.info.Instance, Repo: h.info.Repo, Model: h.info.Model, Now: time.Now().UTC(),
+	b := boardJSON{Instance: h.info.Instance, Repo: h.info.Repo, Models: h.models(), Now: time.Now().UTC(),
 		Cards: []tileJSON{}}
 	for _, c := range cards {
 		b.Cards = append(b.Cards, tile(c))
 	}
 	reply(w, http.StatusOK, b)
+}
+
+// models are the models of the three stages; an empty one is the spec's.
+func (h *handler) models() modelsJSON {
+	m := modelsJSON{Spec: h.info.Model, Implement: h.info.ImplementModel, Review: h.info.ReviewModel}
+	if m.Implement == "" {
+		m.Implement = m.Spec
+	}
+	if m.Review == "" {
+		m.Review = m.Spec
+	}
+	return m
 }
 
 // cardID is the card's ID in the request's path, or 0 when it is none.
@@ -266,7 +334,29 @@ func (h *handler) card(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	out.Change = h.change(r.Context(), c.ID)
 	reply(w, http.StatusOK, out)
+}
+
+// change is the change of a card's branch, nil when it has none. A change that
+// cannot be read is said on the card's page, which shows the rest.
+func (h *handler) change(ctx context.Context, card int64) *changeJSON {
+	if h.info.Change == nil {
+		return nil
+	}
+	ch, err := h.info.Change(ctx, card)
+	if err != nil {
+		return &changeJSON{Commits: []commitJSON{}, Error: run.Printable(err.Error())}
+	}
+	if ch == nil {
+		return nil
+	}
+	out := &changeJSON{Branch: ch.Branch, Repo: ch.Repo, Commits: []commitJSON{}, Diff: ch.Diff, Size: ch.Size,
+		TooLarge: ch.TooLarge, Command: ch.Command}
+	for _, c := range ch.Commits {
+		out.Commits = append(out.Commits, commitJSON{Hash: c.Hash, Title: c.Title})
+	}
+	return out
 }
 
 // cardJSON is everything the card's page shows.
@@ -284,17 +374,21 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 		return cardJSON{}, err
 	}
 	sum := store.Summary{Card: c}
-	if len(history) > 0 {
-		sum.Reason = history[len(history)-1].Reason
-	}
-	out := cardJSON{Text: c.Text, Moves: store.Moves(c.State), History: []entryJSON{}, Runs: []runJSON{},
+	out := cardJSON{Text: c.Text, History: []entryJSON{}, Runs: []runJSON{},
 		Documents: []documentJSON{}, Activity: []activityJSON{}, Now: time.Now().UTC()}
-	if out.Moves == nil {
-		out.Moves = []store.Action{}
+	if len(history) > 0 {
+		last := history[len(history)-1]
+		sum.Reason, sum.Dropped = last.Reason, store.Dropped(last.State, last.Cause, last.Reason)
+		// The note that the run the card waits for is told, as the tick
+		// reads it (store.Note).
+		if c.WaitsFor == store.Run {
+			out.Note = last.Note()
+		}
 	}
 	for _, e := range history {
 		out.History = append(out.History, entryJSON{Number: e.Number, At: e.At, Cause: e.Cause, Stage: e.Stage,
-			WaitsFor: e.WaitsFor, Run: e.Run, Reason: e.Reason})
+			WaitsFor: e.WaitsFor, Run: e.Run, Reason: e.Reason, Note: e.Note(),
+			Dropped: store.Dropped(e.State, e.Cause, e.Reason)})
 	}
 	for _, r := range runs {
 		out.Runs = append(out.Runs, runJSON{ID: r.ID, Commit: r.Commit, Model: r.Model, Effort: r.Effort,
@@ -303,6 +397,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 			sum.InFlight = &r
 		}
 	}
+	out.Moves = movesJSON(store.Moves(c.State, sum.InFlight != nil))
 	seen := map[string]bool{}
 	for _, d := range docs {
 		out.Documents = append(out.Documents, documentJSON{Kind: d.Kind, Run: d.Run, Text: d.Text})
@@ -360,19 +455,30 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Action store.Action `json:"action"`
+		Note   string       `json:"note"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		fail(w, http.StatusBadRequest, `the body must be {"action": …}`)
+		fail(w, http.StatusBadRequest, `the body must be {"action": …, "note": …}, the note optional`)
 		return
 	}
-	c, err := h.store.Decide(id, body.Action)
+	c, err := h.store.Decide(id, body.Action, body.Note)
 	switch {
 	case errors.Is(err, store.ErrNoCard):
 		fail(w, http.StatusNotFound, fmt.Sprintf("no card %d", id))
 		return
+	case errors.Is(err, store.ErrNote):
+		// The sentence of what does not fit, such as "this move needs a note
+		// that says what should change".
+		fail(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), store.ErrNote.Error()+": "))
+		return
 	case errors.Is(err, store.ErrRefused):
+		inFlight, ferr := h.store.InFlight(c.ID)
+		if ferr != nil {
+			fail(w, http.StatusInternalServerError, ferr.Error())
+			return
+		}
 		reply(w, http.StatusConflict, map[string]any{"error": err.Error(), "stage": c.Stage, "waits_for": c.WaitsFor,
-			"moves": nonNil(store.Moves(c.State))})
+			"moves": movesJSON(store.Moves(c.State, inFlight != nil))})
 		return
 	case err != nil:
 		fail(w, http.StatusInternalServerError, err.Error())
@@ -383,14 +489,18 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	out.Change = h.change(r.Context(), c.ID)
 	reply(w, http.StatusOK, out)
 }
 
-func nonNil(a []store.Action) []store.Action {
-	if a == nil {
-		return []store.Action{}
+// movesJSON are the moves a card's state allows, each with what it takes of a
+// note, so that the page asks for a note where one is needed.
+func movesJSON(moves []store.Allowed) []moveJSON {
+	out := []moveJSON{}
+	for _, m := range moves {
+		out = append(out, moveJSON{Action: m.Action, Note: m.Note})
 	}
-	return a
+	return out
 }
 
 func reply(w http.ResponseWriter, status int, v any) {

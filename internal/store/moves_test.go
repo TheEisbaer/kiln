@@ -2,69 +2,233 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
 
-// The table of moves, written out here and not read from the code, so that a
-// row dropped or changed in the code fails the test.
-var wantMoves = map[Action]map[State]State{
-	"approve":   {{"spec", "approval"}: {"implement", "run"}},
-	"again":     {{"spec", "developer"}: {"spec", "run"}, {"implement", "developer"}: {"implement", "run"}, {"review", "developer"}: {"review", "run"}},
-	"send-back": {{"review", "developer"}: {"implement", "run"}},
-	"done":      {{"review", "approval"}: {"done", "nothing"}},
+// row is a row of the table of moves as the test writes it: where the move
+// goes, and what it takes of a note.
+type row struct {
+	to   State
+	note Note
 }
 
-// TestDecide makes every move from every valid state: a row of the table moves
-// the card, with an entry of the developer's; anything else, a move that is not
-// an action included, is refused and changes nothing.
+// The table of moves, written out here and not read from the code, so that a
+// row dropped or changed in the code fails the test.
+var wantMoves = map[Action]map[State]row{
+	"approve": {{"spec", "approval"}: {State{"implement", "run"}, "none"}},
+	"again": {
+		{"spec", "approval"}:       {State{"spec", "run"}, "required"},
+		{"spec", "developer"}:      {State{"spec", "run"}, "optional"},
+		{"implement", "developer"}: {State{"implement", "run"}, "optional"},
+		{"review", "developer"}:    {State{"review", "run"}, "optional"},
+	},
+	"send-back": {
+		{"review", "developer"}: {State{"implement", "run"}, "optional"},
+		{"review", "approval"}:  {State{"implement", "run"}, "required"},
+	},
+	"done": {{"review", "approval"}: {State{"done", "nothing"}, "none"}},
+	"to-spec": {
+		{"implement", "developer"}: {State{"spec", "run"}, "optional"},
+		{"review", "developer"}:    {State{"spec", "run"}, "optional"},
+	},
+	"drop": func() map[State]row {
+		m := map[State]row{}
+		for from := range validPairings {
+			if from.Stage != "done" {
+				m[from] = row{State{"done", "nothing"}, "optional"}
+			}
+		}
+		return m
+	}(),
+}
+
+// TestDecide makes every move from every valid state, without a note and with
+// one: a row of the table moves the card, with an entry of the developer's
+// whose reason is the note, trimmed, or for a drop the words of a drop and the
+// note; a note that does not fit the row is refused; anything else, a move
+// that is not an action included, is refused. A refused move changes nothing.
 func TestDecide(t *testing.T) {
 	s := open(t)
-	actions := []Action{"approve", "again", "send-back", "done", "drop", ""}
+	actions := []Action{"approve", "again", "send-back", "done", "to-spec", "drop", ""}
 	for from := range validPairings {
 		for _, action := range actions {
-			card := mustCreate(t, s, "a card")
-			if _, err := s.Move(card.ID, from, CauseRule); err != nil {
-				t.Fatal(err)
-			}
-			before := len(mustHistory(t, s, card.ID))
-			got, err := s.Decide(card.ID, action)
-			want, ok := wantMoves[action][from]
-			if !ok {
-				if !errors.Is(err, ErrRefused) || got.State != from {
-					t.Errorf("%s from %v: %+v, %v; want refused with the card's state", action, from, got, err)
+			for _, note := range []string{"", " \n ", "  Use the store's words.\n"} {
+				card := mustCreate(t, s, "a card")
+				if _, err := s.Move(card.ID, from, CauseRule); err != nil {
+					t.Fatal(err)
 				}
-				if after, _ := s.Card(card.ID); after.State != from || len(mustHistory(t, s, card.ID)) != before {
-					t.Errorf("%s from %v was refused and changed the card to %+v", action, from, after)
+				before := len(mustHistory(t, s, card.ID))
+				got, err := s.Decide(card.ID, action, note)
+				want, ok := wantMoves[action][from]
+				trimmed := strings.TrimSpace(note)
+				refused := func(sentinel error) {
+					t.Helper()
+					if !errors.Is(err, sentinel) || got.State != from {
+						t.Errorf("%s from %v with %q: %+v, %v; want %v with the card's state", action, from, note, got, err, sentinel)
+					}
+					if after, _ := s.Card(card.ID); after.State != from || len(mustHistory(t, s, card.ID)) != before {
+						t.Errorf("%s from %v was refused and changed the card to %+v", action, from, after)
+					}
 				}
-				continue
-			}
-			if err != nil || got.State != want {
-				t.Errorf("%s from %v: %+v, %v; want %v", action, from, got, err, want)
-				continue
-			}
-			h := mustHistory(t, s, card.ID)
-			if e := h[len(h)-1]; len(h) != before+1 || e.Cause != CauseDeveloper || e.State != want || e.Run != "" {
-				t.Errorf("%s from %v wrote %+v", action, from, h[before:])
+				switch {
+				case !ok:
+					refused(ErrRefused)
+					continue
+				case want.note == "required" && trimmed == "", want.note == "none" && trimmed != "":
+					refused(ErrNote)
+					continue
+				}
+				if err != nil || got.State != want.to {
+					t.Errorf("%s from %v with %q: %+v, %v; want %v", action, from, note, got, err, want.to)
+					continue
+				}
+				reason := trimmed
+				if action == "drop" {
+					reason = "dropped by the developer"
+					if trimmed != "" {
+						reason += ": " + trimmed
+					}
+				}
+				h := mustHistory(t, s, card.ID)
+				e := h[len(h)-1]
+				if len(h) != before+1 || e.Cause != CauseDeveloper || e.State != want.to || e.Run != "" || e.Reason != reason {
+					t.Errorf("%s from %v with %q wrote %+v", action, from, note, h[before:])
+				}
+				if e.Note() != trimmed {
+					t.Errorf("%s from %v: the entry's note is %q, want %q", action, from, e.Note(), trimmed)
+				}
 			}
 		}
 	}
-	if _, err := s.Decide(999, "approve"); err == nil || errors.Is(err, ErrRefused) {
+	if _, err := s.Decide(999, "approve", ""); err == nil || errors.Is(err, ErrRefused) {
 		t.Errorf("a move on no card: %v", err)
 	}
 }
 
-// TestMoves lists the moves of each state as the table has them.
+// TestDecideNoteSize takes a note of 16 KiB, trimmed, and refuses a longer one.
+func TestDecideNoteSize(t *testing.T) {
+	s := open(t)
+	for _, tc := range []struct {
+		note string
+		ok   bool
+	}{
+		{strings.Repeat("a", 16<<10), true},
+		{"\n  " + strings.Repeat("a", 16<<10) + "  \n", true},
+		{strings.Repeat("a", 16<<10+1), false},
+	} {
+		card := mustCreate(t, s, "a card")
+		if _, err := s.Move(card.ID, State{Spec, Approval}, CauseRule); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Decide(card.ID, Again, tc.note)
+		if tc.ok != (err == nil) || (!tc.ok && (!errors.Is(err, ErrNote) || got.State != (State{Spec, Approval}))) {
+			t.Errorf("a note of %d bytes: %+v, %v", len(tc.note), got, err)
+		}
+	}
+}
+
+// TestDropInFlight refuses to drop a card with a run in flight, from each
+// state a run is in flight in, and drops it once the run has ended.
+func TestDropInFlight(t *testing.T) {
+	s := open(t)
+	for i, from := range []State{{Spec, Run}, {Implement, Run}, {Review, Run}} {
+		card := mustCreate(t, s, "a card")
+		if _, err := s.Move(card.ID, from, CauseRule); err != nil {
+			t.Fatal(err)
+		}
+		id := fmt.Sprintf("r%d", i)
+		mustAddRun(t, s, theRun(card.ID, id))
+		if got := Moves(from, true); len(got) != 0 {
+			t.Errorf("the moves from %v with a run in flight are %v", from, got)
+		}
+		if got, err := s.Decide(card.ID, Drop, "not needed"); !errors.Is(err, ErrRefused) || got.State != from {
+			t.Errorf("drop from %v with a run in flight: %+v, %v", from, got, err)
+		}
+		if _, err := s.EndRun(id, Failed, "exit 1", State{from.Stage, Developer}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.Decide(card.ID, Drop, ""); err != nil || got.State != (State{Done, Nothing}) {
+			t.Errorf("drop from %v after the run: %+v, %v", from, got, err)
+		}
+	}
+}
+
+// TestAddRunWaits refuses a run of a card that does not wait for one, such as
+// a card dropped after the tick read it.
+func TestAddRunWaits(t *testing.T) {
+	s := open(t)
+	card := mustCreate(t, s, "a card")
+	if _, err := s.Move(card.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(card.ID, Drop, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddRun(theRun(card.ID, "r1")); err == nil {
+		t.Error("a run of a dropped card was written")
+	}
+	if r, _ := s.InFlight(card.ID); r != nil {
+		t.Errorf("a run is in flight: %+v", r)
+	}
+}
+
+// TestNote reads the note a card's next run is told: the developer's note on
+// the entry that made the card wait for a run, and nothing otherwise.
+func TestNote(t *testing.T) {
+	s := open(t)
+	card := mustCreate(t, s, "a card")
+	note := func(want string) {
+		t.Helper()
+		if got, err := s.Note(card.ID); err != nil || got != want {
+			t.Errorf("Note = %q, %v; want %q", got, err, want)
+		}
+	}
+	note("")
+	if _, err := s.Move(card.ID, State{Spec, Approval}, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(card.ID, Again, " Name the table. "); err != nil {
+		t.Fatal(err)
+	}
+	note("Name the table.")
+	mustAddRun(t, s, theRun(card.ID, "r1"))
+	note("Name the table.")
+	if _, err := s.EndRun("r1", Finished, "exit 0", State{Spec, Approval}, specDoc("# Spec")); err != nil {
+		t.Fatal(err)
+	}
+	note("")
+	if _, err := s.Decide(card.ID, Approve, ""); err != nil {
+		t.Fatal(err)
+	}
+	note("")
+	// A run's reason is not a note.
+	if _, err := s.MoveWithReason(card.ID, State{Implement, Run}, State{Implement, Developer}, CauseRule, "held"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Move(card.ID, State{Implement, Run}, CauseRule); err != nil {
+		t.Fatal(err)
+	}
+	note("")
+	if _, err := s.Note(999); !errors.Is(err, ErrNoCard) {
+		t.Errorf("the note of no card: %v", err)
+	}
+}
+
+// TestMoves lists the moves of each state as the table has them, without a
+// run in flight.
 func TestMoves(t *testing.T) {
 	for from := range validPairings {
-		var want []Action
-		for _, action := range []Action{"approve", "again", "send-back", "done"} {
-			if _, ok := wantMoves[action][from]; ok {
-				want = append(want, action)
+		var want []Allowed
+		for _, action := range []Action{"approve", "again", "done", "send-back", "to-spec", "drop"} {
+			if r, ok := wantMoves[action][from]; ok {
+				want = append(want, Allowed{action, r.note})
 			}
 		}
-		if got := Moves(from); !reflect.DeepEqual(got, want) {
+		if got := Moves(from, false); !reflect.DeepEqual(got, want) {
 			t.Errorf("Moves(%v) = %v, want %v", from, got, want)
 		}
 	}
@@ -144,11 +308,26 @@ func TestBoard(t *testing.T) {
 		t.Errorf("the card with a spec: %+v", e)
 	}
 	// After a move the reason is the new entry's, which has none.
-	if _, err := s.Decide(ended.ID, Again); err != nil {
+	if _, err := s.Decide(ended.ID, Again, ""); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := s.Board(); b[1].Reason != "" {
 		t.Errorf("the reason after a move: %q", b[1].Reason)
+	}
+
+	// A dropped card is told apart from a card marked done.
+	finished := mustCreate(t, s, "finished")
+	if _, err := s.Move(finished.ID, State{Review, Approval}, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(finished.ID, MarkDone, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(ended.ID, Drop, "not needed"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := s.Board(); !b[1].Dropped || b[1].Reason != "dropped by the developer: not needed" || b[2].Dropped || b[0].Dropped {
+		t.Errorf("the dropped card %+v, the finished one %+v", b[1], b[2])
 	}
 
 	runs, err := s.Runs(ended.ID)

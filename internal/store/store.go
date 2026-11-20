@@ -281,10 +281,19 @@ func (s *Store) Move(id int64, to State, cause Cause) (Card, error) {
 	return s.change(false, id, "", fixed(to), cause, "", nil)
 }
 
-// MoveWithReason is Move with a reason on the entry, for a card that the core
-// stops without a run, such as a review run that is not started.
-func (s *Store) MoveWithReason(id int64, to State, cause Cause, reason string) (Card, error) {
-	return s.change(false, id, "", fixed(to), cause, reason, nil)
+// MoveWithReason moves a card that is in the state from, with a reason on the
+// entry, for a card that the core stops without a run, such as a review run
+// that is not started. A card that is no longer in from, such as one the
+// developer dropped meanwhile, is refused with ErrRefused and returned as it
+// is.
+func (s *Store) MoveWithReason(id int64, from, to State, cause Cause, reason string) (Card, error) {
+	return s.change(false, id, "", func(have State, _ bool) (State, error) {
+		if have != from {
+			return State{}, fmt.Errorf("%w: the card is in %s waiting for %s, not %s waiting for %s",
+				ErrRefused, have.Stage, have.WaitsFor, from.Stage, from.WaitsFor)
+		}
+		return to, nil
+	}, cause, reason, nil)
 }
 
 // ErrNoCard is the error of a card that is not in the store.
@@ -337,12 +346,13 @@ type runEnd struct {
 // and then the entry, and commits. It creates a card with the text when create
 // is set, and changes the card id otherwise. The new state is next of the
 // card's state as it is in the transaction, the zero State for a card that is
-// created; an error of next is returned and nothing is written. When end is
+// created, and whether the card has a run in flight; an error of next is
+// returned and nothing is written. When end is
 // set, the card is the one of that run, and the run's ending is written in the
 // same transaction, with the run on the entry, and with the run's document
 // when it is given; a run that has ended already writes nothing, its document
 // included. The reason, if any, is on the entry.
-func (s *Store) change(create bool, id int64, text string, next func(State) (State, error), cause Cause, reason string, end *runEnd) (Card, error) {
+func (s *Store) change(create bool, id int64, text string, next func(from State, inFlight bool) (State, error), cause Cause, reason string, end *runEnd) (Card, error) {
 	if !causes[cause] {
 		return Card{}, fmt.Errorf("%q is not a cause of a change (ADR 0042)", cause)
 	}
@@ -364,12 +374,15 @@ func (s *Store) change(create bool, id int64, text string, next func(State) (Sta
 	}
 
 	var card Card
+	inFlight := false
 	if create {
 		card = Card{Text: text}
 	} else if card, err = readCard(tx, id); err != nil {
 		return Card{}, err
+	} else if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM runs WHERE card = ? AND ending IS NULL)`, id).Scan(&inFlight); err != nil {
+		return Card{}, err
 	}
-	to, err := next(card.State)
+	to, err := next(card.State, inFlight)
 	if err != nil {
 		return card, err
 	}
@@ -433,8 +446,8 @@ func (s *Store) change(create bool, id int64, text string, next func(State) (Sta
 
 // fixed is the next state of a change to one given state, whatever the card's
 // state is.
-func fixed(to State) func(State) (State, error) {
-	return func(State) (State, error) { return to, nil }
+func fixed(to State) func(State, bool) (State, error) {
+	return func(State, bool) (State, error) { return to, nil }
 }
 
 // Instance reads the instance's identity, the eight hex digits by which the
@@ -489,7 +502,9 @@ func (s *Store) Run(id string) (RunRow, error) {
 
 // AddRun writes a run in flight. The same row written again writes nothing;
 // anything else under the same ID is refused, and so is a second run in flight
-// for the card, which the store's unique index refuses.
+// for the card, which the store's unique index refuses, and a run of a card
+// that does not wait for one, such as a card the developer dropped after the
+// tick read it (card 16).
 func (s *Store) AddRun(r RunRow) error {
 	if r.ID == "" || r.Card == 0 || r.Commit == "" || r.Model == "" || r.Effort == "" {
 		return fmt.Errorf("a run needs an ID, a card, a commit, a model and an effort: %+v", r)
@@ -510,6 +525,13 @@ func (s *Store) AddRun(r RunRow) error {
 		return fmt.Errorf("run %s exists as %+v and is not %+v", r.ID, have, r)
 	case !errors.Is(err, sql.ErrNoRows):
 		return err
+	}
+	card, err := readCard(tx, r.Card)
+	if err != nil {
+		return err
+	}
+	if card.WaitsFor != Run {
+		return fmt.Errorf("run %s not written: card %d is in %s waiting for %s, not for a run", r.ID, r.Card, card.Stage, card.WaitsFor)
 	}
 	if _, err := tx.Exec(`INSERT INTO runs (id, card, commit_id, model, effort, started) VALUES (?, ?, ?, ?, ?, ?)`,
 		r.ID, r.Card, r.Commit, r.Model, r.Effort, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
@@ -532,6 +554,24 @@ func (s *Store) EndRun(id string, ending Ending, reason string, to State, doc *D
 		return Card{}, fmt.Errorf("%q is not a kind of document", doc.Kind)
 	}
 	return s.change(false, 0, "", fixed(to), CauseRun, reason, &runEnd{id, ending, doc})
+}
+
+// Note reads the developer's note that a card's next run is told: the note on
+// the entry that made the card wait for a run, when that entry is the
+// developer's; "" otherwise.
+func (s *Store) Note(card int64) (string, error) {
+	var e Entry
+	var reason sql.NullString
+	err := s.db.QueryRow(`SELECT cause, stage, waits_for, reason FROM entries WHERE card = ? ORDER BY number DESC LIMIT 1`, card).
+		Scan(&e.Cause, &e.Stage, &e.WaitsFor, &reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w %d", ErrNoCard, card)
+	}
+	if err != nil || e.WaitsFor != Run {
+		return "", err
+	}
+	e.Reason = reason.String
+	return e.Note(), nil
 }
 
 // Spec reads the newest spec of a card, the one written last, with its run's

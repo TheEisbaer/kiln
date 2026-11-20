@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 )
 
@@ -225,7 +224,7 @@ func ReadWayOut(ctx context.Context, id string, w io.Writer) error {
 	if c == nil {
 		return ErrNoWayOut
 	}
-	cmd := exec.CommandContext(ctx, "docker", "logs", c.id)
+	cmd := commandIn(ctx, "docker", "logs", c.id)
 	cmd.Stdout = w
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker logs of %s: %w", wayOutName(id), err)

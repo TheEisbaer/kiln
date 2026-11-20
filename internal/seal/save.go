@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -124,7 +123,7 @@ func SaveRun(ctx context.Context, id, image, tree string, base []byte) (newTree 
 		return "", nil, err
 	}
 	if status != "0" {
-		logs, _ := exec.CommandContext(ctx, "docker", "logs", "--tail", "20", save).CombinedOutput()
+		logs, _ := commandIn(ctx, "docker", "logs", "--tail", "20", save).CombinedOutput()
 		return "", nil, fmt.Errorf("the save exited with %s: %s", status, strings.TrimSpace(string(logs)))
 	}
 
@@ -184,9 +183,9 @@ func copyBetween(ctx context.Context, from, to string) error {
 		return err
 	}
 	var outErr, inErr strings.Builder
-	out := exec.CommandContext(ctx, "docker", "cp", from, "-")
+	out := commandIn(ctx, "docker", "cp", from, "-")
 	out.Stdout, out.Stderr = w, &outErr
-	in := exec.CommandContext(ctx, "docker", "cp", "--archive", "-", to)
+	in := commandIn(ctx, "docker", "cp", "--archive", "-", to)
 	in.Stdin, in.Stderr = r, &inErr
 
 	if err := out.Start(); err != nil {

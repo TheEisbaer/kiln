@@ -346,6 +346,12 @@ func TestRuns(t *testing.T) {
 	card := mustCreate(t, s, "a card")
 	other := mustCreate(t, s, "another")
 	first := theRun(card.ID, "ab12cd34-1-1")
+	// A run is written only for a card that waits for one.
+	for _, c := range []Card{card, other} {
+		if _, err := s.Move(c.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	if r, err := s.InFlight(card.ID); r != nil || err != nil {
 		t.Fatalf("InFlight before any run: %v, %v", r, err)
@@ -462,6 +468,9 @@ func TestEndRun(t *testing.T) {
 	if n, _ := s.RunCount(card.ID); n != 1 {
 		t.Errorf("RunCount is %d, want 1", n)
 	}
+	if _, err := s.Move(card.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
 	mustAddRun(t, s, theRun(card.ID, "ab12cd34-1-2"))
 	if n, _ := s.RunCount(card.ID); n != 2 {
 		t.Errorf("RunCount is %d, want 2", n)
@@ -471,17 +480,20 @@ func TestEndRun(t *testing.T) {
 	// is in the state already still gets the run's ending and its entry.
 	s2 := open(t)
 	c2 := mustCreate(t, s2, "b")
-	if _, err := s2.Move(c2.ID, State{Spec, Developer}, CauseDeveloper); err != nil {
+	if _, err := s2.Move(c2.ID, State{Spec, Run}, CauseDeveloper); err != nil {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s2, theRun(c2.ID, "r"))
+	if _, err := s2.Move(c2.ID, State{Spec, Developer}, CauseRule); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s2.EndRun("r", Failed, "", State{Spec, Developer}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if r, _ := s2.Run("r"); r.Ending != Failed {
 		t.Errorf("the run is %+v, want failed", r)
 	}
-	if h := mustHistory(t, s2, c2.ID); len(h) != 3 || h[2].Run != "r" || h[2].Reason != "" {
+	if h := mustHistory(t, s2, c2.ID); len(h) != 4 || h[3].Run != "r" || h[3].Reason != "" {
 		t.Errorf("history: %+v", h)
 	}
 }
@@ -953,7 +965,7 @@ func TestMoveWithReason(t *testing.T) {
 	if _, err := s.Move(card.ID, State{Review, Run}, CauseRule); err != nil {
 		t.Fatal(err)
 	}
-	moved, err := s.MoveWithReason(card.ID, State{Review, Developer}, CauseRule, "the change is too large")
+	moved, err := s.MoveWithReason(card.ID, State{Review, Run}, State{Review, Developer}, CauseRule, "the change is too large")
 	if err != nil || moved.State != (State{Review, Developer}) {
 		t.Fatalf("MoveWithReason returned %+v, %v", moved, err)
 	}
@@ -961,8 +973,16 @@ func TestMoveWithReason(t *testing.T) {
 	if e := h[len(h)-1]; e.Run != "" || e.Reason != "the change is too large" || e.Cause != CauseRule {
 		t.Errorf("the entry is %+v", e)
 	}
-	if _, err := s.MoveWithReason(card.ID, State{Done, Run}, CauseRule, "x"); err == nil {
+	if _, err := s.MoveWithReason(card.ID, State{Review, Developer}, State{Done, Run}, CauseRule, "x"); err == nil {
 		t.Error("an invalid pairing was written")
+	}
+	// A card that is no longer in the state the caller read, such as one
+	// dropped meanwhile, is not moved.
+	if got, err := s.MoveWithReason(card.ID, State{Review, Run}, State{Review, Developer}, CauseRule, "x"); !errors.Is(err, ErrRefused) || got.State != (State{Review, Developer}) {
+		t.Errorf("a card in another state: %+v, %v", got, err)
+	}
+	if h := mustHistory(t, s, card.ID); len(h) != 3 {
+		t.Errorf("%d entries after a refused move, want 3", len(h))
 	}
 }
 

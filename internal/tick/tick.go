@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -184,6 +185,21 @@ func AddCard(dir, text string) (int64, error) {
 // tried again on the next tick. The screen's handlers share the store with
 // the tick (see store.Store).
 func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
+	// Nothing the core does depends on the directory it was started in, which
+	// may be removed while it runs: its paths are made absolute while that
+	// directory is there, and every command it runs, through the seal, runs in
+	// the data directory, and git in the instance's copy of the repo (card 16).
+	for _, p := range []*string{&cfg.Data, &cfg.Repo} {
+		if *p == "" {
+			continue
+		}
+		abs, err := filepath.Abs(*p)
+		if err != nil {
+			return err
+		}
+		*p = abs
+	}
+	ctx = seal.InDir(ctx, cfg.Data)
 	if cfg.Listen != "" {
 		if err := web.CheckAddress(cfg.Listen); err != nil {
 			return err
@@ -231,6 +247,20 @@ type core struct {
 	instance    string
 	out, errOut io.Writer
 	activity    *web.Activity // of the run the tick follows, for the screen
+	changes     changes       // the last change the screen asked for, per card
+}
+
+// changes keeps, per card, the last change the screen was given, by the
+// commits it was made from, so that a card's page that asks every 2 seconds
+// does not make the same diff again each time.
+type changes struct {
+	mu   sync.Mutex
+	last map[int64]cachedChange
+}
+
+type cachedChange struct {
+	base, tip string
+	change    web.Change
 }
 
 // serve serves the screen on the core's Listen address, and prints where. The
@@ -241,7 +271,9 @@ func (c *core) serve() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("the screen: %w", err)
 	}
-	h, err := web.Handler(c.store, web.Info{Instance: c.instance, Repo: c.Repo, Model: c.Model}, c.activity, ln.Addr().String())
+	info := web.Info{Instance: c.instance, Repo: c.Repo, Model: c.model(store.Spec), ImplementModel: c.model(store.Implement),
+		ReviewModel: c.model(store.Review), Change: c.change}
+	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()
 		return nil, err
@@ -452,7 +484,7 @@ func (c *core) card(ctx context.Context, id int64) error {
 // hold stops a card that waits for a run, before the run is in the store: the
 // card needs the developer, with the reason.
 func (c *core) hold(card store.Card, reason string) error {
-	if _, err := c.store.MoveWithReason(card.ID, store.State{Stage: card.Stage, WaitsFor: store.Developer},
+	if _, err := c.store.MoveWithReason(card.ID, card.State, store.State{Stage: card.Stage, WaitsFor: store.Developer},
 		store.CauseRule, reason); err != nil {
 		return err
 	}
@@ -642,15 +674,48 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 	return in, "", nil
 }
 
+// noteHeading and noteIntro begin the part of the developer's note.
+const (
+	noteHeading = "## The developer's note"
+	noteIntro   = "The developer wrote this when sending the card back. Follow it. Where it differs from the spec, the note wins."
+)
+
 // told is what a run is told after its stage's instruction, each part under its
-// heading: the card; for an implement run and a review run, the approved spec;
-// for an implement run, the last review if it sent the change back; and for a
-// review run, the change as a diff from where the card's branch left main to
-// the run's commit. A change over maxDiff is held.
+// heading: the card; for a spec run that follows the developer's note, or a
+// send-back to spec, the last spec, which it revises, and after a send-back to
+// spec the newest report or review, which says why; for an implement run and a review run, the
+// approved spec; for an implement run, the last review if it sent the change
+// back, or if it passed and the developer sent the change back; for a review
+// run, the change as a diff from where the card's branch left main to the
+// run's commit; and last, the developer's note, if the entry that made the
+// card wait for this run has one (card 16). A change over maxDiff is held.
 func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (text, held string, err error) {
+	note, err := c.store.Note(card.ID)
+	if err != nil {
+		return "", "", err
+	}
 	parts := []string{"## The card", card.Text}
 	if card.Stage == store.Spec {
-		return told(parts), "", nil
+		// A report or a review newer than every spec is the newest document
+		// of a card in spec only when the developer sent it back to spec.
+		newest, err := c.store.Newest(card.ID, store.KindSpec, store.KindReport, store.KindReview)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", "", err
+		}
+		toSpec := err == nil && newest.Kind != store.KindSpec
+		if note != "" || toSpec {
+			last, err := c.store.Spec(card.ID)
+			switch {
+			case err == nil:
+				parts = append(parts, "## The last spec", last.Text)
+			case !errors.Is(err, sql.ErrNoRows):
+				return "", "", err
+			}
+		}
+		if toSpec {
+			parts = append(parts, "## The last "+newest.Kind, newest.Text)
+		}
+		return told(withNote(parts, note)), "", nil
 	}
 	spec, err := c.store.Spec(card.ID)
 	if err != nil {
@@ -662,19 +727,40 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 		if err != nil {
 			return "", "", err
 		}
-		if last.Kind == store.KindReview && verdictLine(last.Text) == goesBack {
+		// A review that passed is the newest document of a card in implement
+		// only when the developer sent the change back from it.
+		if v := verdictLine(last.Text); last.Kind == store.KindReview && (v == goesBack || v == passes) {
 			parts = append(parts, "## The last review", last.Text)
 		}
-		return told(parts), "", nil
+		return told(withNote(parts, note)), "", nil
 	}
 	diff, size, err := changeOf(ctx, c.Repo, row.Commit)
 	if err != nil {
 		return "", "", err
 	}
 	if size > maxDiff {
-		return "", fmt.Sprintf("the change is %d bytes as a diff, more than %d; no review run is started", size, maxDiff), nil
+		return "", "the change is " + mebibytes(size) + " as a diff, more than 1 MiB; no review run is started", nil
 	}
-	return told(append(parts, "## The change", fenced(diff))), "", nil
+	return told(withNote(append(parts, "## The change", fenced(diff)), note)), "", nil
+}
+
+// withNote is the parts with the developer's note after them, if there is one.
+func withNote(parts []string, note string) []string {
+	if note == "" {
+		return parts
+	}
+	return append(parts, noteHeading, noteIntro+"\n\n"+note)
+}
+
+// mebibytes is a size over 1 MiB as a person reads it: in MiB with one
+// decimal, or with two, rounded up, where one would read as the limit.
+func mebibytes(n int64) string {
+	const mib = 1 << 20
+	if tenths := (n*10 + mib/2) / mib; tenths > 10 {
+		return fmt.Sprintf("%d.%d MiB", tenths/10, tenths%10)
+	}
+	hundredths := (n*100 + mib - 1) / mib
+	return fmt.Sprintf("%d.%02d MiB", hundredths/100, hundredths%100)
 }
 
 // told joins headings and their texts: a heading, an empty line and its text,
@@ -748,10 +834,13 @@ func exists(name string) (bool, error) {
 	return err == nil, err
 }
 
-// gitCommand is git on a bare repo. Variables of the caller's that start with
-// GIT_ are left out, so that none of them points git at another repo.
+// gitCommand is git on a bare repo, run in the repo's directory and never in
+// the directory the core was started in, which may have been removed since.
+// Variables of the caller's that start with GIT_ are left out, so that none of
+// them points git at another repo.
 func gitCommand(ctx context.Context, repo string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"--git-dir=" + repo}, args...)...)
+	cmd.Dir = repo
 	for _, e := range os.Environ() {
 		if !strings.HasPrefix(e, "GIT_") {
 			cmd.Env = append(cmd.Env, e)
@@ -789,6 +878,60 @@ func branchTip(ctx context.Context, repo, branch string) (string, error) {
 		return "", nil
 	}
 	return gitLine(ctx, repo, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
+}
+
+// change is the change on a card's branch for the screen: where it is, its
+// commits since it left main, and the diff that a review run is told
+// (changeOf), or nil when the card has no branch.
+func (c *core) change(ctx context.Context, card int64) (*web.Change, error) {
+	branch := branchOf(card)
+	tip, err := branchTip(ctx, c.Repo, branch)
+	if err != nil || tip == "" {
+		return nil, err
+	}
+	base, err := gitLine(ctx, c.Repo, "merge-base", "HEAD", tip)
+	if err != nil {
+		return nil, err
+	}
+	c.changes.mu.Lock()
+	kept, ok := c.changes.last[card]
+	c.changes.mu.Unlock()
+	if ok && kept.base == base && kept.tip == tip {
+		ch := kept.change
+		return &ch, nil
+	}
+	commits, err := gitLine(ctx, c.Repo, "log", "--no-color", "--format=%h%x00%s", base+".."+tip)
+	if err != nil {
+		return nil, err
+	}
+	ch := web.Change{Branch: branch, Repo: c.Repo, Commits: []web.Commit{},
+		Command: "git --git-dir=" + shellWord(c.Repo) + " diff HEAD..." + branch}
+	for _, line := range strings.Split(commits, "\n") {
+		if hash, title, ok := strings.Cut(line, "\x00"); ok {
+			ch.Commits = append(ch.Commits, web.Commit{Hash: hash, Title: title})
+		}
+	}
+	ch.Diff, ch.Size, err = changeOf(ctx, c.Repo, tip)
+	if err != nil {
+		return nil, err
+	}
+	ch.TooLarge = ch.Size > maxDiff
+	c.changes.mu.Lock()
+	if c.changes.last == nil {
+		c.changes.last = map[int64]cachedChange{}
+	}
+	c.changes.last[card] = cachedChange{base, tip, ch}
+	c.changes.mu.Unlock()
+	return &ch, nil
+}
+
+// shellWord is a word as a shell reads it: as it is when it holds only
+// characters a shell leaves alone, else in single quotes.
+func shellWord(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./+:@%,=") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // changeOf is the change of a card's branch at commit, as a diff from where the
