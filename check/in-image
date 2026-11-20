@@ -61,12 +61,19 @@ fi
 # over.
 engine_lock=/tmp/kiln-engine-tests.lock
 take_engine_lock() {
+    noted=
     while ! mkdir "$engine_lock" 2>/dev/null; do
         holder=$(cat "$engine_lock/pid" 2>/dev/null || true)
         if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null &&
             [ "$(cat "$engine_lock/pid" 2>/dev/null || true)" = "$holder" ]; then
             rm -rf "$engine_lock"
             continue
+        fi
+        if [ -z "$noted" ]; then
+            take
+            echo "== engine tests wait for those of another check (process ${holder:-?})"
+            give
+            noted=1
         fi
         sleep 1
     done
@@ -76,7 +83,7 @@ release_engine_lock() {
     if [ "$(cat "$engine_lock/pid" 2>/dev/null || true)" = $$ ]; then rm -rf "$engine_lock"; fi
 }
 
-# take and give hand the output on.
+# take and give hand the output on (see out above).
 take() {
     until mkdir "$out/print" 2>/dev/null; do
         [ -d "$out" ] || exit 1 # the script has ended
@@ -85,13 +92,12 @@ take() {
 }
 give() { rmdir "$out/print"; }
 
-# engine builds the test programs beside the check, and then runs the
-# packages side by side, each with its output kept apart and printed whole,
-# under its heading, when the package ends. Inside a package only a few tests
-# run at a time (-test.parallel): three in internal/seal, four in
-# internal/run, whose runs are the real Claude Code's, and six in
-# internal/tick, whose are a script's. That keeps the networks of one check to
-# about twenty.
+# engine builds the test programs and runs the packages side by side, beside
+# the check, each with its output kept apart and printed whole, under its
+# heading, when the package ends and the check's output is out. Inside a
+# package only a few tests run at a time (-test.parallel): three in
+# internal/seal, whose cases depend on each other most, and six in the
+# others. That keeps the networks of one check to about twenty.
 engine() {
     # The programs come out on standard output, as a tar: a directory of the
     # host's, such as the one mktemp makes on macOS, is not always visible to
@@ -109,20 +115,11 @@ engine() {
         echo 1 >"$out/build.status"
         return
     fi
-    # The tests start once the check has ended: beside it, they and the
-    # images they build wait for the processor more than they gain.
-    until [ -e "$out/checked" ]; do
-        [ -d "$out" ] || exit 1
-        sleep 0.2
-    done
     take_engine_lock
     for pkg in $packages; do
         name=$(basename "$pkg")
-        case $name in
-            run) parallel=4 ;;
-            tick) parallel=6 ;;
-            *) parallel=3 ;;
-        esac
+        parallel=6
+        [ "$name" = seal ] && parallel=3
         (
             # From the package's directory, as go test would.
             code=0
@@ -153,7 +150,6 @@ if [ -z "$engine" ]; then
     exit "$status"
 fi
 
-touch "$out/checked"
 give
 wait
 for f in "$out"/*.status; do

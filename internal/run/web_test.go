@@ -94,9 +94,9 @@ func testWeb(t *testing.T, f *fixture) {
 			"if curl -fsS -L https://" + publicHost + "/redirect; then echo the redirect was followed; else echo the redirect was refused; fi\n",
 	})
 
-	// One after another, while the other cases of TestSteps run beside them:
-	// the first run's way out creates the outward network, which a second
-	// run's could not create at the same time.
+	// The first run's way out creates the outward network, which a second
+	// run's could not create at the same time: the cases in the store, which
+	// run side by side, come after it.
 	t.Run("curl and WebFetch read a public page", func(t *testing.T) { w.testRead(t) })
 	t.Run("in the store", func(t *testing.T) { w.testInStore(t) })
 }
@@ -263,6 +263,7 @@ func (w *web) testInStore(t *testing.T) {
 	}
 
 	t.Run("never started, its way out stopped", func(t *testing.T) {
+		t.Parallel()
 		c := w.newWebCase(t, "store-stopped")
 		killedAt(t, c, "place")
 		w.connectWayOut(t, c.id)
@@ -280,6 +281,7 @@ func (w *web) testInStore(t *testing.T) {
 	})
 
 	t.Run("never started, its way out removed by hand", func(t *testing.T) {
+		t.Parallel()
 		c := w.newWebCase(t, "store-gone")
 		killedAt(t, c, "place")
 		must(t, "rm", "--force", "kiln-wayout-"+c.id)
@@ -300,6 +302,7 @@ func (w *web) testInStore(t *testing.T) {
 	})
 
 	t.Run("running, its way out stopped", func(t *testing.T) {
+		t.Parallel()
 		c := w.newWebCase(t, "store-running")
 		cmd, done := w.start(t, c, "", false)
 		w.waitAtGate(t, c)
@@ -324,6 +327,7 @@ func (w *web) testInStore(t *testing.T) {
 	})
 
 	t.Run("exited, its way out gone", func(t *testing.T) {
+		t.Parallel()
 		c := w.newWebCase(t, "store-exited")
 		killedAt(t, c, "follow")
 		must(t, "rm", "--force", "kiln-wayout-"+c.id)
