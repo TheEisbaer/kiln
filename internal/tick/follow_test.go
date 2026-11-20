@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -43,11 +44,13 @@ type fakeEngine struct {
 	held       map[string]bool // the points that hold a card's run, as <card>/<point>
 	fail       map[int64]bool  // the cards whose runs fail
 	errOnce    map[int64]bool  // the cards whose first Carry fails once its run is in the store
+	refuse     map[int64]bool  // the cards whose Carry always fails before starting
 }
 
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{containers: map[string]string{}, carrying: map[int64]int{}, carried: map[int64]int{},
-		gates: map[string]chan struct{}{}, held: map[string]bool{}, fail: map[int64]bool{}, errOnce: map[int64]bool{}}
+		gates: map[string]chan struct{}{}, held: map[string]bool{}, fail: map[int64]bool{}, errOnce: map[int64]bool{},
+		refuse: map[int64]bool{}}
 }
 
 // cardOf is the card of a run's ID, <instance>-<card>-<number>.
@@ -170,6 +173,7 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 	status, there := e.containers[in.ID]
 	errOnce := e.errOnce[card]
 	delete(e.errOnce, card)
+	refuse := e.refuse[card]
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()
@@ -184,6 +188,11 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 	}
 	if !there && starting == nil {
 		return run.Verdict{}, run.ErrGone
+	}
+	if refuse && starting != nil {
+		// As Carry refuses a branch that is neither absent nor at the commit,
+		// before anything is made.
+		return run.Verdict{}, errors.New("refused before the start, as the test has it")
 	}
 	if !there {
 		e.set(in.ID, "created")
@@ -255,12 +264,12 @@ type seen struct {
 func (e *fakeEngine) snapshot() seen {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return seen{containers: maps(e.containers), most: e.most, started: slices.Clone(e.started),
-		carrying: maps(e.carrying), carried: maps(e.carried), twice: slices.Clone(e.twice),
+	return seen{containers: maps.Clone(e.containers), most: e.most, started: slices.Clone(e.started),
+		carrying: maps.Clone(e.carrying), carried: maps.Clone(e.carried), twice: slices.Clone(e.twice),
 		removed: slices.Clone(e.removed), lists: e.lists}
 }
 
-func maps[K comparable, V any](m map[K]V) map[K]V {
+func cloned[K comparable, V any](m map[K]V) map[K]V {
 	out := make(map[K]V, len(m))
 	for k, v := range m {
 		out[k] = v
@@ -680,6 +689,49 @@ func TestFollowersSwept(t *testing.T) {
 		t.Errorf("the sweep removed %v, and %v are left", s.removed, s.containers)
 	}
 	b.assertEnded(t, map[int64]store.Ending{made: store.Finished, stored: store.Finished, runs: store.Finished, recorded: store.Finished})
+}
+
+// TestFollowersRefusedStart has cards whose Carry always fails before its
+// run is in the store, first in the order: with a limit of 1 and one such
+// card, and with a limit of 2 and two, the card behind them starts and ends.
+func TestFollowersRefusedStart(t *testing.T) {
+	for _, n := range []int{1, 2} {
+		t.Run(fmt.Sprintf("--runs %d", n), func(t *testing.T) {
+			b := newBench(t, n)
+			var refused []int64
+			var other int64
+			b.with(t, func(s *store.Store) {
+				for range n {
+					refused = append(refused, b.card(t, s, store.Spec))
+				}
+				other = b.card(t, s, store.Spec)
+			})
+			e := newFakeEngine()
+			for _, card := range refused {
+				e.refuse[card] = true
+			}
+			core := b.start(t, e, n)
+			e.waitStarted(t, group(other))
+			e.open(other, "exit")
+			e.waitGone(t, other)
+			e.waitTicks(t, 5)
+			core.stop(t)
+			if s := e.snapshot(); len(s.started) != 1 || s.most > n {
+				t.Errorf("the runs of cards %v started, with at most %d containers", s.started, s.most)
+			}
+			if out := core.out.String(); !strings.Contains(out, fmt.Sprintf("kiln core: card %d: refused before the start", refused[0])) {
+				t.Errorf("the core printed\n%s", out)
+			}
+			b.assertEnded(t, map[int64]store.Ending{other: store.Finished})
+			b.with(t, func(s *store.Store) {
+				for _, card := range refused {
+					if c, err := s.Card(card); err != nil || c.State != waiting {
+						t.Errorf("the refused card %d is %+v (%v), want it waiting in spec", card, c, err)
+					}
+				}
+			})
+		})
+	}
 }
 
 // TestRunsRefused refuses a limit outside 1 to MaxRuns before anything is

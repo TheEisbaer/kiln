@@ -16,6 +16,7 @@ package tick
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -257,7 +259,7 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	var mu sync.Mutex
 	out, errOut = lockedWriter{&mu, out}, lockedWriter{&mu, errOut}
 	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity(),
-		engine: eng, followed: map[int64]string{}}
+		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}}
 	fmt.Fprintf(out, "kiln core: instance %s, data %s, up to %d runs at once\n", instance, cfg.Data, cfg.Runs)
 	if cfg.Listen != "" {
 		stop, err := c.serve()
@@ -314,6 +316,18 @@ type core struct {
 	mu        sync.Mutex
 	followed  map[int64]string
 	followers sync.WaitGroup
+	// refused are the cards whose last follower failed before its run was in
+	// the store, such as one whose branch Carry refuses; the tick takes them
+	// after the other cards. Like followed, it is only kept in memory.
+	refused map[int64]bool
+}
+
+// b2i is 1 for true and 0 for false.
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // engine is what the tick and its followers ask of the container engine, all
@@ -396,7 +410,10 @@ func (c *core) serve() (func(), error) {
 }
 
 // tick is one tick: the sweep, then each card that waits for a run, in the
-// order of store.Waiting. A card whose run is followed is left alone. A card
+// order of store.Waiting, except that a card whose last start failed before
+// its run was in the store comes after the others: its follower takes a place
+// until it fails, and would otherwise keep the cards behind it from starting
+// on every tick. A card whose run is followed is left alone. A card
 // with a run in flight in the store gets a follower, also when more than
 // Runs are in flight, as after a restart; a run is started only while fewer
 // than Runs are in flight. An error of one card is printed and the next card
@@ -413,6 +430,10 @@ func (c *core) tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
+	refused := maps.Clone(c.refused)
+	c.mu.Unlock()
+	slices.SortStableFunc(cards, func(a, b int64) int { return cmp.Compare(b2i(refused[a]), b2i(refused[b])) })
 	// The cards whose runs count against the limit: those with a run in
 	// flight in the store, and those with a follower, whose run may not be in
 	// the store yet. A card counted once has its place: its run may have ended
@@ -538,6 +559,7 @@ type follower struct {
 	row      store.RunRow
 	in       run.Inputs
 	starting func() error // nil for a run in the store
+	added    bool         // set by starting once the run is in the store
 	mark     func(point string)
 }
 
@@ -618,6 +640,7 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 			if err := c.store.AddRun(f.row, c.Runs); err != nil {
 				return err
 			}
+			f.added = true
 			mark("after-add")
 			fmt.Fprintf(c.out, "card %d: %s run %s starts\n", id, card.Stage, row.ID)
 			return nil
@@ -654,6 +677,11 @@ func (c *core) follow(ctx context.Context, f *follower) {
 		}
 		c.mu.Lock()
 		delete(c.followed, id)
+		if err != nil && f.starting != nil && !f.added {
+			c.refused[id] = true
+		} else {
+			delete(c.refused, id)
+		}
 		c.mu.Unlock()
 	}()
 }
