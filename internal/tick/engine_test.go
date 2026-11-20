@@ -680,12 +680,12 @@ func TestTick(t *testing.T) {
 		// What each stage was told, each part under its heading.
 		spec := *standInSpec(c.text)
 		implement := string(readFile(t, c.instructionOf(2)))
-		if want := instructions.Implement + "## The card\n\n" + c.text + "\n\n## The approved spec\n\n" + spec; implement != want {
+		if want := instructions.Implement + "## The card\n\n" + c.text + "\n\n## The approved spec\n\n" + fenced(spec, "markdown"); implement != want {
 			t.Errorf("the implement run was told\n%s\nwant\n%s", implement, want)
 		}
 		review := string(readFile(t, c.instructionOf(3)))
 		diff := gitIn(t, c.repo, "diff", c.commit, tip) + "\n"
-		if want := instructions.Review + "## The card\n\n" + c.text + "\n\n## The approved spec\n\n" + spec +
+		if want := instructions.Review + "## The card\n\n" + c.text + "\n\n## The approved spec\n\n" + fenced(spec, "markdown") +
 			"\n## The change\n\n```diff\n" + diff + "```\n"; review != want {
 			t.Errorf("the review run was told\n%s\nwant\n%s", review, want)
 		}
@@ -729,7 +729,7 @@ func TestTick(t *testing.T) {
 			t.Errorf("NOTES.md on the branch is %q", got)
 		}
 		told := string(readFile(t, c.instructionOf(4)))
-		if want := "\n## The last review\n\n" + f.document(t, c, 3); !strings.HasSuffix(told, want) || !strings.Contains(want, "Verdict: goes back") {
+		if want := "\n## The last review\n\n" + fenced(f.document(t, c, 3), "markdown"); !strings.HasSuffix(told, want) || !strings.Contains(want, "Verdict: goes back") {
 			t.Errorf("the second implement run was told\n%s\nwant it to end with\n%s", told, want)
 		}
 		if strings.Contains(string(readFile(t, c.instructionOf(2))), "## The last review") {

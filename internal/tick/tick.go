@@ -704,6 +704,12 @@ const (
 // run, the change as a diff from where the card's branch left main to the
 // run's commit; and last, the developer's note, if the entry that made the
 // card wait for this run has one (card 16). A change over maxDiff is held.
+//
+// A part that a run wrote, a spec, a report or a review, is told fenced as
+// markdown, as the change is fenced as a diff: nothing in it can then read as
+// a heading or open a block that runs past it, so only the tick's own
+// headings are headings. The card and the developer's note are the
+// developer's text and are told as they are.
 func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (text, held string, err error) {
 	note, err := c.store.Note(card.ID)
 	if err != nil {
@@ -722,13 +728,13 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 			last, err := c.store.Spec(card.ID)
 			switch {
 			case err == nil:
-				parts = append(parts, "## The last spec", last.Text)
+				parts = append(parts, "## The last spec", fenced(last.Text, "markdown"))
 			case !errors.Is(err, sql.ErrNoRows):
 				return "", "", err
 			}
 		}
 		if toSpec {
-			parts = append(parts, "## The last "+newest.Kind, newest.Text)
+			parts = append(parts, "## The last "+newest.Kind, fenced(newest.Text, "markdown"))
 		}
 		return told(withNote(parts, note)), "", nil
 	}
@@ -736,7 +742,7 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 	if err != nil {
 		return "", "", err
 	}
-	parts = append(parts, "## The approved spec", spec.Text)
+	parts = append(parts, "## The approved spec", fenced(spec.Text, "markdown"))
 	if card.Stage == store.Implement {
 		last, err := c.store.Newest(card.ID, store.KindSpec, store.KindReview)
 		if err != nil {
@@ -745,7 +751,7 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 		// A review that passed is the newest document of a card in implement
 		// only when the developer sent the change back from it.
 		if v := verdictLine(last.Text); last.Kind == store.KindReview && (v == goesBack || v == passes) {
-			parts = append(parts, "## The last review", last.Text)
+			parts = append(parts, "## The last review", fenced(last.Text, "markdown"))
 		}
 		return told(withNote(parts, note)), "", nil
 	}
@@ -756,7 +762,7 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 	if size > maxDiff {
 		return "", "the change is " + mebibytes(size) + " as a diff, more than 1 MiB; no review run is started", nil
 	}
-	return told(withNote(append(parts, "## The change", fenced(diff)), note)), "", nil
+	return told(withNote(append(parts, "## The change", fenced(diff, "diff")), note)), "", nil
 }
 
 // withNote is the parts with the developer's note after them, if there is one.
@@ -797,11 +803,13 @@ func told(parts []string) string {
 	return b.String()
 }
 
-// fenced puts a diff in a code block whose fence is longer than any run of
-// backticks in it, so that nothing in the diff ends the block.
-func fenced(diff string) string {
+// fenced puts a text in a code block with the info string info: a run's
+// document as markdown, or the change as a diff. The fence is backticks, longer
+// than any run of backticks in the text, so that nothing in the text ends the
+// block, and a heading or a fence inside it stays part of the text.
+func fenced(text, info string) string {
 	longest, n := 0, 0
-	for _, r := range diff {
+	for _, r := range text {
 		if r == '`' {
 			n++
 			longest = max(longest, n)
@@ -810,10 +818,10 @@ func fenced(diff string) string {
 		}
 	}
 	fence := strings.Repeat("`", max(3, longest+1))
-	if diff != "" && !strings.HasSuffix(diff, "\n") {
-		diff += "\n"
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		text += "\n"
 	}
-	return fence + "diff\n" + diff + fence + "\n"
+	return fence + info + "\n" + text + fence + "\n"
 }
 
 // writeAtomically writes a file by a temporary file in its directory and a
