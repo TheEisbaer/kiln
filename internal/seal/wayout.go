@@ -89,6 +89,13 @@ func webNetwork(ctx context.Context, name string) error {
 	_, err = docker(ctx, nil, "network", "create", "--driver", "bridge",
 		"--opt", "com.docker.network.bridge.enable_icc=false",
 		"--label", webLabel+"=1", name)
+	if err != nil {
+		// Runs that start at once may each find it missing: one that is
+		// refused finds it made by another (card 17).
+		if n, findErr := findNetwork(ctx, name, webLabel); findErr == nil && n != nil && n.label != "" {
+			return nil
+		}
+	}
 	return err
 }
 
