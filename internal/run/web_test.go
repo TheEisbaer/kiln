@@ -213,9 +213,9 @@ func (w *web) testRead(t *testing.T) {
 // their way out was stopped or removed. Nothing of a run is removed or created
 // again: its container, network and way out keep their IDs.
 func (w *web) testInStore(t *testing.T) {
-	// openGate opens a run's gate once it waits there, once its way out runs
-	// or 30 seconds have passed: a run that waits already must not go on
-	// before Carry has started its way out.
+	// openGate opens a run's gate when the run waits there, but not before its
+	// way out runs or 30 seconds have passed: a run that waits already must
+	// not go on before Carry has started its way out.
 	openGate := func(t *testing.T, id string) {
 		ctx, cancel := context.WithCancel(t.Context())
 		t.Cleanup(cancel)
