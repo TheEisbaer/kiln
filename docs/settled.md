@@ -35,6 +35,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - A spec run's working tree is not saved. No save container, nothing taken into the instance's copy, no branch; `result.json` says `"saved": "not saved"` (card 11).
 - An implement run's working tree is saved as one commit on `kiln/card-<id>`; a second implement run starts from the branch's tip. A review run starts from the tip as well, and its working tree is not saved (card 14, 2026-11-19).
 - The save of an implement run has as its message the pull request title that the approved spec names on its line `` Pull request title: `…` ``, with `Kiln-Run: <id>` as its body. A spec that names none, or one that cannot be used, keeps `chore: save run <id>`. A repeat that finds the branch at this run's save with the same tree and another message counts it as saved (2026-11-20).
+- Only a run that saves judges where the card's branch is, since only its save moves it. A spec run or a review run starts whatever the branch holds, so that a card sent back to spec, which keeps its branch, gets its spec run from the head of `main`, and the branch stays as it is for the implement run that follows (card 17, 2026-11-20).
 
 ## ADR 0015: Review blocks only on the spec, a concrete failure or a written standard
 
@@ -145,6 +146,10 @@ A line says what was settled and, where it matters, when and by which card. The 
 - A run's ID is `<instance>-<card>-<number of the card's runs + 1>`. It is the same on every tick until the run is in the store, and the engine allows one container per name, so a wait gets one run (card 8).
 - A run with a list has a way out, the container `kiln-wayout-<id>`, with the labels `kiln.run=<id>`, `kiln.wayout=1` and, with an instance, `kiln.instance`. `RemoveRun` removes the save container, then the run's container, then the way out, then the network, each skipped when it is missing. `ListRuns` lists a way out of the instance as well, so that one left by a kill between two removals is swept. A way out without `kiln.run=<id>` is refused and left as it is (ADR 0059) (card 12, 2026-11-19).
 - From the moment a run is in the store until its result is recorded, nothing in the core removes its way out or creates it again, as for its container and network. A stopped way out is started again before its run starts, and when a running run is carried again. A way out that is gone before its run has started leaves the run in flight, said on every tick; one that is gone while its run runs is said in the core's output, and the run goes on without the web (card 12, 2026-11-19).
+- The tick does not wait for a run. It decides for every card that waits what it did before: start a run, carry one in flight on, or end one as gone. A follower beside the tick then carries the run to its end, records it and removes it, so that the next tick comes after the interval whatever the runs do. A card has one follower at a time, and a tick leaves a card whose run is followed alone. The core keeps the followers' runs in memory only as a guard: the tick counts them, and the sweep leaves them alone, since a run is placed before it is in the store. A core started again has none, and the store and the engine say what is in flight (card 17, 2026-11-20).
+- `kiln core --runs <n>`, 3 by default, from 1 to 8: a run is started only while fewer than n runs are in flight, counted as the runs in flight in the store and the followers' runs that are not in it yet. `AddRun` refuses a run beyond n in its own transaction as well. The upper bound is there because every run takes a network, and a container engine has about thirty address ranges for networks by default, which other work shares. The runs in flight that a core finds at its start are all picked up, also when they are more than n, and no new run starts until fewer than n are in flight (card 17).
+- The cards that wait are taken furthest along first, review, then implement, then spec, so that cards reach the developer before new ones begin; in a stage, the card that has waited longest first (card 17).
+- Ctrl-C ends the following of every run and the tick; the core returns when every follower has, and the runs go on in their containers. One run's failure or error touches only its card, and is printed with the card's ID (card 17).
 
 ## ADR 0037: Kiln is built in a sealed container, and the core contains no C code
 
@@ -181,6 +186,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 - A card carries two more facts beside its stage and what it waits for, so that no rule has to read the history (ADR 0054).
 - The one place is `change` in `internal/store`: one transaction that checks, writes the card and writes its entry (ADR 0057).
+- A card also carries when it got its state, `since`, written by `change` with the same time as the entry, so that the tick takes the card that has waited longest first without reading the history (rule 3). A store of version 5 takes the time of each card's last entry (card 17, 2026-11-20).
 
 ## ADR 0043: A card stores its stage and what it waits for; a run is in flight or has ended in one of four ways
 

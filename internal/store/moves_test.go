@@ -168,7 +168,7 @@ func TestAddRunWaits(t *testing.T) {
 	if _, err := s.Decide(card.ID, Drop, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddRun(theRun(card.ID, "r1")); err == nil {
+	if err := s.AddRun(theRun(card.ID, "r1"), 8); err == nil {
 		t.Error("a run of a dropped card was written")
 	}
 	if r, _ := s.InFlight(card.ID); r != nil {

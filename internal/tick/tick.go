@@ -1,6 +1,8 @@
 // Package tick is the core's loop (ADR 0035): every tick it reconciles the
 // store with the container engine, and gives a card that waits for a run its
-// one run, carried to its end before the tick goes on.
+// one run. A follower beside the tick carries each run to its end and records
+// it, so that the next tick comes after the interval whatever the runs do; at
+// most Config.Runs runs are in flight at once.
 //
 // A card that waits for a run gets the run of its stage: spec, implement or
 // review (see stages). The data directory holds the store, store.db; the lock,
@@ -14,6 +16,7 @@ package tick
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -21,6 +24,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -61,7 +65,18 @@ type Config struct {
 	// A file the screen's page is read from on every request instead of the
 	// embedded one, for work on the screen; empty, the embedded page.
 	Page string
+	// The most runs of this instance in flight at once, from 1 to MaxRuns.
+	Runs int
 }
+
+// The limit of runs in flight: DefaultRuns unless `kiln core --runs` says
+// otherwise, and at most MaxRuns, since every run takes a network, and a
+// container engine has about thirty address ranges for networks by default,
+// which other work shares (card 17).
+const (
+	DefaultRuns = 3
+	MaxRuns     = 8
+)
 
 // stage is what a run of a card's stage is: its effort, fixed per stage
 // (ADR 0030), the instruction it is told first, the kind of the document it
@@ -97,9 +112,11 @@ const maxDiff = 1 << 20
 // interval is the time between two ticks. Only the test changes it.
 var interval = 2 * time.Second
 
-// atPoint, set only by the test, is called at the named points of a tick. It
-// can exit the process, as a kill there would. A point of a card's run is
-// called twice: by its name, and as <stage>/<name>.
+// atPoint, set only by the test, is called at the named points of a tick and
+// of a follower: ticked after each tick, followed when a follower has returned
+// while the core goes on, and the points of a card's run. It can exit the
+// process, as a kill there would. A point of a card's run is called twice: by
+// its name, and as <stage>/<name>.
 var atPoint func(point string)
 
 func at(point string) {
@@ -184,10 +201,17 @@ func AddCard(dir, text string) (int64, error) {
 
 // Core is `kiln core`: under the lock, it opens the store, serves the screen
 // on cfg.Listen, if it is set, and ticks every interval until the context is
-// cancelled. A step that fails prints its error, changes nothing, and is
-// tried again on the next tick. The screen's handlers share the store with
-// the tick (see store.Store).
+// cancelled, with a follower beside the tick for every run in flight. A step
+// that fails prints its error, changes nothing, and is tried again on the
+// next tick. The screen's handlers and the followers share the store with the
+// tick (see store.Store). Once the context is cancelled, Core returns when
+// every follower has returned; the runs go on in their containers.
 func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
+	return runCore(ctx, cfg, out, errOut, sealed{}, interval)
+}
+
+// runCore is Core on an engine, with a tick every interval.
+func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine, every time.Duration) error {
 	// Nothing the core does depends on the directory it was started in, which
 	// may be removed while it runs: its paths are made absolute while that
 	// directory is there, and every command it runs, through the seal, runs in
@@ -217,6 +241,9 @@ func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
 			return err
 		}
 	}
+	if cfg.Runs < 1 || cfg.Runs > MaxRuns {
+		return fmt.Errorf("--runs is %d; it is from 1 to %d", cfg.Runs, MaxRuns)
+	}
 	s, lock, err := openStore(cfg.Data)
 	if err != nil {
 		return err
@@ -227,8 +254,13 @@ func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
-	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity()}
-	fmt.Fprintf(out, "kiln core: instance %s, data %s\n", instance, cfg.Data)
+	// The tick and the followers print one line at a time, so that the lines
+	// of two runs do not mix.
+	var mu sync.Mutex
+	out, errOut = lockedWriter{&mu, out}, lockedWriter{&mu, errOut}
+	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity(),
+		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}}
+	fmt.Fprintf(out, "kiln core: instance %s, data %s, up to %d runs at once\n", instance, cfg.Data, cfg.Runs)
 	if cfg.Listen != "" {
 		stop, err := c.serve()
 		if err != nil {
@@ -236,6 +268,8 @@ func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
 		}
 		defer stop()
 	}
+	// The followers end with the context, and the store is closed after them.
+	defer c.followers.Wait()
 	for {
 		if err := c.tick(ctx); err != nil {
 			if ctx.Err() != nil {
@@ -247,9 +281,21 @@ func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(interval):
+		case <-time.After(every):
 		}
 	}
+}
+
+// lockedWriter is a writer shared by goroutines, one write at a time.
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 // core is one running core.
@@ -258,8 +304,66 @@ type core struct {
 	store       *store.Store
 	instance    string
 	out, errOut io.Writer
-	activity    *web.Activity // of the run the tick follows, for the screen
+	activity    *web.Activity // of the runs the followers follow, for the screen
 	changes     changes       // the last change the screen asked for, per card
+	engine      engine
+
+	// followed is the run of each follower, by its card, from before the
+	// follower starts until it has returned. The tick gives a card one
+	// follower at a time, and the sweep leaves a followed run alone, which
+	// may not be in the store yet. It is only a guard: a core started again
+	// has none, and the store and the engine say what is in flight.
+	mu        sync.Mutex
+	followed  map[int64]string
+	followers sync.WaitGroup
+	// refused are the cards whose last follower failed before its run was in
+	// the store, such as one whose branch Carry refuses; the tick takes them
+	// after the other cards. Like followed, it is only kept in memory.
+	refused map[int64]bool
+}
+
+// b2i is 1 for true and 0 for false.
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// engine is what the tick and its followers ask of the container engine, all
+// of it through the seal and internal/run. Only the test gives a core another.
+type engine interface {
+	ListRuns(ctx context.Context, instance string) ([]string, error)
+	RemoveRun(ctx context.Context, id, proxy string) error
+	InspectRun(ctx context.Context, id string) (*seal.RunState, error)
+	Carry(ctx context.Context, in run.Inputs, starting func() error, notes io.Writer) (run.Verdict, error)
+	Remove(ctx context.Context, in run.Inputs) error
+	ReadDocument(runs, id, kind string) (run.Document, error)
+}
+
+// sealed is the engine of a core: the seal and internal/run.
+type sealed struct{}
+
+func (sealed) ListRuns(ctx context.Context, instance string) ([]string, error) {
+	return seal.ListRuns(ctx, instance)
+}
+
+func (sealed) RemoveRun(ctx context.Context, id, proxy string) error {
+	return seal.RemoveRun(ctx, id, proxy)
+}
+
+func (sealed) InspectRun(ctx context.Context, id string) (*seal.RunState, error) {
+	return seal.InspectRun(ctx, id)
+}
+
+func (sealed) Carry(ctx context.Context, in run.Inputs, starting func() error, notes io.Writer) (run.Verdict, error) {
+	return run.Carry(ctx, in, starting, notes)
+}
+
+func (sealed) Remove(ctx context.Context, in run.Inputs) error { return run.Remove(ctx, in) }
+
+func (sealed) ReadDocument(runs, id, kind string) (run.Document, error) {
+	return run.ReadDocument(runs, id, kind)
 }
 
 // changes keeps, per card, the last change the screen was given, by the
@@ -284,7 +388,7 @@ func (c *core) serve() (func(), error) {
 		return nil, fmt.Errorf("the screen: %w", err)
 	}
 	info := web.Info{Instance: c.instance, Repo: c.Repo, Model: c.model(store.Spec), ImplementModel: c.model(store.Implement),
-		ReviewModel: c.model(store.Review), Change: c.change, Page: c.Page}
+		ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change, Page: c.Page}
 	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()
@@ -305,9 +409,15 @@ func (c *core) serve() (func(), error) {
 	}, nil
 }
 
-// tick is one tick: the sweep, then each card that waits for a run in turn.
-// An error of one card is printed and the next card is taken; an error of
-// the sweep, or an interrupt, ends the tick.
+// tick is one tick: the sweep, then each card that waits for a run, in the
+// order of store.Waiting, except that a card whose last start failed before
+// its run was in the store comes after the others: its follower takes a place
+// until it fails, and would otherwise keep the cards behind it from starting
+// on every tick. A card whose run is followed is left alone. A card
+// with a run in flight in the store gets a follower, also when more than
+// Runs are in flight, as after a restart; a run is started only while fewer
+// than Runs are in flight. An error of one card is printed and the next card
+// is taken; an error of the sweep, or an interrupt, ends the tick.
 func (c *core) tick(ctx context.Context) error {
 	if err := c.sweep(ctx); err != nil {
 		return fmt.Errorf("the sweep: %w", err)
@@ -316,29 +426,86 @@ func (c *core) tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, card := range cards {
-		err := c.card(ctx, card)
-		if errors.Is(err, run.ErrInterrupted) || ctx.Err() != nil {
+	inFlight, err := c.store.InFlightRuns()
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	refused := maps.Clone(c.refused)
+	c.mu.Unlock()
+	slices.SortStableFunc(cards, func(a, b int64) int { return cmp.Compare(b2i(refused[a]), b2i(refused[b])) })
+	// The cards whose runs count against the limit: those with a run in
+	// flight in the store, and those with a follower, whose run may not be in
+	// the store yet. A card counted once has its place: its run may have ended
+	// since, and its next run takes the place.
+	busy := map[int64]bool{}
+	for card := range inFlight {
+		busy[card] = true
+	}
+	c.mu.Lock()
+	for card := range c.followed {
+		busy[card] = true
+	}
+	c.mu.Unlock()
+	for _, id := range cards {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if c.follows(id) {
+			continue
+		}
+		f, err := c.card(ctx, id, busy[id] || len(busy) < c.Runs)
+		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if err != nil {
 			// An error can carry text of the run's, such as file names in
 			// the save's output.
-			fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", card, run.Printable(err.Error()))
+			fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", id, run.Printable(err.Error()))
+			continue
+		}
+		if f != nil {
+			busy[id] = true
+			c.follow(ctx, f)
 		}
 	}
 	return nil
 }
 
+// follows reports whether a card's run is followed.
+func (c *core) follows(card int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.followed[card]
+	return ok
+}
+
+// followsRun reports whether a run is followed.
+func (c *core) followsRun(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range c.followed {
+		if r == id {
+			return true
+		}
+	}
+	return false
+}
+
 // sweep removes every run of this instance on the engine whose run is not in
 // flight in the store: one the store does not know, which never started, and
-// one that has ended there (ADR 0035, rule 4).
+// one that has ended there (ADR 0035, rule 4). A run that a follower carries
+// is left alone: it is placed before it is in the store, and removed by its
+// follower once it has ended.
 func (c *core) sweep(ctx context.Context) error {
-	ids, err := seal.ListRuns(ctx, c.instance)
+	ids, err := c.engine.ListRuns(ctx, c.instance)
 	if err != nil {
 		return err
 	}
 	for _, id := range ids {
+		if c.followsRun(id) {
+			continue
+		}
 		r, err := c.store.Run(id)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -347,7 +514,7 @@ func (c *core) sweep(ctx context.Context) error {
 		case r.Ending == "":
 			continue // in flight
 		}
-		if err := seal.RemoveRun(ctx, id, c.Proxy); err != nil {
+		if err := c.engine.RemoveRun(ctx, id, c.Proxy); err != nil {
 			return err
 		}
 	}
@@ -384,16 +551,33 @@ func decide(inFlight bool, container string, recorded bool) action {
 	}
 }
 
-// card acts for one card that waits for a run, by the table, and carries its
-// run to the end.
-func (c *core) card(ctx context.Context, id int64) error {
+// follower is what a follower carries a card's run on with, as the tick
+// decided it.
+type follower struct {
+	card     store.Card
+	stage    stage
+	row      store.RunRow
+	in       run.Inputs
+	starting func() error // nil for a run in the store
+	added    bool         // set by starting once the run is in the store
+	mark     func(point string)
+}
+
+// card decides, by the table, what is done for one card that waits for a run,
+// and returns the follower that does it, or nil when there is nothing to
+// follow: the card waits for a run no longer, it is held, or it has no run in
+// flight and mayStart is false, since the limit is reached.
+func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, error) {
 	card, err := c.store.Card(id)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if card.WaitsFor != store.Run {
+		return nil, nil // its run ended since the tick read the cards
 	}
 	st, ok := stages[card.Stage]
 	if !ok {
-		return fmt.Errorf("it waits for a run in %s, which has none", card.Stage)
+		return nil, fmt.Errorf("it waits for a run in %s, which has none", card.Stage)
 	}
 	// The points of the run, by their names and by the stage's.
 	mark := func(point string) {
@@ -402,39 +586,42 @@ func (c *core) card(ctx context.Context, id int64) error {
 	}
 	row, err := c.store.InFlight(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	inFlight := row != nil
 	if !inFlight {
+		if !mayStart {
+			return nil, nil
+		}
 		// The same ID on every tick until the run is in the store.
 		n, err := c.store.RunCount(id)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		commit, held, err := c.startsFrom(ctx, card)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if held != "" {
-			return c.hold(card, held)
+			return nil, c.hold(card, held)
 		}
 		row = &store.RunRow{ID: fmt.Sprintf("%s-%d-%d", c.instance, id, n+1), Card: id,
 			Commit: commit, Model: c.model(card.Stage), Effort: st.effort}
 	}
 	in, held, err := c.inputs(ctx, *row, card, inFlight)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if held != "" {
-		return c.hold(card, held)
+		return nil, c.hold(card, held)
 	}
 	if !inFlight {
 		mark("after-instruction")
 	}
 
-	state, err := seal.InspectRun(ctx, row.ID)
+	state, err := c.engine.InspectRun(ctx, row.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	container := ""
 	if state != nil {
@@ -442,17 +629,18 @@ func (c *core) card(ctx context.Context, id int64) error {
 	}
 	recorded, err := exists(filepath.Join(in.Runs, row.ID, "result.json"))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	var starting func() error
+	f := &follower{card: card, stage: st, row: *row, in: in, mark: mark}
 	switch decide(inFlight, container, recorded) {
 	case start:
-		starting = func() error {
+		f.starting = func() error {
 			mark("before-add")
-			if err := c.store.AddRun(*row); err != nil {
+			if err := c.store.AddRun(f.row, c.Runs); err != nil {
 				return err
 			}
+			f.added = true
 			mark("after-add")
 			fmt.Fprintf(c.out, "card %d: %s run %s starts\n", id, card.Stage, row.ID)
 			return nil
@@ -462,14 +650,52 @@ func (c *core) card(ctx context.Context, id int64) error {
 	case gone:
 		// Carry, with starting nil, refuses to start it a second time.
 	case leave:
-		return fmt.Errorf("the container kiln-run-%s is %s; it is left alone", row.ID, container)
+		return nil, fmt.Errorf("the container kiln-run-%s is %s; it is left alone", row.ID, container)
 	}
+	return f, nil
+}
 
+// follow starts a follower beside the tick, which carries the run to its end
+// and records it. The card is followed from now until the follower has
+// returned. An error of the follower is printed with the card's ID, and the
+// next tick decides again; an interrupt ends the following, and the run goes
+// on.
+func (c *core) follow(ctx context.Context, f *follower) {
+	id := f.card.ID
+	c.mu.Lock()
+	c.followed[id] = f.row.ID
+	c.mu.Unlock()
+	c.followers.Add(1)
+	go func() {
+		defer c.followers.Done()
+		err := c.carry(ctx, f)
+		if ctx.Err() == nil {
+			if err != nil {
+				fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", id, run.Printable(err.Error()))
+			}
+			at("followed")
+		}
+		c.mu.Lock()
+		delete(c.followed, id)
+		if err != nil && f.starting != nil && !f.added {
+			c.refused[id] = true
+		} else {
+			delete(c.refused, id)
+		}
+		c.mu.Unlock()
+	}()
+}
+
+// carry carries a card's run to its end: it follows the run, records its
+// ending with the card's new state and its document in one transaction, and
+// removes what is left of the run.
+func (c *core) carry(ctx context.Context, f *follower) error {
+	id, row, in := f.card.ID, f.row, f.in
 	// Following gives the run's output from its first event, so its activity
 	// starts again with every Carry.
 	c.activity.Drop(row.ID)
 	in.Activity = func(a run.Activity) { c.activity.Add(row.ID, a) }
-	verdict, err := run.Carry(ctx, in, starting, c.errOut)
+	verdict, err := c.engine.Carry(ctx, in, f.starting, c.errOut)
 	switch {
 	case errors.Is(err, run.ErrGone):
 		verdict = run.Verdict{Reason: run.ErrGone.Error()}
@@ -479,21 +705,21 @@ func (c *core) card(ctx context.Context, id int64) error {
 	var doc run.Document
 	var readErr error
 	if verdict.Finished {
-		doc, readErr = run.ReadDocument(in.Runs, row.ID, st.kind)
+		doc, readErr = c.engine.ReadDocument(in.Runs, row.ID, f.stage.kind)
 	}
-	d, err := destination(card.Stage, verdict, doc, readErr)
+	d, err := destination(f.card.Stage, verdict, doc, readErr)
 	if err != nil {
-		return fmt.Errorf("the %s of run %s: %w; it is read again on the next tick", st.kind, row.ID, err)
+		return fmt.Errorf("the %s of run %s: %w; it is read again on the next tick", f.stage.kind, row.ID, err)
 	}
 
-	mark("before-end")
+	f.mark("before-end")
 	if _, err := c.store.EndRun(row.ID, d.ending, d.reason, d.to, d.doc); err != nil {
 		return err
 	}
-	mark("after-end")
+	f.mark("after-end")
 	c.activity.Drop(row.ID)
 	fmt.Fprintf(c.out, "card %d: run %s %s: %s\n", id, row.ID, d.ending, d.reason)
-	return run.Remove(ctx, in)
+	return c.engine.Remove(ctx, in)
 }
 
 // hold stops a card that waits for a run, before the run is in the store: the

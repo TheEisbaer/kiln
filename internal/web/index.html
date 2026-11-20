@@ -746,7 +746,8 @@ function renderBoard(b) {
   const m = b.models;
   $("meta").textContent = "instance " + b.instance + " · " + (m.spec === m.implement && m.spec === m.review ?
     "spec, implement, review on " + m.spec :
-    "spec on " + m.spec + " · implement on " + m.implement + " · review on " + m.review);
+    "spec on " + m.spec + " · implement on " + m.implement + " · review on " + m.review) +
+    " · " + (b.runs === 1 ? "one run at a time" : "up to " + b.runs + " runs at once");
   $("meta").title = $("meta").textContent;
   const ids = new Set();
   const per = Object.fromEntries(STAGES.map(([s]) => [s, []]));

@@ -425,6 +425,25 @@ func testCreateWithList(t *testing.T, f fixture) {
 		}
 	})
 
+	// Runs that start at once each make the outward network if it is
+	// missing; every one of them goes on with the one network (card 17).
+	t.Run("the outward network made by several runs at once", func(t *testing.T) {
+		name := f.name("web-at-once")
+		cleanup(t, "network", "rm", "--force", name)
+		errs := make(chan error, 4)
+		for range 4 {
+			go func() { errs <- webNetwork(t.Context(), name) }()
+		}
+		for range 4 {
+			if err := <-errs; err != nil {
+				t.Error(err)
+			}
+		}
+		if got := must(t, "network", "ls", "--filter", "label="+webLabel, "--format", "{{.Name}}"); !slices.Contains(strings.Fields(got), name) {
+			t.Errorf("the networks with %s are %q, want %s among them", webLabel, got, name)
+		}
+	})
+
 	t.Run("with a way out image that does not exist", func(t *testing.T) {
 		r := withList(f, f.runID("list-no-image"))
 		r.WayOutImage = f.name("no-such-image")
