@@ -14,6 +14,10 @@ A line says what was settled and, where it matters, when and by which card. The 
 - The developer's approval of a protected path is given on the Git host. It is an intervention (ADR 0042), which the core records when it sees the approval there.
 - Kiln's review instructions, with all its stage instructions, are a protected place in Kiln's repo (ADR 0056).
 
+## ADR 0008: One planned intervention per card: approval before any code is written
+
+- The developer approves a spec with a move on the screen: it moves the card from spec, waiting for approval, to implement, waiting for a run. The developer's moves are one table in the store (`Decide` in `internal/store`): approve, again, send back and done. Since no state of ADR 0043 is "review, waits for approval", done is the move from review waiting for the Git host (ready to merge), until Kiln publishes (card 13, 2026-11-19). Card 14 adds "review, waits for approval" for a review that passed, and done is the move from it; ready to merge comes with publishing (card 14, 2026-11-19).
+
 ## ADR 0012: A moving repo sends a card back to implement; a spec that cannot be built sends it back to spec
 
 - A card that returns to implement from the Git host counts as a send-back, for a conflict as for a failed check (ADR 0054).
@@ -23,12 +27,14 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 - Runs reach nothing. The core places the code in a run and collects the change from it through the container engine (ADR 0038), so "reachable from them" now means reachable from the core.
 - A spec run's working tree is not saved. No save container, nothing taken into the instance's copy, no branch; `result.json` says `"saved": "not saved"` (card 11).
+- An implement run's working tree is saved as one commit on `kiln/card-<id>`; a second implement run starts from the branch's tip. A review run starts from the tip as well, and its working tree is not saved (card 14, 2026-11-19).
 
 ## ADR 0015: Review blocks only on the spec, a concrete failure or a written standard
 
 - "Not written anywhere" means that remarks are no part of review's result and are shown to nobody. The full output of a review run is still kept, like any run's (ADR 0032, ADR 0038).
 - Every review round starts in a fresh session; a stage that is sent back resumes its own (ADR 0053).
 - The number of send-backs is a fact on the card, and a failed check on the Git host counts as one (ADR 0054).
+- A review run is told the card, the approved spec and the diff, from where the card's branch left `main` to its tip, made in the instance's copy, and writes `review.md` with its verdict as the first line, `Verdict: passes` or `Verdict: goes back`. A diff over 1 MiB starts no review run, and the card needs the developer with the size. A change that goes back stops for the developer; nothing sends it back by itself yet. The next implement run is told the last review when it sent the change back (card 14, 2026-11-19).
 
 ## ADR 0016: Run failures are handled by a few fixed rules, not by a supervising agent
 
@@ -75,6 +81,10 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 - The first screen shows everything that waits for the developer: specs to approve, drops to confirm, and cards in the state "needs you". The term itself keeps its narrower meaning from CONTEXT.md, a card that has stopped outside the planned approval.
 
+## ADR 0023: Kiln's core is written in Go, its UI in Svelte
+
+- The first screen is one embedded page, `internal/web/index.html`, with its CSS and JavaScript inside, and no build step, no dependency and nothing loaded from the network. A Svelte client replaces it when the screen outgrows one file (card 13, 2026-11-19).
+
 ## ADR 0025: Kiln's settings for a repo live in the instance; the repo's own Claude Code configuration is picked up from the repo
 
 - Protected paths and the required checks are not settings in the instance. For a repo that merges automatically the Git host enforces both, from the code owner file in the repo and from its own rules (ADR 0047, ADR 0049), and the checks are a command in the repo (ADR 0045). Each still has one place. The instance holds what a Git host cannot: whether automatic merging is used, the limit, branch naming and the toolchain image (ADR 0039).
@@ -93,6 +103,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 - That a send-back happened is read from the number of send-backs on the card (ADR 0054). A session that is resumed after a send-back continues on the stronger model (ADR 0053).
 - The core compares the model that a run's first event, `system/init`, names with the one it gave. A run on another model is stopped, saved and recorded with the model seen, and the command exits non-zero. Claude Code 2.1.326's output does not show the effort, so the effort recorded is the one given.
+- The model of each stage is a flag of the core, `--model` for spec and `--implement-model` and `--review-model`, which default to `--model`, and the effort is fixed per stage: spec `high`, implement `medium`, review `high`. `kiln core --effort` is gone; `kiln run` by hand keeps its `--effort` (card 14, 2026-11-19).
 
 ## ADR 0031: Checks on Kiln's own repo stay fast by structure, not by a stopwatch
 
@@ -104,6 +115,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - The file is SQLite, and `sqlite3 <file> .dump` is the readable export of rule 2 (ADR 0057).
 - The schema is version 2: besides cards and their entries, an `instance` table with one row, the instance's identity of eight hex digits, and a `runs` table with one row per run, with a run's ending empty while it is in flight. A run's row is kept for good, so that the measures can count it (ADR 0029, ADR 0030); the files of its record stay until its card is done or dropped (ADR 0053), and are removed by the card that first ends a card.
 - The schema is version 3, with `specs`, one row per spec, written in the transaction that ends its run (card 11).
+- The schema is version 5, after card 13's version 4 with the time a run started: `specs` holds every run's document, one row per run, with a column `kind`, `spec`, `report` or `review`; the rows that were there are specs (card 14, 2026-11-19).
 
 ## ADR 0034: Kiln is a core on the developer's machine, a proxy in a container, and one detached container per run
 
@@ -166,11 +178,13 @@ A line says what was settled and, where it matters, when and by which card. The 
 - `change` in `internal/store` is the one place of rule 4, and the 11 valid pairings are one table in its code (ADR 0057).
 - A run's ending is read off its record: finished when its container exited with 0, the result is `success`, the model is the one asked for, and the work is saved or nothing changed; failed otherwise. Until the retry card a failed run moves its card to "needs you" (ADR 0016). Until the stage cards a card waits in spec for a run, which is told the card's text; a finished run moves it to wait for the developer's approval (card 8, 2026-11-18).
 - A finished spec run moves its card to wait for approval only with a spec it could read and a run that had the web. Otherwise the card goes under "needs you" with the reason, and the run stays finished (card 11).
+- A card whose review passed waits in review for the developer's approval, a twelfth pairing, until the core publishes; ready to merge, review waiting for the Git host, comes with publishing. A finished implement run moves its card to review only with a commit saved; one that changed nothing stops under "needs you". A finished review run's card goes by the review's first line (card 14, 2026-11-19).
 
 ## ADR 0044: The UI sends requests; the core tells it about changes over one one-way event stream
 
 - The stream also carries the entries of the instance, such as a pause (ADR 0055).
 - Until the API comes, `kiln card --data <dir> <text>` stands in for it: it writes a card that waits in spec for a run. It takes the core's lock, so it never writes beside a running core (rule 5). The API card removes it in the pull request that adds the API (card 8, 2026-11-18).
+- The core serves the API's first endpoints, and the screen, on a loopback address (`kiln core --listen`, `127.0.0.1:4747` by default), and refuses a request that does not come from its own page: a Host that is not the listen address gets 403, and a POST must be JSON, with an Origin, if it has one, of the page's own. Until the event stream comes, the page asks every 2 seconds. `kiln card` stays beside the screen for now, and the commands `kiln cards` and `kiln spec` of card 11's spec are not built (card 13, 2026-11-19).
 
 ## ADR 0045: Kiln's checks are one command that runs the tools directly in the toolchain image
 
@@ -199,3 +213,4 @@ A line says what was settled and, where it matters, when and by which card. The 
 ## ADR 0056: Kiln's stage instructions live in one protected place
 
 - The instructions are embedded in the core's program by the package `instructions`. A run's instruction is written once, when it starts, and a run in flight keeps it (card 11).
+- `instructions/implement.md` and `instructions/review.md` are embedded beside `instructions/spec.md`. A run is told its stage's instruction and then, each under its heading, `## The card`, `## The approved spec`, `## The last review` and `## The change`, as its stage has them (card 14, 2026-11-19).

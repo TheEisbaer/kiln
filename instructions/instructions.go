@@ -9,3 +9,15 @@ import _ "embed" // for go:embed
 //
 //go:embed spec.md
 var Spec string
+
+// Implement is what an implement run is told before the card, the approved
+// spec and the last review that sent the change back, if any.
+//
+//go:embed implement.md
+var Implement string
+
+// Review is what a review run is told before the card, the approved spec and
+// the change as a diff.
+//
+//go:embed review.md
+var Review string

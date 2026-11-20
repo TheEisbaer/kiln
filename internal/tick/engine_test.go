@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,10 +29,12 @@ import (
 	"github.com/TheEisbaer/kiln/internal/store"
 )
 
-// The model and effort of the test's runs.
+// The models of the test's spec, implement and review runs. The stand-in
+// names in system/init whichever it is given.
 const (
-	model  = "claude-haiku-5-5"
-	effort = "low"
+	model          = "claude-haiku-5-5"
+	implementModel = "claude-sonnet-5-5"
+	reviewModel    = "claude-opus-5-5"
 )
 
 // The words in a card's text that change what the stand-in does.
@@ -40,6 +44,8 @@ const (
 	noSpecWord   = "kiln-stand-in-nospec"
 	longSpecWord = "kiln-stand-in-longspec"
 	escapeWord   = "kiln-stand-in-escape"
+	goesBackWord = "kiln-stand-in-goesback"
+	noChangeWord = "kiln-stand-in-nochange"
 )
 
 // The spec the stand-in writes with kiln-stand-in-escape.
@@ -546,6 +552,54 @@ func TestTick(t *testing.T) {
 		}
 	})
 
+	// The screen of a core shows the run in flight and its activity while
+	// the run waits at its gate.
+	t.Run("the screen while a run waits", func(t *testing.T) {
+		c := f.newCase(t, f.standIn)
+		c.listen = freeAddress(t)
+		f.card(t, c, "Write a spec. kiln-case-screen "+gateWord)
+		core, done := f.core(t, c, "")
+		f.waitAtGate(t, c)
+		var b struct {
+			Cards []struct {
+				ID       int64  `json:"id"`
+				WaitsFor string `json:"waits_for"`
+				Run      *struct {
+					ID    string `json:"id"`
+					Model string `json:"model"`
+					Since string `json:"since"`
+				} `json:"run"`
+			} `json:"cards"`
+		}
+		getJSON(t, "http://"+c.listen+"/api/board", &b)
+		if len(b.Cards) != 1 || b.Cards[0].Run == nil || b.Cards[0].Run.ID != c.run || b.Cards[0].Run.Model != model ||
+			b.Cards[0].Run.Since == "" || b.Cards[0].WaitsFor != "run" {
+			t.Errorf("the board shows %+v", b.Cards)
+		}
+		type activity struct {
+			Kind, Tool, Text string
+		}
+		var card struct {
+			Activity []activity `json:"activity"`
+		}
+		want := []activity{{"text", "", "Reading the card."}, {"tool", "Bash", "Read the notes"}}
+		waitUntil(t, "the card's page shows the run's activity", func() bool {
+			getJSON(t, "http://"+c.listen+"/api/cards/1", &card)
+			return len(card.Activity) >= len(want)
+		})
+		if fmt.Sprint(card.Activity) != fmt.Sprint(want) {
+			t.Errorf("the activity is %+v, want %+v", card.Activity, want)
+		}
+		must(t, "exec", "kiln-run-"+c.run, "touch", "/tmp/gate")
+		f.waitEnded(t, c)
+		getJSON(t, "http://"+c.listen+"/api/cards/1", &card)
+		if len(card.Activity) != 0 {
+			t.Errorf("the activity of an ended run is still shown: %+v", card.Activity)
+		}
+		f.stop(t, core, done)
+		f.assertEnded(t, c, store.Finished)
+	})
+
 	t.Run("a second core or a kiln card while one runs", func(t *testing.T) {
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. "+gateWord)
@@ -581,6 +635,174 @@ func TestTick(t *testing.T) {
 		f.waitEnded(t, c)
 		f.stop(t, core, done)
 		f.assertEnded(t, c, store.Finished)
+	})
+
+	// After approval: an implement run, which saves a commit on the card's
+	// branch, and a review run, after which the card waits for approval.
+	t.Run("approved, implemented and reviewed", func(t *testing.T) {
+		c := f.newCase(t, f.standIn)
+		f.card(t, c, "Add a line to NOTES.md. kiln-case-loop")
+		f.specAndApprove(t, c)
+		core, done := f.core(t, c, "")
+		f.waitState(t, c, reviewPassed, 3)
+		f.stop(t, core, done)
+
+		tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/approval by run"},
+			[]string{"spec 1", "report 2", "review 3"})
+		f.assertRun(t, c, 2, implementModel, "medium", c.commit, store.Finished)
+		f.assertRun(t, c, 3, reviewModel, "high", tip, store.Finished)
+		if n := gitIn(t, c.repo, "rev-list", "--count", c.commit+".."+tip); n != "1" {
+			t.Errorf("%s commits on the branch, want 1", n)
+		}
+		if parent := gitIn(t, c.repo, "rev-parse", tip+"^"); parent != c.commit {
+			t.Errorf("the save's parent is %s, want main's %s", parent, c.commit)
+		}
+		// The implement run's change is saved, the spec run's and the review
+		// run's are not.
+		if got := gitIn(t, c.repo, "show", tip+":NOTES.md"); got != "# Notes\nA line from the implement run." {
+			t.Errorf("NOTES.md on the branch is %q", got)
+		}
+
+		// What each stage was told, each part under its heading.
+		spec := *standInSpec(c.text)
+		implement := string(readFile(t, c.instructionOf(2)))
+		if want := instructions.Implement + "## The card\n\n" + c.text + "\n\n## The approved spec\n\n" + spec; implement != want {
+			t.Errorf("the implement run was told\n%s\nwant\n%s", implement, want)
+		}
+		review := string(readFile(t, c.instructionOf(3)))
+		diff := gitIn(t, c.repo, "diff", c.commit, tip) + "\n"
+		if want := instructions.Review + "## The card\n\n" + c.text + "\n\n## The approved spec\n\n" + spec +
+			"\n## The change\n\n```diff\n" + diff + "```\n"; review != want {
+			t.Errorf("the review run was told\n%s\nwant\n%s", review, want)
+		}
+		if !strings.Contains(diff, "+A line from the implement run.") {
+			t.Errorf("the diff is\n%s", diff)
+		}
+	})
+
+	// A review that sends the change back stops the card; after the
+	// developer's move "send back" a second implement run is told the review,
+	// starts from the branch's tip and saves a second commit.
+	t.Run("a review that sends the change back", func(t *testing.T) {
+		c := f.newCase(t, f.standIn)
+		f.card(t, c, "Add a line to NOTES.md. kiln-case-back "+goesBackWord)
+		f.specAndApprove(t, c)
+		core, done := f.core(t, c, "")
+		f.waitState(t, c, reviewNeedsYou, 3)
+		f.stop(t, core, done)
+		e := f.lastEntry(t, c)
+		if !strings.HasPrefix(e.Reason, "the review sends the change back; exit 0, ") || e.Run != c.runOf(3) {
+			t.Errorf("the entry is %+v, want the review sending the change back", e)
+		}
+		first := gitIn(t, c.repo, "rev-parse", "refs/heads/kiln/card-1")
+
+		f.move(t, c, store.State{Stage: store.Implement, WaitsFor: store.Run}) // send back
+		core, done = f.core(t, c, "")
+		f.waitState(t, c, reviewPassed, 5)
+		f.stop(t, core, done)
+
+		tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/developer by run",
+			"implement/run by developer", "review/run by run", "review/approval by run"},
+			[]string{"spec 1", "report 2", "review 3", "report 4", "review 5"})
+		f.assertRun(t, c, 4, implementModel, "medium", first, store.Finished)
+		if n := gitIn(t, c.repo, "rev-list", "--count", c.commit+".."+tip); n != "2" {
+			t.Errorf("%s commits on the branch, want 2", n)
+		}
+		if parent := gitIn(t, c.repo, "rev-parse", tip+"^"); parent != first {
+			t.Errorf("the second save's parent is %s, want the first save %s", parent, first)
+		}
+		if got := gitIn(t, c.repo, "show", tip+":NOTES.md"); got != "# Notes\nA line from the implement run.\nA fix after the review." {
+			t.Errorf("NOTES.md on the branch is %q", got)
+		}
+		told := string(readFile(t, c.instructionOf(4)))
+		if want := "\n## The last review\n\n" + f.document(t, c, 3); !strings.HasSuffix(told, want) || !strings.Contains(want, "Verdict: goes back") {
+			t.Errorf("the second implement run was told\n%s\nwant it to end with\n%s", told, want)
+		}
+		if strings.Contains(string(readFile(t, c.instructionOf(2))), "## The last review") {
+			t.Error("the first implement run was told a review")
+		}
+	})
+
+	// The rule of card 8 in the later stages: a kill between a run's save and
+	// its record, and one between its review read and EndRun, leave the run
+	// in flight; a later core ends it where the table says, with one commit
+	// on the branch and one document of the run.
+	for _, tc := range []struct {
+		name   string
+		killed child  // the core that is killed, without its Config
+		run    int    // the number of the run in flight after the kill
+		saved  bool   // the branch is there after the kill
+		record bool   // the run's result.json is there after the kill
+		kind   string // the run's document
+	}{
+		{"killed in an implement run, after its save", child{Hook: "run:save:exit"}, 2, true, false, "report"},
+		{"killed in a review run, before its end", child{ExitAt: "review/before-end"}, 3, true, true, "review"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := f.newCase(t, f.standIn)
+			f.card(t, c, "Add a line to NOTES.md. kiln-case-kill")
+			f.specAndApprove(t, c)
+			ch := tc.killed
+			ch.Command, ch.Config = "core", f.config(c)
+			if code, out, errOut := f.kiln(t, ch); code != exitAtPoint {
+				t.Fatalf("the core exited with %d, want %d\n%s%s", code, exitAtPoint, out, errOut)
+			}
+
+			s := f.open(t, c)
+			inFlight, err := s.InFlight(1)
+			s.Close()
+			if err != nil || inFlight == nil || inFlight.ID != c.runOf(tc.run) {
+				t.Fatalf("the run in flight is %+v (%v), want %s", inFlight, err, c.runOf(tc.run))
+			}
+			if got := containerState(t, c.runOf(tc.run)); got != "exited" {
+				t.Errorf("the container is %q while the run is in flight, want exited", got)
+			}
+			if _, err := os.Stat(filepath.Join(c.data, "runs", c.runOf(tc.run), "result.json")); (err == nil) != tc.record {
+				t.Errorf("result.json after the kill: %v, want it there: %v", err, tc.record)
+			}
+			if n := countSpecs(t, c); n != tc.run-1 {
+				t.Errorf("%d documents after the kill, want %d", n, tc.run-1)
+			}
+			saved := gitIn(t, c.repo, "for-each-ref", "--format=%(objectname)", "refs/heads/kiln/card-1")
+			if (saved != "") != tc.saved {
+				t.Errorf("the branch after the kill is at %q", saved)
+			}
+
+			core, done := f.core(t, c, "")
+			f.waitState(t, c, reviewPassed, 3)
+			f.stop(t, core, done)
+			tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/approval by run"},
+				[]string{"spec 1", "report 2", "review 3"})
+			if tip != saved {
+				t.Errorf("the branch is at %s, and was at %s after the kill", tip, saved)
+			}
+			if n := gitIn(t, c.repo, "rev-list", "--count", c.commit+".."+tip); n != "1" {
+				t.Errorf("%s commits on the branch, want 1", n)
+			}
+			if got := f.document(t, c, tc.run); !strings.Contains(got, map[string]string{"report": "# Report", "review": "Verdict: passes"}[tc.kind]) {
+				t.Errorf("the %s is %q", tc.kind, got)
+			}
+		})
+	}
+
+	t.Run("an implement run that changes nothing", func(t *testing.T) {
+		c := f.newCase(t, f.standIn)
+		f.card(t, c, "Change nothing. kiln-case-same "+noChangeWord)
+		f.specAndApprove(t, c)
+		core, done := f.core(t, c, "")
+		f.waitState(t, c, implementNeedsYou, 2)
+		f.stop(t, core, done)
+		e := f.lastEntry(t, c)
+		if !strings.HasPrefix(e.Reason, "the run changed nothing; exit 0, ") || !strings.HasSuffix(e.Reason, ", no change") {
+			t.Errorf("the reason is %q, want that the run changed nothing", e.Reason)
+		}
+		if at := gitIn(t, c.repo, "for-each-ref", "refs/heads/kiln/card-1"); at != "" {
+			t.Errorf("refs/heads/kiln/card-1 exists: %s", at)
+		}
+		if got := f.document(t, c, 2); !strings.HasPrefix(got, "# Report kiln-case-same") {
+			t.Errorf("the report is %q", got)
+		}
+		f.assertRun(t, c, 2, implementModel, "medium", c.commit, store.Finished)
 	})
 
 	t.Run("one run of the real Claude Code", func(t *testing.T) {
@@ -646,6 +868,7 @@ type testCase struct {
 	run      string
 	text     string // card 1's text
 	noHosts  bool   // the core has no list of hosts
+	listen   string // the address its core serves the screen on, if any
 	starts   *lines // the names of the instance's containers, once per start
 	saves    *lines // the names of the run's containers, its save's included, once per start
 	// What the instance's copy holds before the run: its refs and its objects.
@@ -660,6 +883,178 @@ func (c *testCase) instruction() string {
 // wantInstruction is what a spec run of card 1 is told.
 func (c *testCase) wantInstruction() string {
 	return instructions.Spec + "## The card\n\n" + c.text
+}
+
+// runOf is the ID of the nth run of card 1.
+func (c *testCase) runOf(n int) string { return fmt.Sprintf("%s-1-%d", c.instance, n) }
+
+// instructionOf is the file of the nth run's instruction.
+func (c *testCase) instructionOf(n int) string {
+	return filepath.Join(c.data, "instructions", c.runOf(n)+".md")
+}
+
+// move moves card 1 as the developer, while no core runs.
+func (f *fixture) move(t *testing.T, c *testCase, to store.State) {
+	t.Helper()
+	s := f.open(t, c)
+	defer s.Close()
+	if _, err := s.Move(1, to, store.CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// specAndApprove has a core give card 1 its spec run, and approves the spec
+// as the developer once the core has stopped.
+func (f *fixture) specAndApprove(t *testing.T, c *testCase) {
+	t.Helper()
+	core, done := f.core(t, c, "")
+	f.waitState(t, c, finished, 1)
+	f.stop(t, core, done)
+	f.move(t, c, store.State{Stage: store.Implement, WaitsFor: store.Run})
+}
+
+// waitState waits until card 1 is in the state with nothing of the instance
+// left on the engine, and fails when the instance's run containers started
+// more than runs times.
+func (f *fixture) waitState(t *testing.T, c *testCase, want store.State, runs int) {
+	t.Helper()
+	waitUntil(t, fmt.Sprintf("card 1 is in %s waiting for %s", want.Stage, want.WaitsFor), func() bool {
+		if n := c.starts.count("kiln-run-"); n > runs {
+			t.Fatalf("the instance's run containers started %d times, want %d", n, runs)
+		}
+		s := f.open(t, c)
+		card, err := s.Card(1)
+		s.Close()
+		return err == nil && card.State == want && instanceLeft(t, c.instance) == ""
+	})
+	if n := c.starts.count("kiln-run-"); n != runs {
+		t.Errorf("the instance's run containers started %d times, want %d", n, runs)
+	}
+}
+
+// lastEntry is card 1's last entry.
+func (f *fixture) lastEntry(t *testing.T, c *testCase) store.Entry {
+	t.Helper()
+	s := f.open(t, c)
+	defer s.Close()
+	h, err := s.History(1)
+	if err != nil || len(h) == 0 {
+		t.Fatal(h, err)
+	}
+	return h[len(h)-1]
+}
+
+// assertRun asserts the nth run of card 1.
+func (f *fixture) assertRun(t *testing.T, c *testCase, n int, model, effort, commit string, ending store.Ending) {
+	t.Helper()
+	s := f.open(t, c)
+	defer s.Close()
+	want := store.RunRow{ID: c.runOf(n), Card: 1, Commit: commit, Model: model, Effort: effort, Ending: ending}
+	if r, err := s.Run(c.runOf(n)); err != nil || r != want {
+		t.Errorf("run %d is %+v (%v), want %+v", n, r, err, want)
+	}
+}
+
+// document is the text of the document the nth run of card 1 wrote.
+func (f *fixture) document(t *testing.T, c *testCase, n int) string {
+	t.Helper()
+	db, err := sql.Open("sqlite3", filepath.Join(c.data, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var text string
+	if err := db.QueryRow("SELECT text FROM specs WHERE run = ?", c.runOf(n)).Scan(&text); err != nil {
+		t.Fatalf("the document of run %d: %v", n, err)
+	}
+	return text
+}
+
+// assertLoop asserts the end of a case whose card 1 went past its spec: its
+// entries after the spec's approval, its documents in order as "<kind> <run's
+// number>", each run's document exactly as its record has it, every run
+// ended, and nothing of the instance left. It returns the branch's tip.
+func (f *fixture) assertLoop(t *testing.T, c *testCase, entries, documents []string) string {
+	t.Helper()
+	s := f.open(t, c)
+	defer s.Close()
+	h, err := s.History(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range h {
+		got = append(got, fmt.Sprintf("%s/%s by %s", e.Stage, e.WaitsFor, e.Cause))
+	}
+	want := append([]string{"backlog/developer by developer", "spec/run by developer", "spec/approval by run"}, entries...)
+	if strings.Join(got, ", ") != strings.Join(want, ", ") {
+		t.Errorf("the entries are %q, want %q", got, want)
+	}
+	if n, err := s.RunCount(1); err != nil || n != len(documents) {
+		t.Errorf("card 1 has %d runs (%v), want %d", n, err, len(documents))
+	}
+	if r, err := s.InFlight(1); err != nil || r != nil {
+		t.Errorf("a run is in flight: %+v (%v)", r, err)
+	}
+
+	db, err := sql.Open("sqlite3", filepath.Join(c.data, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query("SELECT kind, run, text FROM specs WHERE card = 1 ORDER BY rowid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var docs []string
+	for rows.Next() {
+		var kind, run, text string
+		if err := rows.Scan(&kind, &run, &text); err != nil {
+			t.Fatal(err)
+		}
+		n := strings.TrimPrefix(run, c.instance+"-1-")
+		docs = append(docs, kind+" "+n)
+		// The document is the one its run wrote.
+		name := "out/" + kind + ".md"
+		if written := readTarEntry(t, filepath.Join(c.data, "runs", run, "documents.tar"), name); written != text {
+			t.Errorf("the %s of run %s is kept as %q, written as %q", kind, n, text, written)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(docs, ", ") != strings.Join(documents, ", ") {
+		t.Errorf("the documents are %q, want %q", docs, documents)
+	}
+	if left := instanceLeft(t, c.instance); left != "" {
+		t.Errorf("left of the instance: %s", left)
+	}
+	return gitIn(t, c.repo, "rev-parse", "refs/heads/kiln/card-1")
+}
+
+// readTarEntry reads an entry of a tar.
+func readTarEntry(t *testing.T, name, entry string) string {
+	t.Helper()
+	f, err := os.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			t.Fatalf("no %s in %s: %v", entry, name, err)
+		}
+		if h.Name == entry {
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(data)
+		}
+	}
 }
 
 // newCase makes a case's data directory with its store, and its repo, and
@@ -695,7 +1090,8 @@ func copyHolds(t *testing.T, repo string) (refs, objects string) {
 
 // config is the configuration of a case's core.
 func (f *fixture) config(c *testCase) Config {
-	cfg := Config{Data: c.data, Repo: c.repo, Model: model, Effort: effort, Image: c.image, Proxy: f.proxy.Name}
+	cfg := Config{Data: c.data, Repo: c.repo, Model: model, ImplementModel: implementModel, ReviewModel: reviewModel,
+		Image: c.image, Proxy: f.proxy.Name, Listen: c.listen}
 	if !c.noHosts {
 		cfg.Hosts, cfg.WayOutImage, cfg.WayOutNetwork = hosts, f.wayOutImage, f.outward
 	}
@@ -865,7 +1261,7 @@ func (f *fixture) assertEndedAt(t *testing.T, c *testCase, ending store.Ending, 
 	if n, err := s.RunCount(1); err != nil || n != 1 {
 		t.Errorf("card 1 has %d runs (%v), want 1", n, err)
 	}
-	if r, err := s.Run(c.run); err != nil || r.Ending != ending || r.Commit != c.commit || r.Model != model || r.Effort != effort {
+	if r, err := s.Run(c.run); err != nil || r.Ending != ending || r.Commit != c.commit || r.Model != model || r.Effort != "high" {
 		t.Errorf("the run is %+v (%v), want %s from %s", r, err, ending, c.commit)
 	}
 
@@ -1095,6 +1491,33 @@ func removeInstance(proxy, instance string) {
 			dockerQuiet("network", "disconnect", "--force", id, proxy)
 			dockerQuiet("network", "rm", id)
 		}
+	}
+}
+
+// freeAddress is a loopback address with a port that is free now.
+func freeAddress(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().String()
+}
+
+// getJSON asks the screen's API for url and decodes its answer into v.
+func getJSON(t *testing.T, url string, v any) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: %s", url, resp.Status)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+		t.Fatalf("GET %s: %v", url, err)
 	}
 }
 

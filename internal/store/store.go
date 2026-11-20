@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/ncruces/go-sqlite3/driver" // registers the "sqlite3" driver
@@ -18,7 +19,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 3
+const version = 5
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -62,12 +63,14 @@ type State struct {
 	WaitsFor WaitsFor
 }
 
-// valid are the 11 pairings of ADR 0043 that can be written.
+// valid are the 11 pairings of ADR 0043 that can be written, and review
+// waiting for the developer's approval: a review that passed, until the core
+// publishes (card 14).
 var valid = map[State]bool{
 	{Backlog, Developer}: true, {Backlog, Room}: true,
 	{Spec, Run}: true, {Spec, Approval}: true, {Spec, Developer}: true,
 	{Implement, Run}: true, {Implement, Developer}: true,
-	{Review, Run}: true, {Review, Developer}: true, {Review, Host}: true,
+	{Review, Run}: true, {Review, Developer}: true, {Review, Host}: true, {Review, Approval}: true,
 	{Done, Nothing}: true,
 }
 
@@ -103,6 +106,13 @@ const (
 	Failed   Ending = "failed"
 )
 
+// Doc is a run's document as EndRun keeps it: its kind, KindSpec, KindReport
+// or KindReview, and its text, exactly as the run wrote it.
+type Doc struct {
+	Kind string
+	Text string
+}
+
 // SpecRow is a card's spec, as the store keeps it: its text, exactly as the run
 // wrote it, and the run that wrote it, with that run's commit.
 type SpecRow struct {
@@ -123,6 +133,13 @@ type RunRow struct {
 }
 
 // Store is the open store.
+//
+// The tick and the screen's handlers share one Store. It holds a single
+// connection to the file (SetMaxOpenConns(1) in Open), and a transaction holds
+// that connection from its Begin to its Commit or Rollback: a handler's write
+// waits for the tick's transaction to end, and the tick's for the handler's.
+// Every read and write is one statement or one transaction, and none of them
+// waits on anything outside the store, so no wait is longer than one of them.
 type Store struct {
 	db *sql.DB
 }
@@ -176,6 +193,18 @@ ALTER TABLE entries ADD COLUMN reason TEXT;`); err != nil {
 	func(tx *sql.Tx) error {
 		// One row per spec, written with the ending of the run that wrote it.
 		_, err := tx.Exec(`CREATE TABLE specs (run TEXT PRIMARY KEY, card INTEGER NOT NULL, text TEXT NOT NULL) STRICT`)
+		return err
+	},
+	func(tx *sql.Tx) error {
+		// When a run was written in flight, for the screen; a run written
+		// before has none.
+		_, err := tx.Exec(`ALTER TABLE runs ADD COLUMN started TEXT`)
+		return err
+	},
+	func(tx *sql.Tx) error {
+		// The table holds every run's document, one per run, by its kind; the
+		// rows that are there are specs.
+		_, err := tx.Exec(`ALTER TABLE specs ADD COLUMN kind TEXT NOT NULL DEFAULT 'spec'`)
 		return err
 	},
 }
@@ -242,15 +271,24 @@ func (s *Store) Create(text string) (Card, error) {
 	if text == "" {
 		return Card{}, errors.New("a card needs a text")
 	}
-	return s.change(true, 0, text, State{Backlog, Developer}, CauseDeveloper, nil)
+	return s.change(true, 0, text, fixed(State{Backlog, Developer}), CauseDeveloper, "", nil)
 }
 
 // Move changes a card's state. A pairing or a cause that cannot be written is
 // refused. A card that already has the state is returned as it is, so that a
 // repeated Move writes nothing (ADR 0035).
 func (s *Store) Move(id int64, to State, cause Cause) (Card, error) {
-	return s.change(false, id, "", to, cause, nil)
+	return s.change(false, id, "", fixed(to), cause, "", nil)
 }
+
+// MoveWithReason is Move with a reason on the entry, for a card that the core
+// stops without a run, such as a review run that is not started.
+func (s *Store) MoveWithReason(id int64, to State, cause Cause, reason string) (Card, error) {
+	return s.change(false, id, "", fixed(to), cause, reason, nil)
+}
+
+// ErrNoCard is the error of a card that is not in the store.
+var ErrNoCard = errors.New("no card")
 
 // Card reads a card.
 func (s *Store) Card(id int64) (Card, error) {
@@ -287,25 +325,24 @@ func (s *Store) History(id int64) ([]Entry, error) {
 var afterCardWritten func() error
 
 // runEnd is the ending of a run, written by change together with the card's
-// new state, and the spec it wrote, if any.
+// new state, and the document it wrote, if any.
 type runEnd struct {
 	id     string
 	ending Ending
-	reason string
-	spec   *string
+	doc    *Doc
 }
 
 // change is the one place every change to a card goes through (ADR 0042). In
 // one transaction it checks the pairing and the cause, writes the card's row
 // and then the entry, and commits. It creates a card with the text when create
-// is set, and changes the card id otherwise. When end is set, the card is the
-// one of that run, and the run's ending is written in the same transaction,
-// with the run and the reason on the entry, and with the run's spec when it is
-// given; a run that has ended already writes nothing, its spec included.
-func (s *Store) change(create bool, id int64, text string, to State, cause Cause, end *runEnd) (Card, error) {
-	if !valid[to] {
-		return Card{}, fmt.Errorf("a card cannot be in %s waiting for %s (ADR 0043)", to.Stage, to.WaitsFor)
-	}
+// is set, and changes the card id otherwise. The new state is next of the
+// card's state as it is in the transaction, the zero State for a card that is
+// created; an error of next is returned and nothing is written. When end is
+// set, the card is the one of that run, and the run's ending is written in the
+// same transaction, with the run on the entry, and with the run's document
+// when it is given; a run that has ended already writes nothing, its document
+// included. The reason, if any, is on the entry.
+func (s *Store) change(create bool, id int64, text string, next func(State) (State, error), cause Cause, reason string, end *runEnd) (Card, error) {
 	if !causes[cause] {
 		return Card{}, fmt.Errorf("%q is not a cause of a change (ADR 0042)", cause)
 	}
@@ -324,17 +361,34 @@ func (s *Store) change(create bool, id int64, text string, to State, cause Cause
 			return readCard(tx, run.Card)
 		}
 		id = run.Card
+	}
+
+	var card Card
+	if create {
+		card = Card{Text: text}
+	} else if card, err = readCard(tx, id); err != nil {
+		return Card{}, err
+	}
+	to, err := next(card.State)
+	if err != nil {
+		return card, err
+	}
+	if !valid[to] {
+		return Card{}, fmt.Errorf("a card cannot be in %s waiting for %s (ADR 0043)", to.Stage, to.WaitsFor)
+	}
+
+	if end != nil {
 		if _, err := tx.Exec(`UPDATE runs SET ending = ? WHERE id = ?`, end.ending, end.id); err != nil {
 			return Card{}, err
 		}
-		if end.spec != nil {
-			if _, err := tx.Exec(`INSERT INTO specs (run, card, text) VALUES (?, ?, ?)`, end.id, id, *end.spec); err != nil {
+		if end.doc != nil {
+			if _, err := tx.Exec(`INSERT INTO specs (run, card, text, kind) VALUES (?, ?, ?, ?)`,
+				end.id, id, end.doc.Text, end.doc.Kind); err != nil {
 				return Card{}, err
 			}
 		}
 	}
 
-	var card Card
 	if create {
 		res, err := tx.Exec(`INSERT INTO cards (text, stage, waits_for) VALUES (?, ?, ?)`,
 			text, to.Stage, to.WaitsFor)
@@ -344,11 +398,8 @@ func (s *Store) change(create bool, id int64, text string, to State, cause Cause
 		if id, err = res.LastInsertId(); err != nil {
 			return Card{}, err
 		}
-		card = Card{ID: id, Text: text}
+		card.ID = id
 	} else {
-		if card, err = readCard(tx, id); err != nil {
-			return Card{}, err
-		}
 		if card.State == to && end == nil {
 			return card, nil
 		}
@@ -365,19 +416,25 @@ func (s *Store) change(create bool, id int64, text string, to State, cause Cause
 		}
 	}
 	at := time.Now().UTC().Format(time.RFC3339Nano)
-	var run, reason sql.NullString
+	var run sql.NullString
 	if end != nil {
 		run = sql.NullString{String: end.id, Valid: true}
-		reason = sql.NullString{String: end.reason, Valid: end.reason != ""}
 	}
+	why := sql.NullString{String: reason, Valid: reason != ""}
 	if _, err := tx.Exec(`INSERT INTO entries (card, at, cause, stage, waits_for, run, reason) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, at, cause, to.Stage, to.WaitsFor, run, reason); err != nil {
+		id, at, cause, to.Stage, to.WaitsFor, run, why); err != nil {
 		return Card{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Card{}, err
 	}
 	return card, nil
+}
+
+// fixed is the next state of a change to one given state, whatever the card's
+// state is.
+func fixed(to State) func(State) (State, error) {
+	return func(State) (State, error) { return to, nil }
 }
 
 // Instance reads the instance's identity, the eight hex digits by which the
@@ -454,8 +511,8 @@ func (s *Store) AddRun(r RunRow) error {
 	case !errors.Is(err, sql.ErrNoRows):
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO runs (id, card, commit_id, model, effort) VALUES (?, ?, ?, ?, ?)`,
-		r.ID, r.Card, r.Commit, r.Model, r.Effort); err != nil {
+	if _, err := tx.Exec(`INSERT INTO runs (id, card, commit_id, model, effort, started) VALUES (?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Card, r.Commit, r.Model, r.Effort, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("run %s not written; card %d may have a run in flight already: %w", r.ID, r.Card, err)
 	}
 	return tx.Commit()
@@ -464,14 +521,17 @@ func (s *Store) AddRun(r RunRow) error {
 // EndRun ends a run in flight, finished or failed, and moves its card to the
 // state to, in one transaction through change: the run's ending, the card's
 // state, an entry with the cause run, the run's ID and the reason, and the
-// run's spec when it is given, are written together or not at all. A run that
-// has ended already writes nothing, so a repeat after a kill is safe
-// (ADR 0035), and a spec is written once.
-func (s *Store) EndRun(id string, ending Ending, reason string, to State, spec *string) (Card, error) {
+// run's document when it is given, are written together or not at all. A run
+// that has ended already writes nothing, so a repeat after a kill is safe
+// (ADR 0035), and a document is written once.
+func (s *Store) EndRun(id string, ending Ending, reason string, to State, doc *Doc) (Card, error) {
 	if ending != Finished && ending != Failed {
 		return Card{}, fmt.Errorf("%q is not an ending of a run (ADR 0043)", ending)
 	}
-	return s.change(false, 0, "", to, CauseRun, &runEnd{id, ending, reason, spec})
+	if doc != nil && doc.Kind != KindSpec && doc.Kind != KindReport && doc.Kind != KindReview {
+		return Card{}, fmt.Errorf("%q is not a kind of document", doc.Kind)
+	}
+	return s.change(false, 0, "", fixed(to), CauseRun, reason, &runEnd{id, ending, doc})
 }
 
 // Spec reads the newest spec of a card, the one written last, with its run's
@@ -479,12 +539,33 @@ func (s *Store) EndRun(id string, ending Ending, reason string, to State, spec *
 func (s *Store) Spec(card int64) (SpecRow, error) {
 	var sp SpecRow
 	err := s.db.QueryRow(`SELECT specs.run, runs.commit_id, specs.text FROM specs
-		JOIN runs ON runs.id = specs.run WHERE specs.card = ? ORDER BY specs.rowid DESC LIMIT 1`, card).
+		JOIN runs ON runs.id = specs.run WHERE specs.card = ? AND specs.kind = ? ORDER BY specs.rowid DESC LIMIT 1`,
+		card, KindSpec).
 		Scan(&sp.Run, &sp.Commit, &sp.Text)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SpecRow{}, fmt.Errorf("card %d has no spec: %w", card, err)
 	}
 	return sp, err
+}
+
+// Newest reads the newest document of a card among the kinds given, the one
+// written last.
+func (s *Store) Newest(card int64, kinds ...string) (Document, error) {
+	if len(kinds) == 0 {
+		return Document{}, errors.New("no kind of document is given")
+	}
+	query := `SELECT kind, run, text FROM specs WHERE card = ? AND kind IN (?` +
+		strings.Repeat(", ?", len(kinds)-1) + `) ORDER BY rowid DESC LIMIT 1`
+	args := []any{card}
+	for _, k := range kinds {
+		args = append(args, k)
+	}
+	var d Document
+	err := s.db.QueryRow(query, args...).Scan(&d.Kind, &d.Run, &d.Text)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Document{}, fmt.Errorf("card %d has no document of the kinds %v: %w", card, kinds, err)
+	}
+	return d, err
 }
 
 // querier is a database or a transaction.
@@ -515,7 +596,7 @@ func readCard(q querier, id int64) (Card, error) {
 	err := q.QueryRow(`SELECT text, stage, waits_for FROM cards WHERE id = ?`, id).
 		Scan(&c.Text, &c.Stage, &c.WaitsFor)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Card{}, fmt.Errorf("no card %d: %w", id, err)
+		return Card{}, fmt.Errorf("%w %d: %w", ErrNoCard, id, err)
 	}
 	return c, err
 }

@@ -1,0 +1,404 @@
+// Package web is the core's screen (ADR 0023, ADR 0044): one embedded page,
+// index.html, with its CSS and JavaScript inside, and the JSON API it asks.
+// The core serves it on a loopback address while it ticks.
+//
+// Only this machine's browser may ask, and only the page may act. A card's
+// text becomes a run's instruction, so a page on the web that could add a
+// card could instruct a run: every request must name the listen address as its
+// Host, which a page on the web reached by a rebound name does not; and a
+// POST must be JSON, which a form cannot send, with an Origin, when it has
+// one, of the page's own.
+//
+// Nothing of a run is trusted by the page: every text of a card, a run or a
+// document reaches it as JSON, and the page puts it in as text, never as HTML.
+package web
+
+import (
+	"crypto/sha256"
+	_ "embed"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"mime"
+	"net"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/TheEisbaer/kiln/internal/run"
+	"github.com/TheEisbaer/kiln/internal/store"
+)
+
+//go:embed index.html
+var page []byte
+
+// policy is the page's Content-Security-Policy: its one script and its one
+// style, by their hashes, requests to its own origin only, and nothing else.
+var policy = func() string {
+	hash := func(tag string) string {
+		m := regexp.MustCompile(`(?s)<` + tag + `>(.*?)</` + tag + `>`).FindSubmatch(page)
+		if m == nil {
+			panic("index.html has no " + tag)
+		}
+		sum := sha256.Sum256(m[1])
+		return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	}
+	return "default-src 'none'; script-src " + hash("script") + "; style-src " + hash("style") +
+		"; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+}()
+
+// maxBody is the largest body of a request that is read.
+const maxBody = 1 << 20
+
+// Info is what the board says about the core.
+type Info struct {
+	Instance string
+	Repo     string
+	Model    string
+}
+
+// CheckAddress refuses a listen address whose host is not loopback: an IP
+// address of the loopback, or localhost.
+func CheckAddress(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("the address %q: %w", addr, err)
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return fmt.Errorf("the address %q has no port", addr)
+	}
+	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return fmt.Errorf("the address %q is not loopback; the screen listens only on this machine (ADR 0044)", addr)
+	}
+	return nil
+}
+
+// Listen checks the address and listens on it.
+func Listen(addr string) (net.Listener, error) {
+	if err := CheckAddress(addr); err != nil {
+		return nil, err
+	}
+	return net.Listen("tcp", addr)
+}
+
+// Handler is the screen and its API on the store, for a core that listens on
+// addr, the address it actually listens on, with its port.
+func Handler(s *store.Store, info Info, act *Activity, addr string) (http.Handler, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	hosts := map[string]bool{"127.0.0.1:" + port: true, "localhost:" + port: true, net.JoinHostPort(host, port): true}
+	h := &handler{store: s, info: info, act: act}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", h.page)
+	mux.HandleFunc("GET /api/board", h.board)
+	mux.HandleFunc("GET /api/cards/{id}", h.card)
+	mux.HandleFunc("POST /api/cards", h.create)
+	mux.HandleFunc("POST /api/cards/{id}/decide", h.decide)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hosts[r.Host] {
+			fail(w, http.StatusForbidden, "the request's Host is not the core's address")
+			return
+		}
+		if r.Method == http.MethodPost {
+			if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+				fail(w, http.StatusForbidden, "a POST must have the Content-Type application/json")
+				return
+			}
+			if o := r.Header.Get("Origin"); o != "" && o != "http://"+r.Host {
+				fail(w, http.StatusForbidden, "the request's Origin is not the page's")
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "no-store")
+		mux.ServeHTTP(w, r)
+	}), nil
+}
+
+type handler struct {
+	store *store.Store
+	info  Info
+	act   *Activity
+}
+
+func (h *handler) page(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", policy)
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Write(page)
+}
+
+// The API's JSON.
+type (
+	boardJSON struct {
+		Instance string     `json:"instance"`
+		Repo     string     `json:"repo"`
+		Model    string     `json:"model"`
+		Now      time.Time  `json:"now"`
+		Cards    []tileJSON `json:"cards"`
+	}
+	tileJSON struct {
+		ID        int64          `json:"id"`
+		Title     string         `json:"title"`
+		Stage     store.Stage    `json:"stage"`
+		WaitsFor  store.WaitsFor `json:"waits_for"`
+		Reason    string         `json:"reason"`
+		Run       *flightJSON    `json:"run"`
+		Documents []string       `json:"documents"`
+	}
+	flightJSON struct {
+		ID    string     `json:"id"`
+		Model string     `json:"model"`
+		Since *time.Time `json:"since"`
+	}
+	cardJSON struct {
+		tileJSON
+		Text      string         `json:"text"`
+		Moves     []store.Action `json:"moves"`
+		History   []entryJSON    `json:"history"`
+		Runs      []runJSON      `json:"runs"`
+		Documents []documentJSON `json:"documents"`
+		Activity  []activityJSON `json:"activity"`
+		Now       time.Time      `json:"now"`
+	}
+	entryJSON struct {
+		Number   int64          `json:"number"`
+		At       time.Time      `json:"at"`
+		Cause    store.Cause    `json:"cause"`
+		Stage    store.Stage    `json:"stage"`
+		WaitsFor store.WaitsFor `json:"waits_for"`
+		Run      string         `json:"run"`
+		Reason   string         `json:"reason"`
+	}
+	runJSON struct {
+		ID      string       `json:"id"`
+		Commit  string       `json:"commit"`
+		Model   string       `json:"model"`
+		Effort  string       `json:"effort"`
+		Ending  store.Ending `json:"ending"`
+		Started *time.Time   `json:"started"`
+	}
+	documentJSON struct {
+		Kind string `json:"kind"`
+		Run  string `json:"run"`
+		Text string `json:"text"`
+	}
+	activityJSON struct {
+		At   time.Time `json:"at"`
+		Kind string    `json:"kind"`
+		Tool string    `json:"tool"`
+		Text string    `json:"text"`
+	}
+)
+
+// title is a card's first line that is not empty.
+func title(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+func started(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
+func tile(s store.Summary) tileJSON {
+	t := tileJSON{ID: s.ID, Title: title(s.Text), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
+		Documents: s.Kinds}
+	if t.Documents == nil {
+		t.Documents = []string{}
+	}
+	if r := s.InFlight; r != nil {
+		t.Run = &flightJSON{ID: r.ID, Model: r.Model, Since: started(r.Started)}
+	}
+	return t
+}
+
+func (h *handler) board(w http.ResponseWriter, r *http.Request) {
+	cards, err := h.store.Board()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	b := boardJSON{Instance: h.info.Instance, Repo: h.info.Repo, Model: h.info.Model, Now: time.Now().UTC(),
+		Cards: []tileJSON{}}
+	for _, c := range cards {
+		b.Cards = append(b.Cards, tile(c))
+	}
+	reply(w, http.StatusOK, b)
+}
+
+// cardID is the card's ID in the request's path, or 0 when it is none.
+func cardID(r *http.Request) int64 {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
+}
+
+func (h *handler) card(w http.ResponseWriter, r *http.Request) {
+	id := cardID(r)
+	c, err := h.store.Card(id)
+	if id == 0 || errors.Is(err, store.ErrNoCard) {
+		fail(w, http.StatusNotFound, fmt.Sprintf("no card %s", r.PathValue("id")))
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out, err := h.cardJSON(c)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	reply(w, http.StatusOK, out)
+}
+
+// cardJSON is everything the card's page shows.
+func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
+	history, err := h.store.History(c.ID)
+	if err != nil {
+		return cardJSON{}, err
+	}
+	runs, err := h.store.Runs(c.ID)
+	if err != nil {
+		return cardJSON{}, err
+	}
+	docs, err := h.store.Documents(c.ID)
+	if err != nil {
+		return cardJSON{}, err
+	}
+	sum := store.Summary{Card: c}
+	if len(history) > 0 {
+		sum.Reason = history[len(history)-1].Reason
+	}
+	out := cardJSON{Text: c.Text, Moves: store.Moves(c.State), History: []entryJSON{}, Runs: []runJSON{},
+		Documents: []documentJSON{}, Activity: []activityJSON{}, Now: time.Now().UTC()}
+	if out.Moves == nil {
+		out.Moves = []store.Action{}
+	}
+	for _, e := range history {
+		out.History = append(out.History, entryJSON{Number: e.Number, At: e.At, Cause: e.Cause, Stage: e.Stage,
+			WaitsFor: e.WaitsFor, Run: e.Run, Reason: e.Reason})
+	}
+	for _, r := range runs {
+		out.Runs = append(out.Runs, runJSON{ID: r.ID, Commit: r.Commit, Model: r.Model, Effort: r.Effort,
+			Ending: r.Ending, Started: started(r.Started)})
+		if r.Ending == "" {
+			sum.InFlight = &r
+		}
+	}
+	seen := map[string]bool{}
+	for _, d := range docs {
+		out.Documents = append(out.Documents, documentJSON{Kind: d.Kind, Run: d.Run, Text: d.Text})
+		if !seen[d.Kind] {
+			seen[d.Kind] = true
+			sum.Kinds = append(sum.Kinds, d.Kind)
+		}
+	}
+	out.tileJSON = tile(sum)
+	if sum.InFlight != nil && h.act != nil {
+		for _, a := range h.act.Of(sum.InFlight.ID) {
+			out.Activity = append(out.Activity, activityJSON{At: a.At, Kind: a.Kind, Tool: a.Tool, Text: a.Text})
+		}
+	}
+	return out, nil
+}
+
+// waiting is where a new card goes, as `kiln card` puts it (tick.AddCard):
+// in spec, waiting for a run.
+var waiting = store.State{Stage: store.Spec, WaitsFor: store.Run}
+
+func (h *handler) create(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Text *string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Text == nil {
+		fail(w, http.StatusBadRequest, `the body must be {"text": …}`)
+		return
+	}
+	if strings.TrimSpace(*body.Text) == "" {
+		fail(w, http.StatusBadRequest, "a card needs a text")
+		return
+	}
+	c, err := h.store.Create(*body.Text)
+	if err == nil {
+		c, err = h.store.Move(c.ID, waiting, store.CauseDeveloper)
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out, err := h.cardJSON(c)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	reply(w, http.StatusCreated, out)
+}
+
+func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
+	id := cardID(r)
+	if id == 0 {
+		fail(w, http.StatusNotFound, fmt.Sprintf("no card %s", r.PathValue("id")))
+		return
+	}
+	var body struct {
+		Action store.Action `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		fail(w, http.StatusBadRequest, `the body must be {"action": …}`)
+		return
+	}
+	c, err := h.store.Decide(id, body.Action)
+	switch {
+	case errors.Is(err, store.ErrNoCard):
+		fail(w, http.StatusNotFound, fmt.Sprintf("no card %d", id))
+		return
+	case errors.Is(err, store.ErrRefused):
+		reply(w, http.StatusConflict, map[string]any{"error": err.Error(), "stage": c.Stage, "waits_for": c.WaitsFor,
+			"moves": nonNil(store.Moves(c.State))})
+		return
+	case err != nil:
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out, err := h.cardJSON(c)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	reply(w, http.StatusOK, out)
+}
+
+func nonNil(a []store.Action) []store.Action {
+	if a == nil {
+		return []store.Action{}
+	}
+	return a
+}
+
+func reply(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func fail(w http.ResponseWriter, status int, msg string) {
+	reply(w, status, map[string]string{"error": run.Printable(msg)})
+}

@@ -39,7 +39,7 @@ var validPairings = map[State]bool{
 	{"backlog", "developer"}: true, {"backlog", "room"}: true,
 	{"spec", "run"}: true, {"spec", "approval"}: true, {"spec", "developer"}: true,
 	{"implement", "run"}: true, {"implement", "developer"}: true,
-	{"review", "run"}: true, {"review", "developer"}: true, {"review", "host"}: true,
+	{"review", "run"}: true, {"review", "developer"}: true, {"review", "host"}: true, {"review", "approval"}: true,
 	{"done", "nothing"}: true,
 }
 
@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 4"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 6"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 4 was opened")
+		t.Fatal("a store of version 6 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 4") || !strings.Contains(msg, "version 3") {
+	if msg := err.Error(); !strings.Contains(msg, "version 6") || !strings.Contains(msg, "version 5") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 4 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 4 and 0", v, tables)
+	if v != 6 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 6 and 0", v, tables)
 	}
 }
 
@@ -486,7 +486,7 @@ func TestEndRun(t *testing.T) {
 	}
 }
 
-func ptr(s string) *string { return &s }
+func specDoc(s string) *Doc { return &Doc{Kind: KindSpec, Text: s} }
 
 func TestSpec(t *testing.T) {
 	s := open(t)
@@ -502,7 +502,7 @@ func TestSpec(t *testing.T) {
 	text := "# Spec\n\nNot UTF-8: \xff, an escape: \x1b]0;title\x07, a return: \r.\n"
 	first := RunRow{ID: "ab12cd34-1-1", Card: card.ID, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}
 	mustAddRun(t, s, first)
-	if _, err := s.EndRun(first.ID, Finished, "the reason", State{Spec, Approval}, ptr(text)); err != nil {
+	if _, err := s.EndRun(first.ID, Finished, "the reason", State{Spec, Approval}, specDoc(text)); err != nil {
 		t.Fatal(err)
 	}
 	want := SpecRow{Run: first.ID, Commit: "c0ffee", Text: text}
@@ -515,7 +515,7 @@ func TestSpec(t *testing.T) {
 	}
 
 	// A second EndRun, with another spec, leaves the first.
-	if _, err := s.EndRun(first.ID, Finished, "the reason", State{Spec, Approval}, ptr("another")); err != nil {
+	if _, err := s.EndRun(first.ID, Finished, "the reason", State{Spec, Approval}, specDoc("another")); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := s.Spec(card.ID); err != nil || got != want || countRows(t, s, "specs") != 1 {
@@ -528,7 +528,7 @@ func TestSpec(t *testing.T) {
 	}
 	second := RunRow{ID: "ab12cd34-1-2", Card: card.ID, Commit: "beef", Model: "claude-opus-5-5", Effort: "high"}
 	mustAddRun(t, s, second)
-	if _, err := s.EndRun(second.ID, Finished, "", State{Spec, Developer}, ptr("the second")); err != nil {
+	if _, err := s.EndRun(second.ID, Finished, "", State{Spec, Developer}, specDoc("the second")); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := s.Spec(card.ID); got != (SpecRow{Run: second.ID, Commit: "beef", Text: "the second"}) {
@@ -659,7 +659,7 @@ func dump(t *testing.T, path string) string {
 }
 
 // TestMigrateV2 moves a store of version 2 forward: every card, entry and run
-// is kept, and the store has the shape of one made at version 3.
+// is kept, and the store has the shape of one made at the current version.
 func TestMigrateV2(t *testing.T) {
 	path := makeV2(t)
 
@@ -699,21 +699,26 @@ func TestMigrateV2(t *testing.T) {
 
 	before := dump(t, path)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != 3 {
-		t.Fatalf("the store is version %d after Open, want 3", v)
+	if v := userVersion(t, s); v != version {
+		t.Fatalf("the store is version %d after Open, want %d", v, version)
 	}
 	after := dump(t, path)
-	// Every row is kept, and only the version and the new table differ.
-	keep := func(d string) string {
+	// Every row is kept, and only the version, the new table and the runs'
+	// new column, empty for the runs that were there, differ.
+	keep := func(d string, migrated bool) string {
 		var out []string
 		for _, line := range strings.Split(d, "\n") {
-			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") && !strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") {
+			if migrated && strings.HasPrefix(line, "ab12cd34-") { // a run's row
+				line = strings.TrimSuffix(line, " | <nil>")
+			}
+			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") &&
+				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") && !strings.HasPrefix(line, "runs | ") {
 				out = append(out, line)
 			}
 		}
 		return strings.Join(out, "\n")
 	}
-	if keep(after) != keep(before) {
+	if keep(after, true) != keep(before, false) {
 		t.Errorf("the move forward changed what version 2 held:\n%s\nwas\n%s", after, before)
 	}
 	if id, err := s.Instance(); err != nil || id != "ab12cd34" {
@@ -729,7 +734,7 @@ func TestMigrateV2(t *testing.T) {
 		t.Errorf("a card of version 2 has a spec: %v", err)
 	}
 	// The run in flight ends with its spec.
-	if _, err := s.EndRun("ab12cd34-2-1", Finished, "done", State{Spec, Approval}, ptr("the spec")); err != nil {
+	if _, err := s.EndRun("ab12cd34-2-1", Finished, "done", State{Spec, Approval}, specDoc("the spec")); err != nil {
 		t.Fatal(err)
 	}
 	if sp, err := s.Spec(2); err != nil || sp != (SpecRow{Run: "ab12cd34-2-1", Commit: "beef", Text: "the spec"}) {
@@ -737,6 +742,227 @@ func TestMigrateV2(t *testing.T) {
 	}
 	if got, want := shape(t, s), shape(t, open(t)); !reflect.DeepEqual(got, want) {
 		t.Errorf("a migrated store differs from a new one:\n%v\n%v", got, want)
+	}
+}
+
+// schemaV3 is the store of version 3 as card 11's code makes it, with a card
+// and its spec, a card whose run is in flight, and the spec of a run that
+// failed after it, which card 11 never keeps but the shape allows.
+const schemaV3 = `
+CREATE TABLE cards (
+	id INTEGER PRIMARY KEY,
+	text TEXT NOT NULL,
+	stage TEXT NOT NULL,
+	waits_for TEXT NOT NULL
+) STRICT;
+CREATE TABLE entries (
+	number INTEGER PRIMARY KEY,
+	card INTEGER NOT NULL,
+	at TEXT NOT NULL,
+	cause TEXT NOT NULL,
+	stage TEXT NOT NULL,
+	waits_for TEXT NOT NULL
+, run TEXT, reason TEXT) STRICT;
+CREATE TABLE instance (id TEXT NOT NULL) STRICT;
+CREATE TABLE runs (
+	id TEXT PRIMARY KEY,
+	card INTEGER NOT NULL,
+	commit_id TEXT NOT NULL,
+	model TEXT NOT NULL,
+	effort TEXT NOT NULL,
+	ending TEXT
+) STRICT;
+CREATE UNIQUE INDEX runs_in_flight ON runs(card) WHERE ending IS NULL;
+CREATE TABLE specs (run TEXT PRIMARY KEY, card INTEGER NOT NULL, text TEXT NOT NULL) STRICT;
+PRAGMA user_version = 3;
+INSERT INTO instance (id) VALUES ('ab12cd34');
+INSERT INTO cards (text, stage, waits_for) VALUES ('first card', 'spec', 'approval'), ('second card', 'spec', 'run');
+INSERT INTO entries (card, at, cause, stage, waits_for, run, reason) VALUES
+	(1, '2026-11-19T10:00:00Z', 'developer', 'backlog', 'developer', NULL, NULL),
+	(1, '2026-11-19T10:00:01Z', 'developer', 'spec', 'run', NULL, NULL),
+	(1, '2026-11-19T10:05:00Z', 'run', 'spec', 'approval', 'ab12cd34-1-1', 'exit 0, result success, 3 turns, $0.1000, not saved'),
+	(2, '2026-11-19T11:00:00Z', 'developer', 'backlog', 'developer', NULL, NULL),
+	(2, '2026-11-19T11:00:01Z', 'developer', 'spec', 'run', NULL, NULL);
+INSERT INTO runs (id, card, commit_id, model, effort, ending) VALUES
+	('ab12cd34-1-1', 1, 'c0ffee', 'claude-opus-5-5', 'high', 'finished'),
+	('ab12cd34-2-1', 2, 'beef', 'claude-opus-5-5', 'high', NULL);
+INSERT INTO specs (run, card, text) VALUES ('ab12cd34-1-1', 1, '# Spec of the first card' || char(10) || 'Not UTF-8: ' || CAST(X'FF' AS TEXT) || char(10));
+`
+
+// TestMigrateV3 moves a store of version 3 forward: every row is kept, its
+// specs as specs, and the store has the shape of one made at the current
+// version.
+func TestMigrateV3(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaV3); err != nil {
+		t.Fatal(err)
+	}
+	var oldSpec string
+	if err := db.QueryRow(`SELECT text FROM specs`).Scan(&oldSpec); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// schemaV3 is what card 11's code makes: the shape of a store made by the
+	// first three migrations, which are unchanged.
+	made := filepath.Join(t.TempDir(), "made.db")
+	db, err = sql.Open("sqlite3", made)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migrate := range migrations[:3] {
+		if err := migrate(tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	schemaOf := func(d string) string {
+		var out []string
+		for _, line := range strings.Split(d, "\n") {
+			if strings.Contains(line, "CREATE ") {
+				out = append(out, line)
+			}
+		}
+		return strings.Join(out, "\n")
+	}
+	if got, want := schemaOf(dump(t, path)), schemaOf(dump(t, made)); got != want {
+		t.Fatalf("schemaV3 differs from what card 11's migrations make:\n%s\n%s", got, want)
+	}
+
+	before := dump(t, path)
+	s := reopen(t, path)
+	if v := userVersion(t, s); v != version {
+		t.Fatalf("the store is version %d after Open, want %d", v, version)
+	}
+	// Every card, entry and run is kept; only the version, the definitions of
+	// specs and runs, and the runs' new column, empty for the runs that were
+	// there, differ.
+	keep := func(d string, migrated bool) string {
+		var out []string
+		for _, line := range strings.Split(d, "\n") {
+			if migrated && strings.HasPrefix(line, "ab12cd34-") { // a run's row
+				line = strings.TrimSuffix(line, " | <nil>")
+			}
+			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") && !strings.HasPrefix(line, "runs | ") {
+				out = append(out, line)
+			}
+		}
+		return strings.Join(out, "\n")
+	}
+	if keep(dump(t, path), true) != keep(before, false) {
+		t.Errorf("the move forward changed what version 3 held:\n%s\nwas\n%s", dump(t, path), before)
+	}
+	// The spec is kept, byte for byte, as a spec.
+	want := SpecRow{Run: "ab12cd34-1-1", Commit: "c0ffee", Text: oldSpec}
+	if sp, err := s.Spec(1); err != nil || sp != want || !strings.Contains(sp.Text, "\xff") {
+		t.Errorf("the spec of version 3 is %+v (%v), want %+v", sp, err, want)
+	}
+	if d, err := s.Newest(1, KindSpec, KindReview, KindReport); err != nil || d != (Document{KindSpec, "ab12cd34-1-1", oldSpec}) {
+		t.Errorf("the newest document is %+v (%v)", d, err)
+	}
+	// The run in flight ends with its spec.
+	if _, err := s.EndRun("ab12cd34-2-1", Finished, "done", State{Spec, Approval}, specDoc("the spec")); err != nil {
+		t.Fatal(err)
+	}
+	if sp, err := s.Spec(2); err != nil || sp != (SpecRow{Run: "ab12cd34-2-1", Commit: "beef", Text: "the spec"}) {
+		t.Errorf("the spec is %+v, %v", sp, err)
+	}
+	if got, want := shape(t, s), shape(t, open(t)); !reflect.DeepEqual(got, want) {
+		t.Errorf("a migrated store differs from a new one:\n%v\n%v", got, want)
+	}
+}
+
+// TestDocumentKinds keeps a run's document of each kind, reads the newest among
+// kinds, and refuses a kind that is none.
+func TestDocumentKinds(t *testing.T) {
+	s := open(t)
+	card := mustCreate(t, s, "a card")
+	end := func(id string, to State, doc *Doc) {
+		t.Helper()
+		if _, err := s.Move(card.ID, State{to.Stage, Run}, CauseDeveloper); err != nil {
+			t.Fatal(err)
+		}
+		mustAddRun(t, s, theRun(card.ID, id))
+		if _, err := s.EndRun(id, Finished, "", to, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	end("r1", State{Spec, Approval}, specDoc("the spec"))
+	if _, err := s.Newest(card.ID, KindReview); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("Newest of a card without a review: %v", err)
+	}
+	end("r2", State{Review, Run}, &Doc{KindReport, "the report"})
+	end("r3", State{Review, Developer}, &Doc{KindReview, "Verdict: goes back\n"})
+
+	if sp, err := s.Spec(card.ID); err != nil || sp.Run != "r1" || sp.Text != "the spec" {
+		t.Errorf("Spec after a report and a review is %+v (%v)", sp, err)
+	}
+	for _, row := range []struct {
+		kinds []string
+		want  Document
+	}{
+		{[]string{KindSpec}, Document{KindSpec, "r1", "the spec"}},
+		{[]string{KindReport}, Document{KindReport, "r2", "the report"}},
+		{[]string{KindSpec, KindReview}, Document{KindReview, "r3", "Verdict: goes back\n"}},
+		{[]string{KindSpec, KindReview, KindReport}, Document{KindReview, "r3", "Verdict: goes back\n"}},
+	} {
+		if got, err := s.Newest(card.ID, row.kinds...); err != nil || got != row.want {
+			t.Errorf("Newest of %v is %+v (%v), want %+v", row.kinds, got, err, row.want)
+		}
+	}
+	// A spec written after the review is newer.
+	end("r4", State{Spec, Approval}, specDoc("a new spec"))
+	if got, _ := s.Newest(card.ID, KindSpec, KindReview); got.Run != "r4" {
+		t.Errorf("Newest after a new spec is %+v", got)
+	}
+
+	if _, err := s.Newest(card.ID); err == nil {
+		t.Error("Newest of no kind was accepted")
+	}
+	// The board names each kind once, in the order of its first document.
+	if b, err := s.Board(); err != nil || !reflect.DeepEqual(b[0].Kinds, []string{KindSpec, KindReport, KindReview}) {
+		t.Errorf("the board's kinds are %+v (%v)", b, err)
+	}
+	if _, err := s.Move(card.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
+	mustAddRun(t, s, theRun(card.ID, "r5"))
+	if _, err := s.EndRun("r5", Finished, "", State{Spec, Approval}, &Doc{"notes", "x"}); err == nil {
+		t.Error("a document of the kind notes was kept")
+	}
+	if r, _ := s.InFlight(card.ID); r == nil || countRows(t, s, "specs") != 4 {
+		t.Errorf("a refused document ended the run or was kept: %+v, %d rows", r, countRows(t, s, "specs"))
+	}
+}
+
+// TestMoveWithReason writes the reason on the entry of a move that ends no run.
+func TestMoveWithReason(t *testing.T) {
+	s := open(t)
+	card := mustCreate(t, s, "a card")
+	if _, err := s.Move(card.ID, State{Review, Run}, CauseRule); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := s.MoveWithReason(card.ID, State{Review, Developer}, CauseRule, "the change is too large")
+	if err != nil || moved.State != (State{Review, Developer}) {
+		t.Fatalf("MoveWithReason returned %+v, %v", moved, err)
+	}
+	h := mustHistory(t, s, card.ID)
+	if e := h[len(h)-1]; e.Run != "" || e.Reason != "the change is too large" || e.Cause != CauseRule {
+		t.Errorf("the entry is %+v", e)
+	}
+	if _, err := s.MoveWithReason(card.ID, State{Done, Run}, CauseRule, "x"); err == nil {
+		t.Error("an invalid pairing was written")
 	}
 }
 
@@ -810,8 +1036,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 3 {
-		t.Fatalf("the store is version %d after Open, want 3", v)
+	if v := userVersion(t, s); v != version || version != 5 {
+		t.Fatalf("the store is version %d after Open, want 5", v)
 	}
 	// What version 1 held is still there, and has no run or reason.
 	card, err := s.Card(1)
@@ -842,7 +1068,7 @@ func TestMigrate(t *testing.T) {
 		t.Errorf("after a reopen the instance is %q, want %q", again, id)
 	}
 
-	// A store moved forward has the shape of one made at version 3.
+	// A store moved forward has the shape of one made at the current version.
 	fresh := open(t)
 	if got, want := shape(t, s), shape(t, fresh); !reflect.DeepEqual(got, want) {
 		t.Errorf("a migrated store differs from a new one:\n%v\n%v", got, want)
@@ -917,7 +1143,7 @@ func TestKill(t *testing.T) {
 		}
 		for _, f := range files {
 			s := reopen(t, f)
-			if _, err := s.Create("x"); err != nil { // version 0 was created again, version 3 opened
+			if _, err := s.Create("x"); err != nil { // version 0 was created again, a later one opened
 				t.Errorf("%s: %v", f, err)
 			}
 			s.Close()
@@ -969,7 +1195,7 @@ func TestKill(t *testing.T) {
 				card, r, len(mustHistory(t, s, 1)), countRows(t, s, "specs"))
 		}
 		// Repeated, it ends the run and writes the spec, once.
-		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}, ptr("the spec")); err != nil {
+		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}, specDoc("the spec")); err != nil {
 			t.Fatal(err)
 		}
 		if sp, err := s.Spec(1); err != nil || sp.Text != "the spec" || sp.Run != "r1" || countRows(t, s, "specs") != 1 {
@@ -1208,9 +1434,9 @@ func asChild(mode, path string) {
 		if err := s.AddRun(theRun(1, "r1")); err != nil {
 			fail(err)
 		}
-		var spec *string
+		var spec *Doc
 		if mode == "endrun-spec-hook" {
-			spec = ptr("the spec")
+			spec = specDoc("the spec")
 		}
 		if mode == "endrun-hook" || mode == "endrun-spec-hook" {
 			afterCardWritten = func() error { stop(); return nil }

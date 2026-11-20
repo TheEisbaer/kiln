@@ -1,8 +1,9 @@
 // Command core is Kiln's core (ADR 0034), built as kiln. Its commands: `kiln
-// core` ticks, and gives every card that waits for a run its run; `kiln card`
-// writes a card that waits for a run, standing in for the API until it comes
-// (ADR 0044); `kiln run` carries out one run started by hand; and `kiln proxy`
-// starts the proxy with a credential from the credential command (ADR 0040).
+// core` ticks, gives every card that waits for a run the run of its stage, and
+// serves the screen on a loopback address (ADR 0044); `kiln card` writes a
+// card that waits for a run without the screen; `kiln run` carries out one run
+// started by hand; and `kiln proxy` starts the proxy with a credential from
+// the credential command (ADR 0040).
 // It only parses flags and calls internal/tick, internal/run and the seal.
 package main
 
@@ -43,8 +44,10 @@ const (
 )
 
 const usage = `usage:
-  kiln core --data <dir> --repo <bare repo> --model <id> --effort <low|medium|high>
+  kiln core --data <dir> --repo <bare repo> --model <id>
+            [--implement-model <id>] [--review-model <id>]
             [--image kiln-run] [--proxy kiln-proxy] [--spec-hosts <* or names, by commas>]
+            [--listen 127.0.0.1:4747, a loopback address; empty serves no screen]
   kiln card --data <dir> <text>
   kiln run --repo <bare repo> --commit <commit> --branch <branch> --run <id>
            --instruction <file> --model <id> --effort <low|medium|high> --runs <dir>
@@ -80,20 +83,28 @@ func coreCommand(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	fs.StringVar(&cfg.Data, "data", "", "the instance's data directory")
 	fs.StringVar(&cfg.Repo, "repo", "", "the instance's copy of the repo, a bare repo")
-	fs.StringVar(&cfg.Model, "model", "", "the model of the runs it starts, an exact identifier")
-	fs.StringVar(&cfg.Effort, "effort", "", "the effort of the runs it starts: low, medium or high")
+	fs.StringVar(&cfg.Model, "model", "", "the model of the spec runs it starts, an exact identifier; the effort is high")
+	fs.StringVar(&cfg.ImplementModel, "implement-model", "", "the model of the implement runs it starts, --model by default; the effort is medium")
+	fs.StringVar(&cfg.ReviewModel, "review-model", "", "the model of the review runs it starts, --model by default; the effort is high")
 	fs.StringVar(&cfg.Image, "image", "kiln-run", "the run image")
 	fs.StringVar(&cfg.Proxy, "proxy", proxyName, "the proxy container")
+	fs.StringVar(&cfg.Listen, "listen", "127.0.0.1:4747", "the loopback address the screen is served on; empty serves none")
 	hosts := fs.String("spec-hosts", "", "the hosts a spec run may reach: * for every public host, or names separated by commas; none by default")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if fs.NArg() > 0 || cfg.Data == "" || cfg.Repo == "" || cfg.Model == "" || cfg.Effort == "" {
+	if fs.NArg() > 0 || cfg.Data == "" || cfg.Repo == "" || cfg.Model == "" {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
 	if *hosts != "" {
 		cfg.Hosts = strings.Split(*hosts, ",")
+	}
+	if cfg.ImplementModel == "" {
+		cfg.ImplementModel = cfg.Model
+	}
+	if cfg.ReviewModel == "" {
+		cfg.ReviewModel = cfg.Model
 	}
 	cfg.WayOutImage, cfg.WayOutNetwork = wayOutImage, wayOutNetwork
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
