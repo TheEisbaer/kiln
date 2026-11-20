@@ -9,10 +9,14 @@ import (
 // The kinds of a card's documents, one per stage that runs: the file a run of
 // the stage writes to /kiln/out (ADR 0038).
 const (
-	KindSpec   = "spec"   // spec.md of a spec run
-	KindReport = "report" // report.md of an implement run
-	KindReview = "review" // review.md of a review run
+	KindSpec        = "spec"         // spec.md of a spec run
+	KindReport      = "report"       // report.md of an implement run
+	KindPullRequest = "pull-request" // pull-request.md of an implement run, the pull request's text (card 19)
+	KindReview      = "review"       // review.md of a review run
 )
+
+// kinds are the kinds of documents the store keeps.
+var kinds = map[string]bool{KindSpec: true, KindReport: true, KindPullRequest: true, KindReview: true}
 
 // Document is one document of a card: its kind, the run that wrote it, and
 // its text, exactly as the run wrote it.
@@ -86,12 +90,13 @@ func (s *Store) Runs(card int64) ([]RunAt, error) {
 }
 
 // Summary is what the board shows of a card: the card, the reason of its last
-// entry and whether that entry dropped it, its run in flight, if any, and the
-// kinds of the documents it has.
+// entry and whether that entry dropped it or the Git host merged it, its run
+// in flight, if any, and the kinds of the documents it has.
 type Summary struct {
 	Card
 	Reason   string
 	Dropped  bool
+	Merged   bool
 	InFlight *RunAt
 	Kinds    []string
 }
@@ -140,6 +145,7 @@ func (s *Store) Board() ([]Summary, error) {
 		if i, ok := at[card]; ok {
 			out[i].Reason = reason.String
 			out[i].Dropped = Dropped(out[i].State, cause, reason.String)
+			out[i].Merged = Merged(out[i].State, cause, reason.String)
 		}
 	}
 	if err := errorsOf(rows); err != nil {

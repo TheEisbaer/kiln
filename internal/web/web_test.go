@@ -331,7 +331,7 @@ func TestChange(t *testing.T) {
 	}
 	ch, body := get(2)
 	want := &changeJSON{Branch: "kiln/card-2", Repo: "/data/repo.git", Commits: []commitJSON{{"ab12cd3", "a save"}, {"0f0f0f0", "a first save"}},
-		Diff: changes[2].Diff, Size: 41, Command: "git --git-dir=/data/repo.git diff HEAD...kiln/card-2"}
+		Diff: changes[2].Diff, Size: 41, Command: "git --git-dir=/data/repo.git diff HEAD...kiln/card-2", Workflows: []string{}}
 	if !reflect.DeepEqual(ch, want) || strings.Contains(body, "<script>") {
 		t.Errorf("a card with a branch has the change %+v, want %+v", ch, want)
 	}
@@ -738,5 +738,116 @@ func TestBuildFromFile(t *testing.T) {
 	}
 	if got := boardBuild(); got != "" {
 		t.Errorf("the board's build without a file: %q, want none", got)
+	}
+}
+
+// TestPublish publishes from the screen: publish is offered only by a core
+// with a publish command; a change that touches workflow files is refused
+// with 409 and a sentence without the developer's yes, and taken with it, the
+// yes kept for the change's tip (ADR 0060); a card being published has no move
+// and says so; and its pull request shows once it has one, and after the merge.
+func TestPublish(t *testing.T) {
+	f := newFixture(t)
+	passed := store.State{Stage: store.Review, WaitsFor: store.Approval}
+	atHost := store.State{Stage: store.Review, WaitsFor: store.Host}
+	plain, touches := f.card(t, "Plain", passed), f.card(t, "Touches the workflows", passed)
+	changes := map[int64]*Change{
+		plain:   {Branch: "kiln/card-1", Tip: "c0ffee", Commits: []Commit{}, Workflows: nil},
+		touches: {Branch: "kiln/card-2", Tip: "beef", Commits: []Commit{}, Workflows: []string{".github/workflows/check.yml"}},
+	}
+	info := Info{Instance: "ab12cd34", Model: "m", Publishing: true,
+		Change: func(_ context.Context, card int64) (*Change, error) { return changes[card], nil }}
+	without := f.h
+	h, err := Handler(f.store, info, f.act, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h = h
+	post := func(id int64, body string) (*httptest.ResponseRecorder, map[string]any) {
+		t.Helper()
+		w := f.do(t, "POST", fmt.Sprintf("/api/cards/%d/decide", id), body)
+		return w, decode[map[string]any](t, w)
+	}
+	get := func(id int64) cardJSON {
+		t.Helper()
+		return decode[cardJSON](t, f.do(t, "GET", fmt.Sprintf("/api/cards/%d", id), ""))
+	}
+
+	// Publish comes first among the moves of a review that passed.
+	if c := get(plain); fmt.Sprint(c.Moves) != "[{publish none} {done none} {send-back required} {drop optional}]" {
+		t.Errorf("the moves of a review that passed: %v", c.Moves)
+	}
+	if c := get(touches); fmt.Sprint(c.Change.Workflows) != "[.github/workflows/check.yml]" {
+		t.Errorf("the change's workflow files: %+v", c.Change)
+	}
+
+	// A core without a publish command refuses it.
+	f.h = without
+	if w, got := post(plain, `{"action":"publish"}`); w.Code != 409 || fmt.Sprint(got["moves"]) != "[map[action:done note:none] map[action:send-back note:required] map[action:drop note:optional]]" {
+		t.Errorf("publish without a publish command: %d %v", w.Code, got)
+	}
+	f.h = h
+
+	// Without the yes, a change to the workflow files is refused, with the
+	// files; with it, it is published and the yes kept for its tip.
+	w, got := post(touches, `{"action":"publish"}`)
+	if w.Code != 409 || !strings.Contains(fmt.Sprint(got["error"]), "touches workflow files") ||
+		fmt.Sprint(got["workflows"]) != "[.github/workflows/check.yml]" || got["waits_for"] != "approval" {
+		t.Errorf("publish of a workflow change without the yes: %d %v", w.Code, got)
+	}
+	if c, _ := f.store.Card(touches); c.State != passed {
+		t.Errorf("the refused publish moved the card to %v", c.State)
+	}
+	if got["tip"] != "beef" {
+		t.Errorf("the refusal names the tip %v", got["tip"])
+	}
+	// A yes for a tip the page showed earlier is refused as well.
+	if w, got := post(touches, `{"action":"publish","workflow_yes":true,"tip":"c0ffee"}`); w.Code != 409 ||
+		!strings.Contains(fmt.Sprint(got["error"]), "no longer the one you said yes to") {
+		t.Errorf("a yes for another tip: %d %v", w.Code, got)
+	}
+	if w, got := post(touches, `{"action":"publish","workflow_yes":true,"tip":"beef"}`); w.Code != 200 || got["waits_for"] != "host" {
+		t.Errorf("publish with the yes: %d %v", w.Code, got)
+	}
+	if p, _ := f.store.Publication(touches); p.WorkflowYes != "beef" {
+		t.Errorf("the publication: %+v", p)
+	}
+	// A yes for a change without workflow files is not kept.
+	if w, _ := post(plain, `{"action":"publish","workflow_yes":true}`); w.Code != 200 {
+		t.Errorf("publish of a plain change: %d", w.Code)
+	}
+	if p, _ := f.store.Publication(plain); p.WorkflowYes != "" {
+		t.Errorf("the publication of a plain change: %+v", p)
+	}
+
+	// While it is published, the card says so and has no move.
+	c := get(plain)
+	if !c.Publishing || c.PullRequest != nil || len(c.Moves) != 0 {
+		t.Errorf("a card being published: publishing %v, %+v, moves %v", c.Publishing, c.PullRequest, c.Moves)
+	}
+	if w, got := post(plain, `{"action":"done"}`); w.Code != 409 || !strings.Contains(fmt.Sprint(got["error"]), "being published") {
+		t.Errorf("done while the card is published: %d %v", w.Code, got)
+	}
+
+	// Once it has its address, the pull request shows, and the card can be
+	// closed or sent back.
+	if _, err := f.store.KeepPullRequest(plain, "f00d", "https://git.example/pull/3"); err != nil {
+		t.Fatal(err)
+	}
+	c = get(plain)
+	if c.Publishing || c.PullRequest == nil || *c.PullRequest != (pullJSON{"https://git.example/pull/3", "f00d"}) ||
+		fmt.Sprint(c.Moves) != "[{done none} {send-back required} {drop optional}]" {
+		t.Errorf("a card at the Git host: %v %+v %v", c.Publishing, c.PullRequest, c.Moves)
+	}
+	if _, err := f.store.MoveWithReason(plain, atHost, store.State{Stage: store.Done, WaitsFor: store.Nothing}, store.CauseHost, store.MergedReason); err != nil {
+		t.Fatal(err)
+	}
+	c = get(plain)
+	if !c.Merged || c.PullRequest == nil || c.Dropped {
+		t.Errorf("a merged card: merged %v, %+v", c.Merged, c.PullRequest)
+	}
+	b := decode[boardJSON](t, f.do(t, "GET", "/api/board", ""))
+	if !b.Cards[0].Merged || b.Cards[1].Merged || b.Cards[1].WaitsFor != store.Host {
+		t.Errorf("the board: %+v", b.Cards)
 	}
 }

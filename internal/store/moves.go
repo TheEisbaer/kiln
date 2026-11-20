@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,9 +15,10 @@ const (
 	Approve  Action = "approve"   // approve a spec (ADR 0008)
 	Again    Action = "again"     // give a stage another run, or send a spec back
 	SendBack Action = "send-back" // send a review back to implement
-	MarkDone Action = "done"      // mark a card whose review passed done
+	MarkDone Action = "done"      // mark a card whose review passed done, or close one at the Git host
 	ToSpec   Action = "to-spec"   // send a stage that needs you back to a spec run
 	Drop     Action = "drop"      // drop a card that will not produce a change
+	Publish  Action = "publish"   // publish a card whose review passed (card 19)
 )
 
 // Note is what a move takes of the developer's note: none, one that may be
@@ -33,47 +35,86 @@ const (
 // MaxNote is the longest note a move takes, in bytes, after it is trimmed.
 const MaxNote = 16 << 10
 
-// move is one row of the table of moves: from a state, to a state, and what
-// it takes of a note.
+// Facts are what the table of moves looks at besides a card's state: whether
+// the card has a run in flight; whether the core has a publish command;
+// whether the card's last entry is a publishing that failed (PublishFailed);
+// and whether the card has a pull request's address, kept by its publishing.
+// The store reads all but Publishing; the core says that.
+type Facts struct {
+	InFlight      bool
+	Publishing    bool
+	PublishFailed bool
+	Published     bool
+}
+
+// move is one row of the table of moves: from a state, to a state, what it
+// takes of a note, and the facts it needs, if any.
 type move struct {
 	action Action
 	from   State
 	to     State
 	note   Note
+	when   func(Facts) bool
 }
 
 // dropped is where a drop leaves a card: in done, waiting for nothing.
 var dropped = State{Done, Nothing}
 
+// atHost is where publish leaves a card: in review, waiting for the Git host.
+var atHost = State{Review, Host}
+
+// publishing is a row's condition for publish: the core has a publish command.
+func publishing(f Facts) bool { return f.Publishing }
+
+// retried is the condition of publish from "needs you": the core has a
+// publish command, and the card needs you because its publishing failed.
+func retried(f Facts) bool { return f.Publishing && f.PublishFailed }
+
+// settled is the condition of a move from the Git host: the card has its pull
+// request's address, or the core cannot publish it, so that nothing is under
+// way. While the core publishes, a card has no move, as with a run in flight.
+func settled(f Facts) bool { return f.Published || !f.Publishing }
+
 // moves is the table of the developer's moves, the only ones Decide makes. A
 // card whose review passed waits in review for the developer's approval
-// (card 14); until Kiln publishes, the developer says that it is done. A spec
-// that waits for approval, or a review that passed, is sent back only with a
-// note that says what should change; a stage that needs you is run again or
-// sent back with one or without, to implement or to a new spec, when the
-// approved spec no longer fits (card 16). Drop is in the table from every
-// state but done, and only for a card without a run in flight (see Decide).
+// (card 14): with a publish command the developer publishes it, and in any
+// case can close it without publishing. A card at the Git host is sent back
+// to implement with a note, or closed (card 19). A spec that waits for
+// approval, or a review that passed, is sent back only with a note that says
+// what should change; a stage that needs you is run again or sent back with
+// one or without, to implement or to a new spec, when the approved spec no
+// longer fits (card 16). Drop is in the table from every state but done, and
+// only for a card without a run in flight (see Decide), and at the Git host
+// only as the moves from there.
 var moves = append([]move{
-	{Approve, State{Spec, Approval}, State{Implement, Run}, NoNote},
-	{Again, State{Spec, Approval}, State{Spec, Run}, RequiredNote},
-	{Again, State{Spec, Developer}, State{Spec, Run}, OptionalNote},
-	{Again, State{Implement, Developer}, State{Implement, Run}, OptionalNote},
-	{Again, State{Review, Developer}, State{Review, Run}, OptionalNote},
-	{SendBack, State{Review, Developer}, State{Implement, Run}, OptionalNote},
-	{MarkDone, State{Review, Approval}, State{Done, Nothing}, NoNote},
-	{SendBack, State{Review, Approval}, State{Implement, Run}, RequiredNote},
-	{ToSpec, State{Implement, Developer}, State{Spec, Run}, OptionalNote},
-	{ToSpec, State{Review, Developer}, State{Spec, Run}, OptionalNote},
+	{Approve, State{Spec, Approval}, State{Implement, Run}, NoNote, nil},
+	{Again, State{Spec, Approval}, State{Spec, Run}, RequiredNote, nil},
+	{Again, State{Spec, Developer}, State{Spec, Run}, OptionalNote, nil},
+	{Again, State{Implement, Developer}, State{Implement, Run}, OptionalNote, nil},
+	{Again, State{Review, Developer}, State{Review, Run}, OptionalNote, nil},
+	{SendBack, State{Review, Developer}, State{Implement, Run}, OptionalNote, nil},
+	{Publish, State{Review, Developer}, atHost, NoNote, retried},
+	{Publish, State{Review, Approval}, atHost, NoNote, publishing},
+	{MarkDone, State{Review, Approval}, State{Done, Nothing}, NoNote, nil},
+	{SendBack, State{Review, Approval}, State{Implement, Run}, RequiredNote, nil},
+	{MarkDone, atHost, State{Done, Nothing}, NoNote, settled},
+	{SendBack, atHost, State{Implement, Run}, RequiredNote, settled},
+	{ToSpec, State{Implement, Developer}, State{Spec, Run}, OptionalNote, nil},
+	{ToSpec, State{Review, Developer}, State{Spec, Run}, OptionalNote, nil},
 }, dropRows()...)
 
 // dropRows are the rows of drop: from every pairing but done, in the order of
-// the stages.
+// the stages; from the Git host as the other moves from there.
 func dropRows() []move {
 	var rows []move
 	for _, st := range []Stage{Backlog, Spec, Implement, Review} {
 		for _, w := range []WaitsFor{Developer, Room, Run, Approval, Host} {
 			if from := (State{st, w}); valid[from] {
-				rows = append(rows, move{Drop, from, dropped, OptionalNote})
+				var when func(Facts) bool
+				if from == atHost {
+					when = settled
+				}
+				rows = append(rows, move{Drop, from, dropped, OptionalNote, when})
 			}
 		}
 	}
@@ -94,16 +135,33 @@ var ErrRefused = errors.New("the move is not in the table for the card's state")
 // it is required, one given to a move that takes none, or one too long.
 var ErrNote = errors.New("the note does not fit the move")
 
-// Moves are the moves the table allows from a state, in the table's order; with
-// a run in flight there is no drop.
-func Moves(from State, inFlight bool) []Allowed {
+// allows reports whether a row is in the table for a state and its facts;
+// with a run in flight there is no drop.
+func (m move) allows(from State, f Facts) bool {
+	return m.from == from && !(m.action == Drop && f.InFlight) && (m.when == nil || m.when(f))
+}
+
+// Moves are the moves the table allows from a state with its facts, in the
+// table's order.
+func Moves(from State, f Facts) []Allowed {
 	var out []Allowed
 	for _, m := range moves {
-		if m.from == from && !(m.action == Drop && inFlight) {
+		if m.allows(from, f) {
 			out = append(out, Allowed{m.action, m.note})
 		}
 	}
 	return out
+}
+
+// Moves are the moves the table allows a card as it is now, for a core that
+// has a publish command when publishing is set.
+func (s *Store) Moves(c Card, publishing bool) ([]Allowed, error) {
+	f, err := readFacts(s.db, c.ID)
+	if err != nil {
+		return nil, err
+	}
+	f.Publishing = publishing
+	return Moves(c.State, f), nil
 }
 
 // DroppedReason is the reason on the entry of a drop, before the developer's
@@ -129,14 +187,30 @@ func (e Entry) Note() string {
 	return e.Reason
 }
 
-// Decide makes one of the developer's moves on a card, by the table, with the
-// cause developer and the note, trimmed, as the reason of its entry; a drop's
-// reason is DroppedReason, followed by the note. The card's state, and whether
-// it has a run in flight, are read and changed in the one transaction of
-// change, so that a move is judged against the state it changes. A move the
-// table does not have for the card's state is refused with ErrRefused, a note
-// that does not fit the move with ErrNote, and the card is returned as it is.
+// Options are what a move depends on besides the card and the note: whether
+// the core has a publish command, and, for publish, the commit of the card's
+// branch whose workflow files the developer said yes to, if any (ADR 0060).
+type Options struct {
+	Publishing  bool
+	WorkflowYes string
+}
+
+// Decide makes one of the developer's moves on a card, by the table of a core
+// without a publish command (see DecideWith).
 func (s *Store) Decide(id int64, action Action, note string) (Card, error) {
+	return s.DecideWith(id, action, note, Options{})
+}
+
+// DecideWith makes one of the developer's moves on a card, by the table, with
+// the cause developer and the note, trimmed, as the reason of its entry; a
+// drop's reason is DroppedReason, followed by the note. The card's state and
+// its facts are read and changed in the one transaction of change, so that a
+// move is judged against the state it changes. A move the table does not have
+// for the card's state is refused with ErrRefused, a note that does not fit
+// the move with ErrNote, and the card is returned as it is. Publish writes
+// the card's publication anew in the same transaction: the developer's yes,
+// if any, and no commit and no address yet.
+func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Card, error) {
 	note = strings.TrimSpace(note)
 	if len(note) > MaxNote {
 		c, err := s.Card(id)
@@ -154,9 +228,11 @@ func (s *Store) Decide(id int64, action Action, note string) (Card, error) {
 			reason += ": " + note
 		}
 	}
-	return s.change(false, id, "", func(from State, inFlight bool) (State, error) {
+	e := edit{id: id, cause: CauseDeveloper, reason: reason}
+	e.next = func(from State, f Facts) (State, error) {
+		f.Publishing = o.Publishing
 		for _, m := range moves {
-			if m.action != action || m.from != from || (m.action == Drop && inFlight) {
+			if m.action != action || !m.allows(from, f) {
 				continue
 			}
 			switch {
@@ -167,9 +243,21 @@ func (s *Store) Decide(id int64, action Action, note string) (Card, error) {
 			}
 			return m.to, nil
 		}
-		if action == Drop && inFlight {
+		switch {
+		case action == Drop && f.InFlight:
 			return State{}, fmt.Errorf("%w: a card with a run in flight is not dropped", ErrRefused)
+		case from == atHost && !settled(f):
+			return State{}, fmt.Errorf("%w: the card is being published; it has no move until that ends", ErrRefused)
 		}
 		return State{}, fmt.Errorf("%w: %q from %s waiting for %s", ErrRefused, action, from.Stage, from.WaitsFor)
-	}, CauseDeveloper, reason, nil)
+	}
+	if action == Publish {
+		e.write = func(tx *sql.Tx, card int64) error {
+			_, err := tx.Exec(`INSERT INTO publishes (card, workflow_yes, commit_id, address) VALUES (?, ?, NULL, NULL)
+				ON CONFLICT (card) DO UPDATE SET workflow_yes = excluded.workflow_yes, commit_id = NULL, address = NULL`,
+				card, sql.NullString{String: o.WorkflowYes, Valid: o.WorkflowYes != ""})
+			return err
+		}
+	}
+	return s.change(e)
 }

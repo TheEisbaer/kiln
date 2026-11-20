@@ -29,8 +29,12 @@ var wantMoves = map[Action]map[State]row{
 	"send-back": {
 		{"review", "developer"}: {State{"implement", "run"}, "optional"},
 		{"review", "approval"}:  {State{"implement", "run"}, "required"},
+		{"review", "host"}:      {State{"implement", "run"}, "required"},
 	},
-	"done": {{"review", "approval"}: {State{"done", "nothing"}, "none"}},
+	"done": {
+		{"review", "approval"}: {State{"done", "nothing"}, "none"},
+		{"review", "host"}:     {State{"done", "nothing"}, "none"},
+	},
 	"to-spec": {
 		{"implement", "developer"}: {State{"spec", "run"}, "optional"},
 		{"review", "developer"}:    {State{"spec", "run"}, "optional"},
@@ -53,7 +57,9 @@ var wantMoves = map[Action]map[State]row{
 // that is not an action included, is refused. A refused move changes nothing.
 func TestDecide(t *testing.T) {
 	s := open(t)
-	actions := []Action{"approve", "again", "send-back", "done", "to-spec", "drop", ""}
+	// Without a publish command the table has no publish, and a card at the
+	// Git host, which a core with one left there, has its moves.
+	actions := []Action{"approve", "again", "send-back", "done", "to-spec", "drop", "publish", ""}
 	for from := range validPairings {
 		for _, action := range actions {
 			for _, note := range []string{"", " \n ", "  Use the store's words.\n"} {
@@ -142,7 +148,7 @@ func TestDropInFlight(t *testing.T) {
 		}
 		id := fmt.Sprintf("r%d", i)
 		mustAddRun(t, s, theRun(card.ID, id))
-		if got := Moves(from, true); len(got) != 0 {
+		if got := Moves(from, Facts{InFlight: true}); len(got) != 0 {
 			t.Errorf("the moves from %v with a run in flight are %v", from, got)
 		}
 		if got, err := s.Decide(card.ID, Drop, "not needed"); !errors.Is(err, ErrRefused) || got.State != from {
@@ -228,7 +234,7 @@ func TestMoves(t *testing.T) {
 				want = append(want, Allowed{action, r.note})
 			}
 		}
-		if got := Moves(from, false); !reflect.DeepEqual(got, want) {
+		if got := Moves(from, Facts{}); !reflect.DeepEqual(got, want) {
 			t.Errorf("Moves(%v) = %v, want %v", from, got, want)
 		}
 	}
