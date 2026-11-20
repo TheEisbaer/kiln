@@ -50,6 +50,7 @@ const usage = `usage:
             [--listen 127.0.0.1:4747, a loopback address; empty serves no screen]
             [--page <file>, read on every request instead of the embedded page]
             [--runs 3, the most runs in flight at once, from 1 to 8]
+            [--publish-command <command>, run with sh -c to publish a card; empty publishes none]
   kiln card --data <dir> <text>
   kiln run --repo <bare repo> --commit <commit> --branch <branch> --run <id>
            --instruction <file> --model <id> --effort <low|medium|high> --runs <dir>
@@ -93,6 +94,7 @@ func coreCommand(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.Listen, "listen", "127.0.0.1:4747", "the loopback address the screen is served on; empty serves none")
 	fs.StringVar(&cfg.Page, "page", "", "a file the screen's page is read from on every request instead of the embedded one, for work on the screen")
 	fs.IntVar(&cfg.Runs, "runs", tick.DefaultRuns, fmt.Sprintf("the most runs in flight at once, from 1 to %d", tick.MaxRuns))
+	fs.StringVar(&cfg.PublishCommand, "publish-command", "", "the developer's command that publishes a card, run with sh -c in the data directory; empty, no card is published")
 	hosts := fs.String("spec-hosts", "", "the hosts a spec run may reach: * for every public host, or names separated by commas; none by default")
 	if err := fs.Parse(args); err != nil {
 		return 2

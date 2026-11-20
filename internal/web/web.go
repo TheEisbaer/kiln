@@ -141,20 +141,26 @@ type Info struct {
 	// policy, instead of the embedded one, for work on the screen. Empty, the
 	// embedded page is served.
 	Page string
+	// Publishing is set when the core has a publish command: the table of
+	// moves then has publish (card 19).
+	Publishing bool
 }
 
 // Change is where a card's change is and what it is: its branch in the
-// instance's copy of the repo, the branch's commits since it left main, newest
-// first, and the diff from where it left main to its tip. A diff over the
-// limit is not given: only its size, and the command that prints it.
+// instance's copy of the repo and the commit it is at, the branch's commits
+// since it left main, newest first, the diff from where it left main to its
+// tip, and the workflow files it touches (ADR 0060). A diff over the limit is
+// not given: only its size, and the command that prints it.
 type Change struct {
-	Branch   string
-	Repo     string
-	Commits  []Commit
-	Diff     string
-	Size     int64
-	TooLarge bool
-	Command  string
+	Branch    string
+	Repo      string
+	Tip       string
+	Commits   []Commit
+	Diff      string
+	Size      int64
+	TooLarge  bool
+	Command   string
+	Workflows []string
 }
 
 // Commit is one commit of a card's branch: its short hash and its title.
@@ -287,6 +293,7 @@ type (
 		WaitsFor  store.WaitsFor `json:"waits_for"`
 		Reason    string         `json:"reason"`
 		Dropped   bool           `json:"dropped"`
+		Merged    bool           `json:"merged"`
 		Run       *flightJSON    `json:"run"`
 		Documents []string       `json:"documents"`
 	}
@@ -305,21 +312,32 @@ type (
 		Documents []documentJSON `json:"documents"`
 		Activity  []activityJSON `json:"activity"`
 		Change    *changeJSON    `json:"change"`
-		Now       time.Time      `json:"now"`
+		// The card's pull request, once it has an address, and whether the
+		// core is publishing it, from when the developer publishes until it
+		// has one (card 19).
+		PullRequest *pullJSON `json:"pull_request"`
+		Publishing  bool      `json:"publishing"`
+		Now         time.Time `json:"now"`
+	}
+	pullJSON struct {
+		Address string `json:"address"`
+		Commit  string `json:"commit"`
 	}
 	moveJSON struct {
 		Action store.Action `json:"action"`
 		Note   store.Note   `json:"note"`
 	}
 	changeJSON struct {
-		Branch   string       `json:"branch"`
-		Repo     string       `json:"repo"`
-		Commits  []commitJSON `json:"commits"`
-		Diff     string       `json:"diff"`
-		Size     int64        `json:"size"`
-		TooLarge bool         `json:"too_large"`
-		Command  string       `json:"command"`
-		Error    string       `json:"error,omitempty"`
+		Branch    string       `json:"branch"`
+		Repo      string       `json:"repo"`
+		Tip       string       `json:"tip"`
+		Commits   []commitJSON `json:"commits"`
+		Diff      string       `json:"diff"`
+		Size      int64        `json:"size"`
+		TooLarge  bool         `json:"too_large"`
+		Command   string       `json:"command"`
+		Workflows []string     `json:"workflows"`
+		Error     string       `json:"error,omitempty"`
 	}
 	commitJSON struct {
 		Hash  string `json:"hash"`
@@ -376,7 +394,7 @@ func started(t time.Time) *time.Time {
 
 func tile(s store.Summary) tileJSON {
 	t := tileJSON{ID: s.ID, Title: title(s.Text), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
-		Dropped: s.Dropped, Documents: s.Kinds}
+		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds}
 	if t.Documents == nil {
 		t.Documents = []string{}
 	}
@@ -449,13 +467,13 @@ func (h *handler) change(ctx context.Context, card int64) *changeJSON {
 	}
 	ch, err := h.info.Change(ctx, card)
 	if err != nil {
-		return &changeJSON{Commits: []commitJSON{}, Error: run.Printable(err.Error())}
+		return &changeJSON{Commits: []commitJSON{}, Workflows: []string{}, Error: run.Printable(err.Error())}
 	}
 	if ch == nil {
 		return nil
 	}
-	out := &changeJSON{Branch: ch.Branch, Repo: ch.Repo, Commits: []commitJSON{}, Diff: ch.Diff, Size: ch.Size,
-		TooLarge: ch.TooLarge, Command: ch.Command}
+	out := &changeJSON{Branch: ch.Branch, Repo: ch.Repo, Tip: ch.Tip, Commits: []commitJSON{}, Diff: ch.Diff, Size: ch.Size,
+		TooLarge: ch.TooLarge, Command: ch.Command, Workflows: append([]string{}, ch.Workflows...)}
 	for _, c := range ch.Commits {
 		out.Commits = append(out.Commits, commitJSON{Hash: c.Hash, Title: c.Title})
 	}
@@ -476,12 +494,24 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	if err != nil {
 		return cardJSON{}, err
 	}
+	pub, err := h.store.Publication(c.ID)
+	if err != nil {
+		return cardJSON{}, err
+	}
+	moves, err := h.store.Moves(c, h.info.Publishing)
+	if err != nil {
+		return cardJSON{}, err
+	}
 	sum := store.Summary{Card: c}
 	out := cardJSON{Text: c.Text, History: []entryJSON{}, Runs: []runJSON{},
-		Documents: []documentJSON{}, Activity: []activityJSON{}, Now: time.Now().UTC()}
+		Documents: []documentJSON{}, Activity: []activityJSON{}, Now: time.Now().UTC(), Moves: movesJSON(moves)}
+	// The pull request shows while the card is at the Git host, and on a card
+	// the Git host merged.
+	atHost := c.State == store.State{Stage: store.Review, WaitsFor: store.Host}
 	if len(history) > 0 {
 		last := history[len(history)-1]
 		sum.Reason, sum.Dropped = last.Reason, store.Dropped(last.State, last.Cause, last.Reason)
+		sum.Merged = store.Merged(last.State, last.Cause, last.Reason)
 		// The note that the run the card waits for is told, as the tick
 		// reads it (store.Note).
 		if c.WaitsFor == store.Run {
@@ -500,7 +530,10 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 			sum.InFlight = &r
 		}
 	}
-	out.Moves = movesJSON(store.Moves(c.State, sum.InFlight != nil))
+	if pub.Address != "" && (atHost || sum.Merged) {
+		out.PullRequest = &pullJSON{Address: pub.Address, Commit: pub.Commit}
+	}
+	out.Publishing = atHost && pub.Address == "" && h.info.Publishing
 	seen := map[string]bool{}
 	for _, d := range docs {
 		out.Documents = append(out.Documents, documentJSON{Kind: d.Kind, Run: d.Run, Text: d.Text})
@@ -557,14 +590,44 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Action store.Action `json:"action"`
-		Note   string       `json:"note"`
+		Action      store.Action `json:"action"`
+		Note        string       `json:"note"`
+		WorkflowYes bool         `json:"workflow_yes"`
+		// The tip of the change the page showed when the developer said yes.
+		Tip string `json:"tip"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		fail(w, http.StatusBadRequest, `the body must be {"action": …, "note": …}, the note optional`)
 		return
 	}
-	c, err := h.store.Decide(id, body.Action, body.Note)
+	opts := store.Options{Publishing: h.info.Publishing}
+	if body.Action == store.Publish {
+		// A change to the workflow files is published only after the
+		// developer has seen them and said yes, for this very change, which
+		// the yes is kept with (ADR 0060).
+		var ch *Change
+		var err error
+		if h.info.Change != nil {
+			ch, err = h.info.Change(r.Context(), id)
+		}
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "the change cannot be read, so it is not published: "+err.Error())
+			return
+		}
+		if ch != nil && len(ch.Workflows) > 0 {
+			switch {
+			case !body.WorkflowYes:
+				h.refuse(w, id, "this change touches workflow files, which the Git host runs as soon as it is published; "+
+					`publish it with {"action": "publish", "workflow_yes": true, "tip": …} once you have read them`, ch.Workflows, ch.Tip)
+				return
+			case body.Tip != ch.Tip:
+				h.refuse(w, id, "the change is no longer the one you said yes to; read its workflow files again", ch.Workflows, ch.Tip)
+				return
+			}
+			opts.WorkflowYes = ch.Tip
+		}
+	}
+	c, err := h.store.DecideWith(id, body.Action, body.Note, opts)
 	switch {
 	case errors.Is(err, store.ErrNoCard):
 		fail(w, http.StatusNotFound, fmt.Sprintf("no card %d", id))
@@ -575,13 +638,7 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), store.ErrNote.Error()+": "))
 		return
 	case errors.Is(err, store.ErrRefused):
-		inFlight, ferr := h.store.InFlight(c.ID)
-		if ferr != nil {
-			fail(w, http.StatusInternalServerError, ferr.Error())
-			return
-		}
-		reply(w, http.StatusConflict, map[string]any{"error": err.Error(), "stage": c.Stage, "waits_for": c.WaitsFor,
-			"moves": movesJSON(store.Moves(c.State, inFlight != nil))})
+		h.refuse(w, c.ID, err.Error(), nil, "")
 		return
 	case err != nil:
 		fail(w, http.StatusInternalServerError, err.Error())
@@ -594,6 +651,27 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 	}
 	out.Change = h.change(r.Context(), c.ID)
 	reply(w, http.StatusOK, out)
+}
+
+// refuse answers a move that is refused with 409: the sentence, the card's
+// state and the moves it allows, and the workflow files that need the
+// developer's yes and the tip of the change they are in, if that is why.
+func (h *handler) refuse(w http.ResponseWriter, id int64, msg string, workflows []string, tip string) {
+	c, err := h.store.Card(id)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	moves, err := h.store.Moves(c, h.info.Publishing)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := map[string]any{"error": run.Printable(msg), "stage": c.Stage, "waits_for": c.WaitsFor, "moves": movesJSON(moves)}
+	if workflows != nil {
+		out["workflows"], out["tip"] = workflows, tip
+	}
+	reply(w, http.StatusConflict, out)
 }
 
 // movesJSON are the moves a card's state allows, each with what it takes of a

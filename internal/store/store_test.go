@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 7"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 8"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 7 was opened")
+		t.Fatal("a store of version 8 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 7") || !strings.Contains(msg, "version 6") {
+	if msg := err.Error(); !strings.Contains(msg, "version 8") || !strings.Contains(msg, "version 7") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 7 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 7 and 0", v, tables)
+	if v != 8 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 8 and 0", v, tables)
 	}
 }
 
@@ -811,7 +811,7 @@ func TestMigrateV2(t *testing.T) {
 			line = withoutSince(line, migrated)
 			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") &&
 				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") && !strings.HasPrefix(line, "runs | ") &&
-				!strings.HasPrefix(line, "cards | ") {
+				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") {
 				out = append(out, line)
 			}
 		}
@@ -956,7 +956,8 @@ func TestMigrateV3(t *testing.T) {
 			}
 			line = withoutSince(line, migrated)
 			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") && !strings.HasPrefix(line, "runs | ") &&
-				!strings.HasPrefix(line, "cards | ") {
+				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") &&
+				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") {
 				out = append(out, line)
 			}
 		}
@@ -1147,8 +1148,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 6 {
-		t.Fatalf("the store is version %d after Open, want 6", v)
+	if v := userVersion(t, s); v != version || version != 7 {
+		t.Fatalf("the store is version %d after Open, want 7", v)
 	}
 	// What version 1 held is still there, and has no run or reason.
 	card, err := s.Card(1)

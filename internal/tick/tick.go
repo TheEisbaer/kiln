@@ -8,7 +8,9 @@
 // review (see stages). The data directory holds the store, store.db; the lock,
 // lock; the runs' records, runs/<id>/, as internal/run writes them; and the
 // runs' instructions, instructions/<id>.md: the installed Kiln's instruction
-// for the run's stage, followed by what the run is told of its card.
+// for the run's stage, followed by what the run is told of its card; and the
+// pull request's text of a card being published, publish/card-<id>.md
+// (publish.go).
 //
 // Only internal/seal drives the container engine; this package calls it and
 // internal/run.
@@ -67,6 +69,9 @@ type Config struct {
 	Page string
 	// The most runs of this instance in flight at once, from 1 to MaxRuns.
 	Runs int
+	// The developer's publish command, run with sh -c to publish a card
+	// (card 19, see runPublish); empty, no card is published.
+	PublishCommand string
 }
 
 // The limit of runs in flight: DefaultRuns unless `kiln core --runs` says
@@ -259,8 +264,11 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	var mu sync.Mutex
 	out, errOut = lockedWriter{&mu, out}, lockedWriter{&mu, errOut}
 	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity(),
-		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}}
+		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}, publishing: map[int64]bool{}}
 	fmt.Fprintf(out, "kiln core: instance %s, data %s, up to %d runs at once\n", instance, cfg.Data, cfg.Runs)
+	if cfg.PublishCommand != "" {
+		fmt.Fprintln(out, "kiln core: a card is published with the publish command")
+	}
 	if cfg.Listen != "" {
 		stop, err := c.serve()
 		if err != nil {
@@ -320,6 +328,15 @@ type core struct {
 	// the store, such as one whose branch Carry refuses; the tick takes them
 	// after the other cards. Like followed, it is only kept in memory.
 	refused map[int64]bool
+	// publishing are the cards a publisher publishes, from before it starts
+	// until it has returned, a guard like followed (publish.go).
+	publishing map[int64]bool
+
+	// fetchMu guards main, the fetching of main; checked is the rounds of it
+	// after which the tick last looked for merged cards, read by the tick only.
+	fetchMu sync.Mutex
+	main    mainState
+	checked int
 }
 
 // b2i is 1 for true and 0 for false.
@@ -388,7 +405,7 @@ func (c *core) serve() (func(), error) {
 		return nil, fmt.Errorf("the screen: %w", err)
 	}
 	info := web.Info{Instance: c.instance, Repo: c.Repo, Model: c.model(store.Spec), ImplementModel: c.model(store.Implement),
-		ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change, Page: c.Page}
+		ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change, Page: c.Page, Publishing: c.PublishCommand != ""}
 	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()
@@ -409,11 +426,12 @@ func (c *core) serve() (func(), error) {
 	}, nil
 }
 
-// tick is one tick: the sweep, then each card that waits for a run, in the
-// order of store.Waiting, except that a card whose last start failed before
-// its run was in the store comes after the others: its follower takes a place
-// until it fails, and would otherwise keep the cards behind it from starting
-// on every tick. A card whose run is followed is left alone. A card
+// tick is one tick: the sweep; main brought up to date and the cards at the
+// Git host looked after (atHostRound); then each card that waits for a run, in
+// the order of store.Waiting, except that a card whose last start failed
+// before its run was in the store comes after the others: its follower takes
+// a place until it fails, and would otherwise keep the cards behind it from
+// starting on every tick. A card whose run is followed is left alone. A card
 // with a run in flight in the store gets a follower, also when more than
 // Runs are in flight, as after a restart; a run is started only while fewer
 // than Runs are in flight. An error of one card is printed and the next card
@@ -429,6 +447,18 @@ func (c *core) tick(ctx context.Context) error {
 	inFlight, err := c.store.InFlightRuns()
 	if err != nil {
 		return err
+	}
+	// Runs start from main as origin has it (card 19).
+	starts := false
+	for _, id := range cards {
+		_, ok := inFlight[id]
+		starts = starts || !ok
+	}
+	if err := c.atHostRound(ctx, starts); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		fmt.Fprintln(c.errOut, "kiln core: publishing:", run.Printable(err.Error()))
 	}
 	c.mu.Lock()
 	refused := maps.Clone(c.refused)
@@ -702,18 +732,25 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 	case err != nil:
 		return err
 	}
-	var doc run.Document
+	var doc, text run.Document
 	var readErr error
 	if verdict.Finished {
 		doc, readErr = c.engine.ReadDocument(in.Runs, row.ID, f.stage.kind)
+		if readErr == nil && f.card.Stage == store.Implement {
+			text, readErr = c.engine.ReadDocument(in.Runs, row.ID, store.KindPullRequest)
+		}
 	}
 	d, err := destination(f.card.Stage, verdict, doc, readErr)
 	if err != nil {
-		return fmt.Errorf("the %s of run %s: %w; it is read again on the next tick", f.stage.kind, row.ID, err)
+		return fmt.Errorf("the documents of run %s: %w; they are read again on the next tick", row.ID, err)
+	}
+	var kept *store.Doc
+	if f.card.Stage == store.Implement && verdict.Finished {
+		d, kept = d.withText(text)
 	}
 
 	f.mark("before-end")
-	if _, err := c.store.EndRun(row.ID, d.ending, d.reason, d.to, d.doc); err != nil {
+	if _, err := c.store.EndRun(row.ID, d.ending, d.reason, d.to, d.doc, kept); err != nil {
 		return err
 	}
 	f.mark("after-end")
@@ -762,6 +799,20 @@ type end struct {
 	to     store.State
 	reason string
 	doc    *store.Doc
+}
+
+// withText is an implement run's end with the pull request's text it wrote,
+// /kiln/out/pull-request.md, which is kept as its report is: whenever it can
+// be read, a missing one no problem, and another problem said in the reason
+// without stopping the card (card 19).
+func (d end) withText(text run.Document) (end, *store.Doc) {
+	switch {
+	case text.Problem == "":
+		return d, &store.Doc{Kind: store.KindPullRequest, Text: string(text.Text)}
+	case !text.Missing:
+		d.reason = text.Problem + "; " + d.reason
+	}
+	return d, nil
 }
 
 // destination is where a card goes at its run's end, from the stage, the run's
@@ -985,10 +1036,23 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 		if err != nil {
 			return "", "", err
 		}
+		// A run that starts from a commit that still holds Kiln's conflict
+		// markers, from its merge of main into the card's branch, is told
+		// which files they are in (card 19).
+		collide, err := markedFiles(ctx, c.Repo, row.Commit, card.ID)
+		if err != nil {
+			return "", "", err
+		}
 		// A review that passed is the newest document of a card in implement
-		// only when the developer sent the change back from it.
-		if v := verdictLine(last.Text); last.Kind == store.KindReview && (v == goesBack || v == passes) {
+		// when the developer sent the change back from it, or when main moved
+		// under it; it has nothing to fix then, and is told only after the
+		// developer's send-back.
+		v := verdictLine(last.Text)
+		if last.Kind == store.KindReview && (v == goesBack || (v == passes && len(collide) == 0)) {
 			parts = append(parts, "## The last review", fenced(last.Text, "markdown"))
+		}
+		if len(collide) > 0 {
+			parts = append(parts, mainMovedHeading, mainMoved(card.ID, collide))
 		}
 		return told(withNote(parts, note)), "", nil
 	}
@@ -1000,6 +1064,23 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 		return "", "the change is " + mebibytes(size) + " as a diff, more than 1 MiB; no review run is started", nil
 	}
 	return told(withNote(append(parts, "## The change", fenced(diff, "diff")), note)), "", nil
+}
+
+// mainMovedHeading begins the part of a run that starts from Kiln's merge of
+// main into its card's branch.
+const mainMovedHeading = "## What changed in main"
+
+// mainMoved is what a run that starts from Kiln's merge of main into its
+// card's branch is told: which files collide, fenced, since the names are the
+// repo's, and what it has to do with them.
+func mainMoved(card int64, files []string) string {
+	return "While the card waited for the Git host, main moved, and the change no longer applied to it. These files still collide:\n\n" +
+		fenced(strings.Join(files, "\n"), "text") + "\n" +
+		"You start from the card's branch, into which Kiln merged main as it was then. Every other file is merged already. " +
+		"Each file above holds both versions where they collide, between conflict markers: the branch's after " +
+		"`<<<<<<< refs/heads/" + branchOf(card) + "`, the version they both started from after `|||||||`, and main's " +
+		"after `=======`, up to `>>>>>>> refs/heads/main`. Bring the change onto the present main: in each of these " +
+		"files keep what main changed, make it do what the approved spec asks, and leave no conflict marker behind."
 }
 
 // withNote is the parts with the developer's note after them, if there is one.
@@ -1164,8 +1245,11 @@ func (c *core) change(ctx context.Context, card int64) (*web.Change, error) {
 	if err != nil {
 		return nil, err
 	}
-	ch := web.Change{Branch: branch, Repo: c.Repo, Commits: []web.Commit{},
+	ch := web.Change{Branch: branch, Repo: c.Repo, Tip: tip, Commits: []web.Commit{},
 		Command: "git --git-dir=" + shellWord(c.Repo) + " diff HEAD..." + branch}
+	if ch.Workflows, err = workflowFiles(ctx, c.Repo, tip); err != nil {
+		return nil, err
+	}
 	for _, line := range strings.Split(commits, "\n") {
 		if hash, title, ok := strings.Cut(line, "\x00"); ok {
 			ch.Commits = append(ch.Commits, web.Commit{Hash: hash, Title: title})
