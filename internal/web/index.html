@@ -814,7 +814,7 @@ let stripKey = null;
 function renderStrip(cards) {
   const needs = cards.filter(needsYou);
   const approvals = cards.filter((c) => c.waits_for === "approval");
-  const key = JSON.stringify([needs.map((c) => [c.id, c.title, c.reason]), approvals.map((c) => [c.id, c.title, c.reason])]);
+  const key = JSON.stringify([needs.map((c) => [c.id, c.headline, c.reason]), approvals.map((c) => [c.id, c.headline, c.reason])]);
   if (key === stripKey) return;
   stripKey = key;
   const strip = $("strip");
@@ -832,7 +832,7 @@ function renderStrip(cards) {
     for (const c of list) {
       const r = el("div", "row");
       r.tabIndex = 0;
-      r.append(el("span", "id", "#" + c.id), el("span", "t", c.title || "(no title)"));
+      r.append(el("span", "id", "#" + c.id), el("span", "t", c.headline || "(no title)"));
       const w = el("span", "why");
       why(w, c);
       r.append(w);

@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/store"
@@ -289,6 +290,7 @@ type (
 	tileJSON struct {
 		ID        int64          `json:"id"`
 		Title     string         `json:"title"`
+		Headline  string         `json:"headline"`
 		Stage     store.Stage    `json:"stage"`
 		WaitsFor  store.WaitsFor `json:"waits_for"`
 		Reason    string         `json:"reason"`
@@ -385,6 +387,56 @@ func title(text string) string {
 	return ""
 }
 
+// headlineMax is the most characters a headline has, its ellipsis included.
+const headlineMax = 90
+
+// headline is what the strip shows of a card's title: its first sentence,
+// cut to at most headlineMax characters with an ellipsis. The cut steps back
+// to the last white space when that lies past half of it, and drops trailing
+// white space and punctuation before the ellipsis.
+func headline(title string) string {
+	r := []rune(title)
+	r = r[:sentenceEnd(r)]
+	if len(r) <= headlineMax {
+		return string(r)
+	}
+	cut := headlineMax - 1
+	for i := cut - 1; i >= headlineMax/2; i-- {
+		if unicode.IsSpace(r[i]) {
+			cut = i
+			break
+		}
+	}
+	return strings.TrimRightFunc(string(r[:cut]), func(c rune) bool {
+		return unicode.IsSpace(c) || strings.ContainsRune(",;:-–—", c)
+	}) + "…"
+}
+
+// sentenceEnd is the length of the first sentence of r, a simplified form of
+// the sentence rules of Unicode Standard Annex #29: a sentence ends after
+// ., ! or ?, any closing brackets and quotes, and white space (SB11), but not
+// a full stop whose white space is followed by a lowercase letter (SB8).
+func sentenceEnd(r []rune) int {
+	for i, c := range r {
+		if c != '.' && c != '!' && c != '?' {
+			continue
+		}
+		end := i + 1
+		for end < len(r) && (unicode.In(r[end], unicode.Pe, unicode.Pf) || r[end] == '"' || r[end] == '\'') {
+			end++
+		}
+		next := end
+		for next < len(r) && unicode.IsSpace(r[next]) {
+			next++
+		}
+		if next == end || next == len(r) || c == '.' && unicode.IsLower(r[next]) {
+			continue
+		}
+		return end
+	}
+	return len(r)
+}
+
 func started(t time.Time) *time.Time {
 	if t.IsZero() {
 		return nil
@@ -393,7 +445,7 @@ func started(t time.Time) *time.Time {
 }
 
 func tile(s store.Summary) tileJSON {
-	t := tileJSON{ID: s.ID, Title: title(s.Text), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
+	t := tileJSON{ID: s.ID, Title: title(s.Text), Headline: headline(title(s.Text)), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
 		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds}
 	if t.Documents == nil {
 		t.Documents = []string{}
