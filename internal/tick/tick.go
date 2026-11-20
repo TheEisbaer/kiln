@@ -8,7 +8,9 @@
 // review (see stages). The data directory holds the store, store.db; the lock,
 // lock; the runs' records, runs/<id>/, as internal/run writes them; and the
 // runs' instructions, instructions/<id>.md: the installed Kiln's instruction
-// for the run's stage, followed by what the run is told of its card.
+// for the run's stage, followed by what the run is told of its card; and the
+// pull request's text of a card being published, publish/card-<id>.md
+// (publish.go).
 //
 // Only internal/seal drives the container engine; this package calls it and
 // internal/run.
