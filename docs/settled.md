@@ -34,6 +34,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - Runs reach nothing. The core places the code in a run and collects the change from it through the container engine (ADR 0038), so "reachable from them" now means reachable from the core.
 - A spec run's working tree is not saved. No save container, nothing taken into the instance's copy, no branch; `result.json` says `"saved": "not saved"` (card 11).
 - An implement run's working tree is saved as one commit on `kiln/card-<id>`; a second implement run starts from the branch's tip. A review run starts from the tip as well, and its working tree is not saved (card 14, 2026-11-19).
+- The save of an implement run has as its message the pull request title that the approved spec names on its line `` Pull request title: `…` ``, with `Kiln-Run: <id>` as its body. A spec that names none, or one that cannot be used, keeps `chore: save run <id>`. A repeat that finds the branch at this run's save with the same tree and another message counts it as saved (card [Unclear: the card's number], 2026-11-20).
 
 ## ADR 0015: Review blocks only on the spec, a concrete failure or a written standard
 
@@ -82,6 +83,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 ## ADR 0021: A spec is one short document of Kiln's own, borrowed once from Spec Kit
 
 - A spec run is told `instructions/spec.md` and the card's text, and writes one file, `/kiln/out/spec.md`, of at most 256 KiB. The core reads no line of it (card 11).
+- The core reads one line of an approved spec: the first `` Pull request title: `…` `` before its first `## ` heading. The title is at most 256 bytes and has no backtick, control character or bidirectional control character (card [Unclear: the card's number], 2026-11-20).
 
 ## ADR 0022: The UI shows what needs the developer first; the board is second
 

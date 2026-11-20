@@ -25,7 +25,7 @@ Before the sections, give:
 
 - one line `Model for implement: <identifier>`, from `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`, with why. The effort is fixed per stage: do not propose one.
 - one line naming every new dependency, or "none".
-- the proposed title of the pull request, in the form the repo's own instructions ask for.
+- one line `` Pull request title: `<title>` ``, with the title in the form the repo's own instructions ask for.
 
 ## Research
 

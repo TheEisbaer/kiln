@@ -276,11 +276,11 @@ func TestHostSave(t *testing.T) {
 	}())
 	end := time.Date(2026, 11, 17, 12, 0, 0, 123456789, time.UTC)
 
-	first, err := commitSave(ctx, repo, tree, commit, "run1", end)
+	first, err := commitSave(ctx, repo, tree, commit, "run1", "", end)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := commitSave(ctx, repo, tree, commit, "run1", end)
+	second, err := commitSave(ctx, repo, tree, commit, "run1", "", end)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,6 +310,21 @@ func TestHostSave(t *testing.T) {
 		}
 	}
 
+	// With a title, the title is the subject and the trailer the last paragraph.
+	titled, err := commitSave(ctx, repo, tree, commit, "run1", "feat(run): x", end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := commitSave(ctx, repo, tree, commit, "run1", "feat(run): x", end); err != nil || again != titled {
+		t.Errorf("the titled save made twice gave %s and %s (%v)", titled, again, err)
+	}
+	if raw := gitIn(t, repo, "cat-file", "commit", titled); !strings.HasSuffix(raw+"\n", "\n\nfeat(run): x\n\nKiln-Run: run1\n") {
+		t.Errorf("the titled commit's message is wrong:\n%s", raw)
+	}
+	if ok, err := isSaveOf(ctx, repo, titled, commit, "run1"); err != nil || !ok {
+		t.Errorf("isSaveOf of the titled save = %v, %v", ok, err)
+	}
+
 	// The guard: a branch that must be absent, and one that must be at the commit.
 	ref := "refs/heads/card"
 	if err := moveBranch(ctx, repo, ref, first, ""); err != nil {
@@ -329,11 +344,59 @@ func TestHostSave(t *testing.T) {
 	}
 }
 
+func TestSavedAs(t *testing.T) {
+	repo, commit := bareRepo(t, map[string]string{"NOTES.md": "notes\n"})
+	ctx := t.Context()
+	mktree := func(name string) string {
+		blob := gitIn(t, repo, "hash-object", "-w", "/dev/null")
+		cmd := exec.Command("git", "--git-dir="+repo, "mktree")
+		cmd.Stdin = strings.NewReader("100644 blob " + blob + "\t" + name + "\n")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	tree, other := mktree("NEW.md"), mktree("OTHER.md")
+	end := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	save := func(tree, parent, id, title string) string {
+		t.Helper()
+		c, err := commitSave(ctx, repo, tree, parent, id, title, end)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	// The save this core would make now, with the title.
+	if now := save(tree, commit, "run1", "feat: x"); now == "" {
+		t.Fatal("no save")
+	}
+	elsewhere := save(other, commit, "run1", "")
+	for _, c := range []struct {
+		what, at string
+		want     bool
+	}{
+		{"the same save with another message", save(tree, commit, "run1", ""), true},
+		{"another tree", elsewhere, false},
+		{"a save of run2", save(tree, commit, "run2", ""), false},
+		{"another parent", save(tree, elsewhere, "run1", ""), false},
+	} {
+		if got, err := savedAs(ctx, repo, c.at, commit, "run1", tree); err != nil || got != c.want {
+			t.Errorf("%s: savedAs = %v, %v; want %v", c.what, got, err, c.want)
+		}
+	}
+}
+
 func TestCheckFlags(t *testing.T) {
 	good := Inputs{Repo: "r", Commit: "c", Branch: "b", ID: "run1", Instruction: "i", Runs: "d",
 		Image: "kiln-run", Proxy: "kiln-proxy", Model: "claude-haiku-5-5", Effort: "low"}
 	if err := checkFlags(good); err != nil {
 		t.Fatalf("good inputs: %v", err)
+	}
+	titled := good
+	titled.Title = "feat: x"
+	if err := checkFlags(titled); err != nil {
+		t.Errorf("the title %q: %v", titled.Title, err)
 	}
 	for _, c := range []struct {
 		what string
@@ -349,6 +412,8 @@ func TestCheckFlags(t *testing.T) {
 		{"a bad ID", func(in *Inputs) { in.ID = "../x" }},
 		{"an ID with capitals", func(in *Inputs) { in.ID = "Run1" }},
 		{"no repo", func(in *Inputs) { in.Repo = "" }},
+		{"a title with a newline", func(in *Inputs) { in.Title = "feat: x\nKiln-Run: other" }},
+		{"a title of 257 bytes", func(in *Inputs) { in.Title = strings.Repeat("a", 257) }},
 	} {
 		in := good
 		c.edit(&in)

@@ -52,6 +52,11 @@ type Inputs struct {
 	// save is "not saved". The tick sets it for a spec run; `kiln run` by hand
 	// never does.
 	SkipSave bool
+	// Title is the message's first line for the save, the pull request title
+	// of the approved spec (TitleOf); empty, the save is "chore: save run
+	// <id>". It is not among the labels a repeat must match. `kiln run` by
+	// hand has no flag for it.
+	Title string
 	// Activity, when it is set, is handed what the run does while it is
 	// followed (step 4), as it comes: the screen's activity. It is not
 	// recorded, and not sent as JSON, as to a test's child.
@@ -109,6 +114,11 @@ func checkFlags(in Inputs) error {
 		"instruction": in.Instruction, "runs": in.Runs, "image": in.Image, "proxy": in.Proxy} {
 		if v == "" {
 			return fmt.Errorf("no %s is given", what)
+		}
+	}
+	if in.Title != "" {
+		if err := validTitle(in.Title); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -634,13 +644,24 @@ func (r *run) save(ctx context.Context, end Ending, guard string) (string, error
 		}
 		// Dated from the run's end, so that the same save made again is the same
 		// commit.
-		commit, err := commitSave(ctx, r.Repo, tree, r.commit, r.ID, end.FinishedAt)
+		commit, err := commitSave(ctx, r.Repo, tree, r.commit, r.ID, r.Title, end.FinishedAt)
 		if err != nil {
 			return "", err
 		}
 		at, err := branchAt(ctx, r.Repo, r.ref)
 		if err != nil {
 			return "", err
+		}
+		if at != commit && at != "" {
+			// This run's save of the same tree with another message, as a core
+			// of another version wrote it, counts as saved too.
+			same, err := savedAs(ctx, r.Repo, at, r.commit, r.ID, tree)
+			if err != nil {
+				return "", err
+			}
+			if same {
+				commit = at
+			}
 		}
 		if at != commit { // a branch already at it counts as saved
 			if err := moveBranch(ctx, r.Repo, r.ref, commit, guard); err != nil {

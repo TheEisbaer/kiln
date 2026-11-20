@@ -686,6 +686,17 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 	if card.Stage == store.Spec {
 		in.Hosts, in.WayOutImage, in.WayOutNetwork = c.Hosts, c.WayOutImage, c.WayOutNetwork
 	}
+	// An implement run's save is named after the approved spec's title, read
+	// again whenever the inputs are built, also for a run in flight: the
+	// approved spec does not change while the card's one run is in flight, so
+	// a repeat gets the same title.
+	if card.Stage == store.Implement {
+		spec, err := c.store.Spec(card.ID)
+		if err != nil {
+			return run.Inputs{}, "", err
+		}
+		in.Title = run.TitleOf(spec.Text)
+	}
 	return in, "", nil
 }
 

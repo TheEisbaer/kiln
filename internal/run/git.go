@@ -240,17 +240,22 @@ const (
 	trailer   = "Kiln-Run"
 )
 
-// saveMessage is the message of a run's save.
-func saveMessage(id string) string {
-	return "chore: save run " + id + "\n\n" + trailer + ": " + id + "\n"
+// saveMessage is the message of a run's save: the title, or "chore: save run
+// <id>" when there is none, with the trailer Kiln-Run: <id> as its last
+// paragraph.
+func saveMessage(id, title string) string {
+	if title == "" {
+		title = "chore: save run " + id
+	}
+	return title + "\n\n" + trailer + ": " + id + "\n"
 }
 
 // commitSave makes the commit of a run's save: the tree on top of the parent,
-// by Kiln, with both dates the given time, so that the same save made again is
-// the same commit.
-func commitSave(ctx context.Context, repo, tree, parent, id string, date time.Time) (string, error) {
+// by Kiln, with both dates the given time and the message saveMessage gives,
+// so that the same save made again is the same commit.
+func commitSave(ctx context.Context, repo, tree, parent, id, title string, date time.Time) (string, error) {
 	when := strconv.FormatInt(date.Unix(), 10) + " +0000"
-	out, err := git(ctx, repo, strings.NewReader(saveMessage(id)), []string{
+	out, err := git(ctx, repo, strings.NewReader(saveMessage(id, title)), []string{
 		"GIT_AUTHOR_NAME=" + saveName, "GIT_AUTHOR_EMAIL=" + saveEmail, "GIT_AUTHOR_DATE=" + when,
 		"GIT_COMMITTER_NAME=" + saveName, "GIT_COMMITTER_EMAIL=" + saveEmail, "GIT_COMMITTER_DATE=" + when,
 	}, "commit-tree", "--no-gpg-sign", "-p", parent, tree)
@@ -319,4 +324,20 @@ func isSaveOf(ctx context.Context, repo, commit, parent, id string) (bool, error
 		}
 	}
 	return false, nil
+}
+
+// savedAs reports whether a commit counts as a run's save of a tree: the save
+// of the run on top of the parent, as isSaveOf judges it, with that tree. Its
+// message may differ from the one this core would write, as after a core of
+// another version made it.
+func savedAs(ctx context.Context, repo, commit, parent, id, tree string) (bool, error) {
+	ours, err := isSaveOf(ctx, repo, commit, parent, id)
+	if err != nil || !ours {
+		return false, err
+	}
+	at, err := gitLine(ctx, repo, "rev-parse", "--verify", commit+"^{tree}")
+	if err != nil {
+		return false, err
+	}
+	return at == tree, nil
 }

@@ -66,7 +66,7 @@ case "$instruction" in
             *kiln-stand-in-nospec*) ;;
             *kiln-stand-in-longspec*) head -c 262145 /dev/zero | tr '\0' x > "$spec" ;;
             *kiln-stand-in-escape*) printf '# Spec\n\033[2J\033]0;kiln\007\r\377\n' > "$spec" ;;
-            *) printf '# Spec %s\n\n## 1. What will be built\n\n## 2. How to tell it works\n\n## 3. What was found\n\n## 4. Left out\n\n## 5. Questions\n' "$word" > "$spec" ;;
+            *) printf '# Spec %s\n\nPull request title: `feat: %s`\n\n## 1. What will be built\n\n## 2. How to tell it works\n\n## 3. What was found\n\n## 4. Left out\n\n## 5. Questions\n' "$word" "$word" > "$spec" ;;
         esac
         case "$instruction" in
             *kiln-stand-in-fail*) exit 1 ;;
