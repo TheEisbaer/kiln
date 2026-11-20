@@ -282,8 +282,15 @@ func testWayOut(t *testing.T, f fixture, credentials []string, published, other 
 		}
 	})
 
-	t.Run("CreateRun with a list", func(t *testing.T) { testCreateWithList(t, f) })
-	t.Run("RemoveRun with a way out", func(t *testing.T) { testRemoveWithWayOut(t, f) })
+	// Runs of their own, side by side with the rest of TestRun's later cases.
+	t.Run("CreateRun with a list", func(t *testing.T) {
+		t.Parallel()
+		testCreateWithList(t, f)
+	})
+	t.Run("RemoveRun with a way out", func(t *testing.T) {
+		t.Parallel()
+		testRemoveWithWayOut(t, f)
+	})
 }
 
 // assertConnect asserts the probe's answer for every target.

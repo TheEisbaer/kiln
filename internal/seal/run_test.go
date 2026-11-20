@@ -81,14 +81,13 @@ func TestRun(t *testing.T) {
 	runID := func(what string) string { return "runtest-" + id + "-" + what }
 	credential1, credential2 := "fake-credential-1-"+id, "fake-credential-2-"+id
 
-	// Images. The repo's root is the build context.
-	proxyImage, upstreamImage, runImage := name("proxy"), name("upstream"), name("run")
-	wayOutImage, webImage := name("wayout"), name("web")
-	build(t, proxyImage, "images/proxy/Dockerfile")
-	build(t, upstreamImage, "internal/seal/testdata/upstream/Dockerfile")
-	build(t, runImage, "images/run/Dockerfile")
-	build(t, wayOutImage, "images/wayout/Dockerfile")
-	build(t, webImage, "internal/seal/testdata/web/Dockerfile")
+	// Images, built once for the package's tests. The repo's root is the
+	// build context.
+	proxyImage := build(t, "proxy", "images/proxy/Dockerfile")
+	upstreamImage := build(t, "upstream", "internal/seal/testdata/upstream/Dockerfile")
+	runImage := build(t, "run", "images/run/Dockerfile")
+	wayOutImage := build(t, "wayout", "images/wayout/Dockerfile")
+	webImage := build(t, "web", "internal/seal/testdata/web/Dockerfile")
 	probe := buildProbe(t)
 	// The outward network of the test's ways out, which CreateRun makes. It
 	// goes after every run, whose cleanups are registered later.
@@ -339,7 +338,12 @@ func TestRun(t *testing.T) {
 		}
 	})
 
+	// The cases from here on, but the last, make runs, networks and
+	// containers of names of their own, and only read the proxy and the probe
+	// run, which nothing changes after ReplaceProxy: they run side by side,
+	// once the cases that do not are done.
 	t.Run("CreateRun", func(t *testing.T) {
+		t.Parallel()
 		t.Run("with what it cannot take", func(t *testing.T) {
 			for _, r := range []Run{
 				{ID: runID("label"), Image: runImage, Proxy: proxy.Name, Labels: map[string]string{runLabel: "other"}},
@@ -473,13 +477,29 @@ func TestRun(t *testing.T) {
 	})
 
 	t.Run("a run with a list", func(t *testing.T) {
+		t.Parallel()
 		testWayOut(t, f, []string{credential1, credential2}, published, other, noConnection)
 	})
-	t.Run("a run's life", func(t *testing.T) { testLife(t, f, runID("probe")) })
-	t.Run("PlaceRun refuses", func(t *testing.T) { testPlaceRefusals(t, f, runID("probe")) })
-	t.Run("the save", func(t *testing.T) { testSave(t, f) })
-	t.Run("RemoveRun", func(t *testing.T) { testRemoveRun(t, f) })
-	t.Run("images are never pulled", func(t *testing.T) { testNoPull(t, f) })
+	t.Run("a run's life", func(t *testing.T) {
+		t.Parallel()
+		testLife(t, f, runID("probe"))
+	})
+	t.Run("PlaceRun refuses", func(t *testing.T) {
+		t.Parallel()
+		testPlaceRefusals(t, f, runID("probe"))
+	})
+	t.Run("the save", func(t *testing.T) {
+		t.Parallel()
+		testSave(t, f)
+	})
+	t.Run("RemoveRun", func(t *testing.T) {
+		t.Parallel()
+		testRemoveRun(t, f)
+	})
+	t.Run("images are never pulled", func(t *testing.T) {
+		t.Parallel()
+		testNoPull(t, f)
+	})
 
 	// Needs the developer's credential, so it is run by hand (ADR 0049).
 	t.Run("Claude answers in a run", func(t *testing.T) {
