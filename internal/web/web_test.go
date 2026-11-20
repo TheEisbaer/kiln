@@ -3,6 +3,8 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +145,39 @@ func TestBoard(t *testing.T) {
 	if c := b.Cards[1]; c.Run == nil || c.Run.ID != "r2" || c.Run.Model != "claude-opus-5-5" || c.Run.Since == nil ||
 		time.Since(*c.Run.Since) > time.Minute || len(c.Documents) != 0 || c.Documents == nil {
 		t.Errorf("the card with a run in flight: %+v, run %+v", c, c.Run)
+	}
+}
+
+// TestBuild checks that the page carries the build it is served with, that
+// the board says the same build, and that the served page differs from
+// index.html in the build alone, with the policy's hashes still its own.
+func TestBuild(t *testing.T) {
+	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(build) {
+		t.Fatalf("the build %q is not 16 hex digits", build)
+	}
+	f := newFixture(t)
+	w := f.do(t, "GET", "/", "")
+	body := w.Body.String()
+	attr := `data-build="` + build + `"`
+	if !strings.Contains(body, `<html lang="en" `+attr+`>`) {
+		t.Fatalf("GET / does not carry the build %s", build)
+	}
+	if b := decode[map[string]any](t, f.do(t, "GET", "/api/board", "")); b["build"] != build {
+		t.Errorf("the board's build: %v, want %s", b["build"], build)
+	}
+	if strings.Replace(body, attr, `data-build=""`, 1) != string(page) {
+		t.Error("the served page differs from index.html in more than the build")
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	for _, tag := range []string{"script", "style"} {
+		m := regexp.MustCompile(`(?s)<` + tag + `>(.*?)</` + tag + `>`).FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("the served page has no %s", tag)
+		}
+		sum := sha256.Sum256([]byte(m[1]))
+		if want := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"; !strings.Contains(csp, want) {
+			t.Errorf("the policy %q lacks the served %s's hash %s", csp, tag, want)
+		}
 	}
 }
 
@@ -553,7 +589,7 @@ func TestPageFromFile(t *testing.T) {
 		return w
 	}
 	// Without a file, the embedded page and its policy, as before.
-	if w := get(f.h); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), page) || w.Header().Get("Content-Security-Policy") != policy {
+	if w := get(f.h); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), served) || w.Header().Get("Content-Security-Policy") != policy {
 		t.Fatalf("the embedded page: %d %s", w.Code, w.Header())
 	}
 	file := filepath.Join(t.TempDir(), "page.html")
@@ -604,5 +640,58 @@ func TestReadPage(t *testing.T) {
 		if _, _, err := ReadPage(file); err == nil || !strings.HasPrefix(err.Error(), "the page: ") {
 			t.Errorf("%s: %v", file, err)
 		}
+	}
+}
+
+// With --page, the build is the file's as it is at that moment: the page is
+// served with it, the board says it, and both change when the file does, so
+// that a page left open reloads itself. A file that cannot be read has no build.
+func TestBuildFromFile(t *testing.T) {
+	f := newFixture(t)
+	file := filepath.Join(t.TempDir(), "page.html")
+	h, err := Handler(f.store, Info{Page: file}, f.act, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(path string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "http://"+addr+path, nil))
+		return w
+	}
+	boardBuild := func() string {
+		t.Helper()
+		var b struct {
+			Build string `json:"build"`
+		}
+		if err := json.Unmarshal(get("/api/board").Body.Bytes(), &b); err != nil {
+			t.Fatal(err)
+		}
+		return b.Build
+	}
+	var builds []string
+	for _, text := range []string{
+		`<html data-build=""><style>p{}</style><script>let a</script>`,
+		`<html data-build=""><style>p{}</style><script>let b</script>`,
+	} {
+		if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		want := buildOf([]byte(text))
+		if got := boardBuild(); got != want {
+			t.Errorf("the board's build: %q, want the file's, %q", got, want)
+		}
+		if body := get("/").Body.String(); !strings.Contains(body, `data-build="`+want+`"`) {
+			t.Errorf("the served page does not carry the file's build %s: %q", want, body)
+		}
+		builds = append(builds, want)
+	}
+	if builds[0] == builds[1] {
+		t.Error("a changed file has the same build")
+	}
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if got := boardBuild(); got != "" {
+		t.Errorf("the board's build without a file: %q, want none", got)
 	}
 }
