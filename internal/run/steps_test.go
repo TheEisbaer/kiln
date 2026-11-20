@@ -405,6 +405,17 @@ func TestPrintable(t *testing.T) {
 	}
 }
 
+// A repo given by a relative path, as `kiln run --repo` allows, is found from
+// the directory the caller is in.
+func TestRelativeRepo(t *testing.T) {
+	repo, _ := bareRepo(t, map[string]string{"NOTES.md": "notes\n"})
+	t.Chdir(filepath.Dir(repo))
+	got, err := gitLine(t.Context(), filepath.Base(repo), "rev-parse", "--is-bare-repository")
+	if err != nil || got != "true" {
+		t.Errorf("git on a relative repo: want true, got %q, %v", got, err)
+	}
+}
+
 func TestSymbolicBranch(t *testing.T) {
 	repo, commit := bareRepo(t, map[string]string{"NOTES.md": "notes\n"})
 	gitIn(t, repo, "update-ref", "refs/heads/main", commit)

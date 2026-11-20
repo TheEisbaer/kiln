@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,12 @@ func git(ctx context.Context, repo string, stdin io.Reader, env []string, args .
 // outside any repo, on os.DevNull, runs in the root directory, which is always
 // there.
 func gitCommand(ctx context.Context, repo string, args ...string) *exec.Cmd {
+	// Git reads a relative --git-dir from its own directory, which is the repo
+	// here, so a relative path is made absolute first. Where that fails, git
+	// says what is wrong with the path as given.
+	if abs, err := filepath.Abs(repo); err == nil {
+		repo = abs
+	}
 	cmd := exec.CommandContext(ctx, "git", append([]string{"--git-dir=" + repo}, args...)...)
 	cmd.Dir = repo
 	if repo == os.DevNull {
