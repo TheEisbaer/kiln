@@ -50,7 +50,7 @@ Kiln needs a container engine with the `docker` command, and Git. The commands r
 
    `--data` is the instance's data directory, which is made if it is missing. `--model` is the exact model identifier for spec runs. It also applies to implement and review runs, unless `--implement-model` or `--review-model` names another. `--spec-hosts` names the hosts a spec run may reach. It is none by default, and `*` stands for every public host. Ctrl-C ends the core. A run it was following goes on in its container.
 
-6. Open the screen at <http://127.0.0.1:4747/>. The core prints the address when it starts, and `--listen` serves the screen on another loopback address. Cards are written on the screen, or with `./kiln card --data <dir> <text>`.
+6. Open the screen at <http://127.0.0.1:4747/>. The core prints the address when it starts, and `--listen` serves the screen on another loopback address. Cards are written on the screen, or with `./kiln card --data <dir> <text>`. `--page <file>` reads the page from that file on every request instead of the embedded one, so that a change to it shows after a refresh; it is for work on the screen, and the file is trusted like the program itself.
 
 ## Where the decisions are
 

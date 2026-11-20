@@ -48,6 +48,7 @@ const usage = `usage:
             [--implement-model <id>] [--review-model <id>]
             [--image kiln-run] [--proxy kiln-proxy] [--spec-hosts <* or names, by commas>]
             [--listen 127.0.0.1:4747, a loopback address; empty serves no screen]
+            [--page <file>, read on every request instead of the embedded page]
   kiln card --data <dir> <text>
   kiln run --repo <bare repo> --commit <commit> --branch <branch> --run <id>
            --instruction <file> --model <id> --effort <low|medium|high> --runs <dir>
@@ -89,6 +90,7 @@ func coreCommand(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.Image, "image", "kiln-run", "the run image")
 	fs.StringVar(&cfg.Proxy, "proxy", proxyName, "the proxy container")
 	fs.StringVar(&cfg.Listen, "listen", "127.0.0.1:4747", "the loopback address the screen is served on; empty serves none")
+	fs.StringVar(&cfg.Page, "page", "", "a file the screen's page is read from on every request instead of the embedded one, for work on the screen")
 	hosts := fs.String("spec-hosts", "", "the hosts a spec run may reach: * for every public host, or names separated by commas; none by default")
 	if err := fs.Parse(args); err != nil {
 		return 2

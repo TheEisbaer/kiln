@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -537,5 +539,70 @@ func TestServe(t *testing.T) {
 	}
 	if _, err := Listen("0.0.0.0:0"); err == nil {
 		t.Error("Listen accepted an address that is not loopback")
+	}
+}
+
+// TestPageFromFile serves the page from a file, as `kiln core --page` does: a
+// change to the file shows at the next request, with a policy of its own, and
+// a file that goes wrong gives an error, never the embedded page.
+func TestPageFromFile(t *testing.T) {
+	f := newFixture(t)
+	get := func(h http.Handler) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "http://"+addr+"/", nil))
+		return w
+	}
+	// Without a file, the embedded page and its policy, as before.
+	if w := get(f.h); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), page) || w.Header().Get("Content-Security-Policy") != policy {
+		t.Fatalf("the embedded page: %d %s", w.Code, w.Header())
+	}
+	file := filepath.Join(t.TempDir(), "page.html")
+	h, err := Handler(f.store, Info{Page: file}, f.act, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(text string) {
+		t.Helper()
+		if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("<title>One</title><style>p{}</style><script>let a</script>")
+	first := get(h)
+	if first.Code != 200 || first.Body.String() != "<title>One</title><style>p{}</style><script>let a</script>" {
+		t.Fatalf("the first page: %d %q", first.Code, first.Body)
+	}
+	two := "<title>Two</title><style>p{}</style><script>let b</script>"
+	write(two)
+	second := get(h)
+	want, err := policyOf([]byte(two))
+	if err != nil {
+		t.Fatal(err)
+	}
+	csp := second.Header().Get("Content-Security-Policy")
+	if second.Code != 200 || second.Body.String() != two {
+		t.Fatalf("the changed page: %d %q", second.Code, second.Body)
+	}
+	if csp != want || csp == first.Header().Get("Content-Security-Policy") {
+		t.Errorf("the changed page's policy %q, want %q", csp, want)
+	}
+	// A file that goes wrong while the core runs.
+	write("<title>Three</title><style>p{}</style>")
+	for _, why := range []string{"a page without a script", "a removed page"} {
+		w := get(h)
+		if w.Code != 500 || w.Header().Get("Content-Security-Policy") != "" || !strings.Contains(w.Body.String(), `"error"`) {
+			t.Errorf("%s: %d %s %q", why, w.Code, w.Header(), w.Body)
+		}
+		os.Remove(file)
+	}
+}
+
+// TestReadPage refuses a file that cannot be read.
+func TestReadPage(t *testing.T) {
+	dir := t.TempDir()
+	for _, file := range []string{filepath.Join(dir, "missing.html"), dir} {
+		if _, _, err := ReadPage(file); err == nil || !strings.HasPrefix(err.Error(), "the page: ") {
+			t.Errorf("%s: %v", file, err)
+		}
 	}
 }

@@ -863,3 +863,25 @@ func TestShellWord(t *testing.T) {
 		}
 	}
 }
+
+// TestPageRefused refuses a --page that cannot be served before anything is
+// made: a file that cannot be read, and a core without a screen.
+func TestPageRefused(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		page, listen, says string
+	}{
+		{filepath.Join(dir, "missing.html"), "127.0.0.1:0", "the page"},
+		{filepath.Join(dir, "page.html"), "", "--listen"},
+	} {
+		data := filepath.Join(dir, "data")
+		err := Core(t.Context(), Config{Data: data, Repo: filepath.Join(dir, "repo.git"), Model: "m", Listen: tc.listen, Page: tc.page},
+			io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), tc.says) {
+			t.Errorf("--page %s --listen %q: %v", tc.page, tc.listen, err)
+		}
+		if _, err := os.Stat(data); !os.IsNotExist(err) {
+			t.Errorf("--page %s --listen %q made the data directory: %v", tc.page, tc.listen, err)
+		}
+	}
+}

@@ -90,6 +90,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 ## ADR 0023: Kiln's core is written in Go, its UI in Svelte
 
 - The first screen is one embedded page, `internal/web/index.html`, with its CSS and JavaScript inside, and no build step, no dependency and nothing loaded from the network. A Svelte client replaces it when the screen outgrows one file (card 13, 2026-11-19).
+- For work on the screen, `kiln core --page <file>` reads the page from that file on every request instead of the embedded one. Its Content-Security-Policy is computed from the file's own script and style, as the embedded page's is, so that the page runs as it will once embedded. A file that cannot be read, or that lacks a script or a style, is refused at start, and also refused without a screen (`--listen` empty). At a request it gives 500, never the embedded page (2026-11-20).
 
 ## ADR 0025: Kiln's settings for a repo live in the instance; the repo's own Claude Code configuration is picked up from the repo
 
@@ -129,6 +130,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 - The core is not started from a checkout but from a program built in a sealed container (ADR 0036, ADR 0037).
 - The core does not depend on the directory it was started in: it makes its paths absolute at its start, runs git in the instance's copy of the repo and every other command, through the seal, in the data directory (card 16, 2026-11-20).
+- `--page` is made absolute at start, like `--data` and `--repo` (2026-11-20).
 
 ## ADR 0035: The core keeps nothing in memory that matters; it reconciles the store, the container engine and the Git host
 
@@ -193,6 +195,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - The stream also carries the entries of the instance, such as a pause (ADR 0055).
 - Until the API comes, `kiln card --data <dir> <text>` stands in for it: it writes a card that waits in spec for a run. It takes the core's lock, so it never writes beside a running core (rule 5). The API card removes it in the pull request that adds the API (card 8, 2026-11-18).
 - The core serves the API's first endpoints, and the screen, on a loopback address (`kiln core --listen`, `127.0.0.1:4747` by default), and refuses a request that does not come from its own page: a Host that is not the listen address gets 403, and a POST must be JSON, with an Origin, if it has one, of the page's own. Until the event stream comes, the page asks every 2 seconds. `kiln card` stays beside the screen for now, and the commands `kiln cards` and `kiln spec` of card 11's spec are not built (card 13, 2026-11-19).
+- A core started with `--page` serves a page that is not built into its program. Rule 4 holds for the core as it runs by default. The flag is for work on the screen, and the file is trusted like the program: whatever it holds is "the core's own page" for rule 6, and may act through the API (2026-11-20).
 
 ## ADR 0045: Kiln's checks are one command that runs the tools directly in the toolchain image
 
