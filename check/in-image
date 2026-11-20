@@ -26,7 +26,124 @@ image=kiln-toolchain
 tar -C "$root" -cf - go.mod go.sum images/toolchain/Dockerfile |
     docker build --quiet --tag "$image" --file images/toolchain/Dockerfile - >/dev/null
 
+# The engine tests run in the background beside the check: see engine below.
 status=0
+if [ -n "$engine" ]; then
+    # The test program is built for the machine it runs on, not for the image.
+    case "$(uname -s)" in
+        Darwin) goos=darwin ;;
+        Linux) goos=linux ;;
+        *) echo "engine tests: unsupported system $(uname -s)" >&2; exit 2 ;;
+    esac
+    case "$(uname -m)" in
+        arm64 | aarch64) goarch=arm64 ;;
+        x86_64) goarch=amd64 ;;
+        *) echo "engine tests: unsupported machine $(uname -m)" >&2; exit 2 ;;
+    esac
+
+    # The packages with engine tests.
+    packages=
+    for pkg in internal/seal internal/run internal/tick; do
+        if [ -d "$root/$pkg" ]; then packages="$packages ./$pkg"; fi
+    done
+
+    out=$(mktemp -d)
+    # Output is printed by whoever holds $out/print: the check, then each
+    # package as it ends, so that nothing mixes.
+    mkdir "$out/print"
+fi
+
+# One check on this machine at a time runs its engine tests. Every run takes a
+# network of its own, and the engine has about thirty IPv4 subnets for all of
+# them, the developer's instance's runs included: two checks side by side,
+# each with three packages side by side, would run out of them. The lock is a
+# directory with the holder's process ID; one whose holder is gone is taken
+# over.
+engine_lock=/tmp/kiln-engine-tests.lock
+take_engine_lock() {
+    while ! mkdir "$engine_lock" 2>/dev/null; do
+        holder=$(cat "$engine_lock/pid" 2>/dev/null || true)
+        if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null &&
+            [ "$(cat "$engine_lock/pid" 2>/dev/null || true)" = "$holder" ]; then
+            rm -rf "$engine_lock"
+            continue
+        fi
+        sleep 1
+    done
+    echo $$ >"$engine_lock/pid"
+}
+release_engine_lock() {
+    if [ "$(cat "$engine_lock/pid" 2>/dev/null || true)" = $$ ]; then rm -rf "$engine_lock"; fi
+}
+
+# take and give hand the output on.
+take() {
+    until mkdir "$out/print" 2>/dev/null; do
+        [ -d "$out" ] || exit 1 # the script has ended
+        sleep 0.1
+    done
+}
+give() { rmdir "$out/print"; }
+
+# engine builds the test programs beside the check, and then runs the
+# packages side by side, each with its output kept apart and printed whole,
+# under its heading, when the package ends. Inside a package only a few tests
+# run at a time (-test.parallel): three in internal/seal, four in
+# internal/run, whose runs are the real Claude Code's, and six in
+# internal/tick, whose are a script's. That keeps the networks of one check to
+# about twenty.
+engine() {
+    # The programs come out on standard output, as a tar: a directory of the
+    # host's, such as the one mktemp makes on macOS, is not always visible to
+    # the engine. One container builds them all, so the standard library is
+    # compiled once.
+    if ! docker run --rm --network none \
+        --volume "$root:/src:ro" --workdir /src \
+        --env GOOS="$goos" --env GOARCH="$goarch" --env CGO_ENABLED=0 \
+        "$image" sh -c 'mkdir /tmp/tests && go test -c -o /tmp/tests/ "$@" && tar -C /tmp/tests -cf - .' sh $packages \
+        >"$out/tests.tar" 2>"$out/build.log" || ! tar -xf "$out/tests.tar" -C "$out" 2>>"$out/build.log"; then
+        take
+        echo "== engine tests: building them failed"
+        cat "$out/build.log"
+        give
+        echo 1 >"$out/build.status"
+        return
+    fi
+    # The tests start once the check has ended: beside it, they and the
+    # images they build wait for the processor more than they gain.
+    until [ -e "$out/checked" ]; do
+        [ -d "$out" ] || exit 1
+        sleep 0.2
+    done
+    take_engine_lock
+    for pkg in $packages; do
+        name=$(basename "$pkg")
+        case $name in
+            run) parallel=4 ;;
+            tick) parallel=6 ;;
+            *) parallel=3 ;;
+        esac
+        (
+            # From the package's directory, as go test would.
+            code=0
+            (cd "$root/$pkg" && KILN_ENGINE_TESTS=1 "$out/$name.test" -test.v -test.parallel=$parallel) >"$out/$name.log" 2>&1 || code=$?
+            echo "$code" >"$out/$name.status"
+            take
+            echo "== engine tests of ${pkg#./}"
+            cat "$out/$name.log"
+            give
+        ) &
+    done
+    wait
+    release_engine_lock
+}
+
+if [ -n "$engine" ]; then
+    engine &
+    # Set after the start, so that the background part does not inherit it.
+    trap 'release_engine_lock; rm -rf "$out"' EXIT
+fi
+
 docker run --rm --network none \
     --volume "$root:/src:ro" --workdir /src \
     "$image" go run ./check || status=$?
@@ -36,44 +153,16 @@ if [ -z "$engine" ]; then
     exit "$status"
 fi
 
-# The test program is built for the machine it runs on, not for the image.
-case "$(uname -s)" in
-    Darwin) goos=darwin ;;
-    Linux) goos=linux ;;
-    *) echo "engine tests: unsupported system $(uname -s)" >&2; exit 2 ;;
-esac
-case "$(uname -m)" in
-    arm64 | aarch64) goarch=arm64 ;;
-    x86_64) goarch=amd64 ;;
-    *) echo "engine tests: unsupported machine $(uname -m)" >&2; exit 2 ;;
-esac
-
-# The packages with engine tests. internal/tick comes after the other two, so
-# that the run image it builds comes from the cache.
-packages=
-for pkg in internal/seal internal/run internal/tick; do
-    if [ -d "$root/$pkg" ]; then packages="$packages ./$pkg"; fi
+touch "$out/checked"
+give
+wait
+for f in "$out"/*.status; do
+    [ -e "$f" ] || continue
+    code=$(cat "$f")
+    [ "$code" = 0 ] || status=$code
 done
-
-out=$(mktemp -d)
-trap 'rm -rf "$out"' EXIT
-
-# The programs come out on standard output, as a tar: a directory of the
-# host's, such as the one mktemp makes on macOS, is not always visible to the
-# engine. One container builds them all, so the standard library is compiled
-# once.
-if docker run --rm --network none \
-    --volume "$root:/src:ro" --workdir /src \
-    --env GOOS="$goos" --env GOARCH="$goarch" --env CGO_ENABLED=0 \
-    "$image" sh -c 'mkdir /tmp/tests && go test -c -o /tmp/tests/ "$@" && tar -C /tmp/tests -cf - .' sh $packages \
-    >"$out/tests.tar" && tar -xf "$out/tests.tar" -C "$out"; then
-    for pkg in $packages; do
-        test="$out/$(basename "$pkg").test"
-        echo "== engine tests of ${pkg#./}"
-        # From the package's directory, as go test would.
-        (cd "$root/$pkg" && KILN_ENGINE_TESTS=1 "$test" -test.v) || status=$?
-    done
-else
-    status=1
-fi
+for pkg in $packages; do
+    # A package whose program did not run has no status.
+    if [ ! -e "$out/build.status" ] && [ ! -e "$out/$(basename "$pkg").status" ]; then status=1; fi
+done
 exit "$status"
