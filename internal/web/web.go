@@ -24,6 +24,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -36,20 +37,53 @@ import (
 //go:embed index.html
 var page []byte
 
-// policy is the page's Content-Security-Policy: its one script and its one
-// style, by their hashes, requests to its own origin only, and nothing else.
+// policy is the embedded page's Content-Security-Policy, computed once.
 var policy = func() string {
-	hash := func(tag string) string {
+	p, err := policyOf(page)
+	if err != nil {
+		panic("index.html: " + err.Error())
+	}
+	return p
+}()
+
+// policyOf is a page's Content-Security-Policy: its one script and its one
+// style, by their hashes, requests to its own origin only, and nothing else.
+// A page without a script or a style has none.
+func policyOf(page []byte) (string, error) {
+	hash := func(tag string) (string, error) {
 		m := regexp.MustCompile(`(?s)<` + tag + `>(.*?)</` + tag + `>`).FindSubmatch(page)
 		if m == nil {
-			panic("index.html has no " + tag)
+			return "", fmt.Errorf("the page has no <%s>", tag)
 		}
 		sum := sha256.Sum256(m[1])
-		return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+		return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'", nil
 	}
-	return "default-src 'none'; script-src " + hash("script") + "; style-src " + hash("style") +
-		"; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-}()
+	script, err := hash("script")
+	if err != nil {
+		return "", err
+	}
+	style, err := hash("style")
+	if err != nil {
+		return "", err
+	}
+	return "default-src 'none'; script-src " + script + "; style-src " + style +
+		"; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'", nil
+}
+
+// ReadPage reads a page from a file, for work on the screen (kiln core
+// --page), and gives it with its own policy, so that it runs as it will once
+// embedded.
+func ReadPage(file string) ([]byte, string, error) {
+	body, err := os.ReadFile(file)
+	if err != nil {
+		return nil, "", fmt.Errorf("the page: %w", err)
+	}
+	p, err := policyOf(body)
+	if err != nil {
+		return nil, "", fmt.Errorf("the page %s: %w", file, err)
+	}
+	return body, p, nil
+}
 
 // maxBody is the largest body of a request that is read.
 const maxBody = 1 << 20
@@ -66,6 +100,10 @@ type Info struct {
 	// branch. The tick hands it in, so that this package runs no command. Nil
 	// shows no change on any card.
 	Change func(ctx context.Context, card int64) (*Change, error)
+	// Page is a file the page is read from on every request, with its own
+	// policy, instead of the embedded one, for work on the screen. Empty, the
+	// embedded page is served.
+	Page string
 }
 
 // Change is where a card's change is and what it is: its branch in the
@@ -157,10 +195,19 @@ type handler struct {
 }
 
 func (h *handler) page(w http.ResponseWriter, r *http.Request) {
+	body, csp := page, policy
+	if h.info.Page != "" {
+		// A file that went wrong is said, never covered by the embedded page.
+		var err error
+		if body, csp, err = ReadPage(h.info.Page); err != nil {
+			fail(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", policy)
+	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Write(page)
+	w.Write(body)
 }
 
 // The API's JSON.

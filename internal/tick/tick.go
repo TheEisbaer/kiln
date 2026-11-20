@@ -58,6 +58,9 @@ type Config struct {
 	// The loopback address the screen is served on while the core ticks;
 	// empty, none is served.
 	Listen string
+	// A file the screen's page is read from on every request instead of the
+	// embedded one, for work on the screen; empty, the embedded page.
+	Page string
 }
 
 // stage is what a run of a card's stage is: its effort, fixed per stage
@@ -189,7 +192,7 @@ func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
 	// may be removed while it runs: its paths are made absolute while that
 	// directory is there, and every command it runs, through the seal, runs in
 	// the data directory, and git in the instance's copy of the repo (card 16).
-	for _, p := range []*string{&cfg.Data, &cfg.Repo} {
+	for _, p := range []*string{&cfg.Data, &cfg.Repo, &cfg.Page} {
 		if *p == "" {
 			continue
 		}
@@ -202,6 +205,15 @@ func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
 	ctx = seal.InDir(ctx, cfg.Data)
 	if cfg.Listen != "" {
 		if err := web.CheckAddress(cfg.Listen); err != nil {
+			return err
+		}
+	}
+	// A page that cannot be served is refused before anything is made.
+	if cfg.Page != "" {
+		if cfg.Listen == "" {
+			return errors.New("--page needs a screen, and --listen is empty")
+		}
+		if _, _, err := web.ReadPage(cfg.Page); err != nil {
 			return err
 		}
 	}
@@ -272,7 +284,7 @@ func (c *core) serve() (func(), error) {
 		return nil, fmt.Errorf("the screen: %w", err)
 	}
 	info := web.Info{Instance: c.instance, Repo: c.Repo, Model: c.model(store.Spec), ImplementModel: c.model(store.Implement),
-		ReviewModel: c.model(store.Review), Change: c.change}
+		ReviewModel: c.model(store.Review), Change: c.change, Page: c.Page}
 	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()
@@ -281,6 +293,9 @@ func (c *core) serve() (func(), error) {
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, ErrorLog: log.New(c.errOut, "kiln core: the screen: ", 0)}
 	go srv.Serve(ln)
 	fmt.Fprintf(c.out, "kiln core: the screen is at http://%s/\n", ln.Addr())
+	if c.Page != "" {
+		fmt.Fprintf(c.out, "kiln core: the page is read from %s on every request\n", c.Page)
+	}
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
