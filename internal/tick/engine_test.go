@@ -3,6 +3,7 @@ package tick
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -153,9 +154,11 @@ func TestTick(t *testing.T) {
 	// The seal creates the outward network with the first way out.
 	t.Cleanup(func() { dockerQuiet("network", "rm", f.outward) })
 
-	// The proxy creates its ordinary network; the upstream joins it.
+	// The proxy and the upstream on the ordinary network, which the test
+	// makes, so that ReplaceProxy finds it; TestRun of internal/seal has
+	// ReplaceProxy make one.
 	ordinary := name("ordinary")
-	t.Cleanup(func() { dockerQuiet("network", "rm", ordinary) })
+	testNetwork(t, ordinary)
 	f.upstream = name("upstream")
 	f.proxy = seal.Proxy{Name: name("proxy"), Image: f.proxyImage, Network: ordinary,
 		Upstream: "http://" + f.upstream + ":" + upstreamPort}
@@ -182,6 +185,7 @@ func TestTick(t *testing.T) {
 	// A core whose working directory is removed runs every command in a
 	// directory it owns, and its card's run ends as it would (card 16).
 	t.Run("a core started in a directory that is gone", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md.")
 		core, done := f.start(t, child{Command: "core", Config: f.config(c), GoneDir: true})
@@ -194,9 +198,11 @@ func TestTick(t *testing.T) {
 	})
 
 	t.Run("killed, then started again", func(t *testing.T) {
+		t.Parallel()
 		for _, point := range []string{"after-instruction", "before-add", "after-add", "following",
 			"record", "record, damaged", "before-end", "after-end"} {
 			t.Run(point, func(t *testing.T) {
+				t.Parallel()
 				c := f.newCase(t, f.standIn)
 				text := "Add a line to NOTES.md."
 				if point == "following" || point == "after-add" {
@@ -328,6 +334,7 @@ func TestTick(t *testing.T) {
 	// between AddRun and the first event of following, on the first start and
 	// for a run in the store whose container never started.
 	t.Run("a failure between AddRun and following", func(t *testing.T) {
+		t.Parallel()
 		for _, tc := range []struct {
 			name     string
 			inStore  bool   // a first core was killed after AddRun, leaving the container created
@@ -350,6 +357,7 @@ func TestTick(t *testing.T) {
 			{name: "in the store: killed after placing again", inStore: true, hook: "run:place:exit", exitCode: exitAtPoint},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
 				c := f.newCase(t, f.standIn)
 				f.card(t, c, "Add a line to NOTES.md.")
 				if tc.inStore {
@@ -396,6 +404,7 @@ func TestTick(t *testing.T) {
 	// run. The core is killed at the first removal of the run's container,
 	// which must come only after the run has ended in the store.
 	t.Run("killed at the first removal of a stored run's container", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md.")
 		_, done := f.core(t, c, "after-add")
@@ -423,24 +432,33 @@ func TestTick(t *testing.T) {
 	// A stored run's container that is used again gets the proxy on its
 	// network, as one that runs does: a proxy replaced since is on no earlier
 	// run's network. The stand-in never calls the proxy, so the attachment
-	// itself is asserted, while the run waits at its gate.
+	// itself is asserted, while the run waits at its gate. The proxy is the
+	// case's own, so that the other cases' runs keep theirs.
 	t.Run("a stored run started after the proxy was replaced", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
+		proxy := f.proxy
+		proxy.Name = name("proxy-replaced")
+		t.Cleanup(func() { dockerQuiet("rm", "--force", proxy.Name) })
+		if err := seal.ReplaceProxy(t.Context(), proxy, "echo fake-credential-"+f.id); err != nil {
+			t.Fatal(err)
+		}
+		c.proxy = proxy.Name
 		f.card(t, c, "Add a line to NOTES.md. "+gateWord)
 		_, done := f.core(t, c, "after-add")
 		if code := <-done; code != exitAtPoint {
 			t.Fatalf("the first core exited with %d, want %d after AddRun", code, exitAtPoint)
 		}
-		if err := seal.ReplaceProxy(t.Context(), f.proxy, "echo fake-credential-"+f.id); err != nil {
+		if err := seal.ReplaceProxy(t.Context(), proxy, "echo fake-credential-"+f.id); err != nil {
 			t.Fatal(err)
 		}
-		if proxyOn(t, f.proxy.Name, "kiln-run-"+c.run) {
+		if proxyOn(t, proxy.Name, "kiln-run-"+c.run) {
 			t.Fatal("the replaced proxy is on the run's network already")
 		}
 
 		core, done := f.core(t, c, "")
 		f.waitAtGate(t, c)
-		if !proxyOn(t, f.proxy.Name, "kiln-run-"+c.run) {
+		if !proxyOn(t, proxy.Name, "kiln-run-"+c.run) {
 			t.Error("the run started without the proxy on its network")
 		}
 		must(t, "exec", "kiln-run-"+c.run, "touch", "/tmp/gate")
@@ -450,6 +468,7 @@ func TestTick(t *testing.T) {
 	})
 
 	t.Run("a vanished run", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. "+gateWord)
 		core, done := f.core(t, c, "")
@@ -469,6 +488,7 @@ func TestTick(t *testing.T) {
 
 	// The stand-in writes its spec before it fails; a failed run's is not read.
 	t.Run("a run that fails", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. "+failWord)
 		core, done := f.core(t, c, "")
@@ -493,6 +513,7 @@ func TestTick(t *testing.T) {
 		{"without a list of hosts", "Write a spec. kiln-case-nolist", false, "the spec was written without the web: no list of hosts; exit 0, "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			c := f.newCase(t, f.standIn)
 			c.noHosts = !tc.hosts
 			f.card(t, c, tc.text)
@@ -512,6 +533,7 @@ func TestTick(t *testing.T) {
 
 	// The store keeps the spec exactly as written.
 	t.Run("a spec with escapes and a byte that is not UTF-8", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Write a spec. "+escapeWord)
 		core, done := f.core(t, c, "")
@@ -521,6 +543,7 @@ func TestTick(t *testing.T) {
 	})
 
 	t.Run("its way out gone while it runs", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Write a spec. kiln-case-gone "+gateWord)
 		core, done := f.core(t, c, "")
@@ -536,6 +559,7 @@ func TestTick(t *testing.T) {
 	})
 
 	t.Run("what the sweep removes, and what it leaves", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		other := randomID(t)
 		// Each container is kiln-run-<its kiln.run, or the ID it would have>.
@@ -553,8 +577,7 @@ func TestTick(t *testing.T) {
 			t.Cleanup(func() { dockerQuiet("rm", "--force", "kiln-run-"+id) })
 			must(t, append(args, f.proxyImage)...)
 		}
-		t.Cleanup(func() { dockerQuiet("network", "rm", "kiln-run-"+mine) })
-		must(t, "network", "create", "--internal", "--label", "kiln.run="+mine, "--label", "kiln.instance="+c.instance, "kiln-run-"+mine)
+		testNetwork(t, "kiln-run-"+mine, "--internal", "--label", "kiln.run="+mine, "--label", "kiln.instance="+c.instance)
 		before := map[string]string{}
 		for _, id := range []string{theirs, byHand, unnamed} {
 			before[id] = must(t, "inspect", "--format", "{{.Id}} {{.State.Status}}", "kiln-run-"+id)
@@ -582,6 +605,7 @@ func TestTick(t *testing.T) {
 	// The screen of a core shows the run in flight and its activity while
 	// the run waits at its gate.
 	t.Run("the screen while a run waits", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		c.listen = freeAddress(t)
 		f.card(t, c, "Write a spec. kiln-case-screen "+gateWord)
@@ -628,6 +652,7 @@ func TestTick(t *testing.T) {
 	})
 
 	t.Run("a second core or a kiln card while one runs", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. "+gateWord)
 		core, done := f.core(t, c, "")
@@ -667,6 +692,7 @@ func TestTick(t *testing.T) {
 	// After approval: an implement run, which saves a commit on the card's
 	// branch, and a review run, after which the card waits for approval.
 	t.Run("approved, implemented and reviewed", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. kiln-case-loop")
 		f.specAndApprove(t, c)
@@ -712,6 +738,7 @@ func TestTick(t *testing.T) {
 	// developer's move "send back" a second implement run is told the review,
 	// starts from the branch's tip and saves a second commit.
 	t.Run("a review that sends the change back", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. kiln-case-back "+goesBackWord)
 		f.specAndApprove(t, c)
@@ -770,6 +797,7 @@ func TestTick(t *testing.T) {
 		{"killed in a review run, before its end", child{ExitAt: "review/before-end"}, 3, true, true, "review"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			c := f.newCase(t, f.standIn)
 			f.card(t, c, "Add a line to NOTES.md. kiln-case-kill")
 			f.specAndApprove(t, c)
@@ -817,6 +845,7 @@ func TestTick(t *testing.T) {
 	}
 
 	t.Run("an implement run that changes nothing", func(t *testing.T) {
+		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Change nothing. kiln-case-same "+noChangeWord)
 		f.specAndApprove(t, c)
@@ -837,6 +866,7 @@ func TestTick(t *testing.T) {
 	})
 
 	t.Run("one run of the real Claude Code", func(t *testing.T) {
+		t.Parallel()
 		if f.standInOutput == nil {
 			t.Fatal("needs the stand-in's output of the first case")
 		}
@@ -900,6 +930,7 @@ type testCase struct {
 	text     string // card 1's text
 	noHosts  bool   // the core has no list of hosts
 	listen   string // the address its core serves the screen on, if any
+	proxy    string // the proxy of its core, when it is not the test's
 	starts   *lines // the names of the instance's containers, once per start
 	saves    *lines // the names of the run's containers, its save's included, once per start
 	// What the instance's copy holds before the run: its refs and its objects.
@@ -1101,7 +1132,7 @@ func (f *fixture) newCase(t *testing.T, image string) *testCase {
 		t.Fatal(err)
 	}
 	c.run = c.instance + "-1-1"
-	t.Cleanup(func() { removeInstance(f.proxy.Name, c.instance) })
+	t.Cleanup(func() { removeInstance(cmp.Or(c.proxy, f.proxy.Name), c.instance) })
 	c.starts = watchEvents(t, "label=kiln.instance="+c.instance, "start", time.Now().Add(-5*time.Second))
 	c.saves = watchEvents(t, "label=kiln.run="+c.run, "start", time.Now().Add(-5*time.Second))
 	c.repo, c.commit = bareRepo(t, map[string]string{
@@ -1122,7 +1153,7 @@ func copyHolds(t *testing.T, repo string) (refs, objects string) {
 // config is the configuration of a case's core.
 func (f *fixture) config(c *testCase) Config {
 	cfg := Config{Data: c.data, Repo: c.repo, Model: model, ImplementModel: implementModel, ReviewModel: reviewModel,
-		Image: c.image, Proxy: f.proxy.Name, Listen: c.listen}
+		Image: c.image, Proxy: cmp.Or(c.proxy, f.proxy.Name), Listen: c.listen}
 	if !c.noHosts {
 		cfg.Hosts, cfg.WayOutImage, cfg.WayOutNetwork = hosts, f.wayOutImage, f.outward
 	}
@@ -1668,6 +1699,30 @@ func assertNothingLeft(t *testing.T, word string) {
 			if strings.Contains(n, word) {
 				t.Errorf("left on the engine: %s", n)
 			}
+		}
+	}
+}
+
+// testNetwork creates a network of the test's own, which it removes
+// afterwards, with an IPv4 subnet out of 10.231.0.0/16 chosen at random,
+// tried again when another network has it. The engine's own pools have about
+// thirty subnets for every network on it, and every run takes one of them
+// (see check/in-image); the test's networks take none.
+func testNetwork(t *testing.T, name string, args ...string) {
+	t.Helper()
+	t.Cleanup(func() { dockerQuiet("network", "rm", name) })
+	for try := 0; ; try++ {
+		b := make([]byte, 1)
+		if _, err := rand.Read(b); err != nil {
+			t.Fatal(err)
+		}
+		subnet := fmt.Sprintf("10.231.%d.0/24", b[0])
+		_, err := docker(t.Context(), append(append([]string{"network", "create", "--subnet", subnet}, args...), name)...)
+		if err == nil {
+			return
+		}
+		if !strings.Contains(err.Error(), "overlaps") || try == 20 {
+			t.Fatal(err)
 		}
 	}
 }
