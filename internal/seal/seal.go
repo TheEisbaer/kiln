@@ -105,11 +105,32 @@ func ReplaceProxy(ctx context.Context, p Proxy, credentialCommand string) error 
 	return StartProxy(ctx, p, credential)
 }
 
+// dirKey is the key of the directory InDir puts in a context.
+type dirKey struct{}
+
+// InDir is a context under which every command the seal runs, docker and the
+// credential command, runs in dir, a directory its caller owns, and not in the
+// directory the process was started in, which may have been removed since
+// (card 16).
+func InDir(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, dirKey{}, dir)
+}
+
+// commandIn is a command that runs in the context's directory, if InDir gave it
+// one.
+func commandIn(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if dir, ok := ctx.Value(dirKey{}).(string); ok {
+		cmd.Dir = dir
+	}
+	return cmd
+}
+
 // runCredentialCommand runs the instance's credential command (ADR 0040) and
 // returns what it printed to standard output, trimmed. Its standard error is
 // discarded, and an error never carries what the command printed.
 func runCredentialCommand(ctx context.Context, command string) (string, error) {
-	out, err := exec.CommandContext(ctx, "sh", "-c", command).Output()
+	out, err := commandIn(ctx, "sh", "-c", command).Output()
 	if err != nil {
 		// The text of an exit error is the exit status alone; Output keeps the
 		// standard error in a field that is not part of it.
@@ -367,7 +388,7 @@ func networkExists(ctx context.Context, name string) (bool, error) {
 // printed to standard output, without the final newline. A failure carries what
 // it printed to standard error.
 func docker(ctx context.Context, env []string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := commandIn(ctx, "docker", args...)
 	cmd.Env = append(os.Environ(), env...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -382,7 +403,7 @@ func docker(ctx context.Context, env []string, args ...string) (string, error) {
 // either of which may be nil, as the bytes come. A failure carries what it
 // printed to standard error.
 func dockerIO(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := commandIn(ctx, "docker", args...)
 	cmd.Stdin, cmd.Stdout = stdin, stdout
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

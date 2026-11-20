@@ -36,6 +36,9 @@ type child struct {
 	// there would, returning once the interrupt has cancelled core's context;
 	// or fail, which fails the step (run only).
 	Hook string
+	// GoneDir starts core in a working directory of its own, removed before
+	// the core starts, as one started in a directory removed later is.
+	GoneDir bool
 }
 
 // exitAtPoint is the status with which the binary exits at a point, as a kill
@@ -71,6 +74,19 @@ func asKiln(spec string) int {
 		return 0
 	case "core":
 		interval = testInterval
+		if c.GoneDir {
+			dir, err := os.MkdirTemp("", "kiln-ticktest-gone-")
+			if err == nil {
+				err = os.Chdir(dir)
+			}
+			if err == nil {
+				err = os.Remove(dir)
+			}
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 2
+			}
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		where, point, how := hook(c.Hook)
@@ -248,6 +264,17 @@ func show(d *store.Doc) string {
 func TestInputs(t *testing.T) {
 	c := &core{Config: Config{Data: t.TempDir(), Repo: "/repo.git", Image: "kiln-run", Proxy: "kiln-proxy",
 		Hosts: []string{"go.dev"}, WayOutImage: "kiln-wayout", WayOutNetwork: "kiln-web"}, instance: "ab12cd34"}
+	s, err := store.Open(filepath.Join(c.Data, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	c.store = s
+	if cd, err := s.Create("The card's text."); err != nil {
+		t.Fatal(err)
+	} else if _, err := s.Move(cd.ID, waiting, store.CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
 	row := store.RunRow{ID: "ab12cd34-1-1", Card: 1, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}
 	card := store.Card{ID: 1, Text: "The card's text.", State: waiting}
 
@@ -447,7 +474,9 @@ func TestStageInputs(t *testing.T) {
 			told   bool
 		}{
 			{"Verdict: goes back\n\n1. NOTES.md lacks a line.\n", true},
-			{"Verdict: passes\n", false},
+			// Only the developer's send-back puts a card in implement after a
+			// review that passed (card 16).
+			{"Verdict: passes\n", true},
 			{"No verdict here.\n", false},
 		} {
 			c, main := stagedCore(t)
@@ -540,7 +569,7 @@ func TestStageInputs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.HasPrefix(held, "the change is ") || !strings.HasSuffix(held, " bytes as a diff, more than 1048576; no review run is started") {
+		if held != "the change is 1.3 MiB as a diff, more than 1 MiB; no review run is started" {
 			t.Errorf("held is %q", held)
 		}
 		if _, err := os.Stat(filepath.Join(c.Data, "instructions", row.ID+".md")); err == nil || in.ID != "" {
@@ -570,6 +599,143 @@ func TestStageInputs(t *testing.T) {
 		}
 	})
 
+	// After the developer's move with a note, the run is told the note last;
+	// a spec run is told the spec it revises before it (card 16).
+	t.Run("spec, sent back with a note", func(t *testing.T) {
+		c, main := stagedCore(t)
+		if _, err := c.store.Decide(1, store.Again, "  Name the table moves.\n"); err != nil {
+			t.Fatal(err)
+		}
+		in, held, err := c.inputs(ctx, newRow(c, main), card(c), false)
+		if err != nil || held != "" {
+			t.Fatal(err, held)
+		}
+		want := instructions.Spec + "## The card\n\nThe card's text.\n\n## The last spec\n\n# The spec\n\n" +
+			"## The developer's note\n\nThe developer wrote this when sending the card back. Follow it. " +
+			"Where it differs from the spec, the note wins.\n\nName the table moves."
+		if got := string(readFile(t, in.Instruction)); got != want {
+			t.Errorf("the spec run after a note is told\n%q\nwant\n%q", got, want)
+		}
+	})
+
+	t.Run("spec, again with a note and no spec", func(t *testing.T) {
+		c, main := stagedCore(t)
+		// A spec run that failed and wrote no spec, on a card of its own.
+		if _, err := c.store.Create("Another card."); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.store.Move(2, store.State{Stage: store.Spec, WaitsFor: store.Developer}, store.CauseRule); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.store.Decide(2, store.Again, "Look at go.dev first."); err != nil {
+			t.Fatal(err)
+		}
+		other, _ := c.store.Card(2)
+		row := store.RunRow{ID: "ab12cd34-2-1", Card: 2, Commit: main, Model: c.model(store.Spec), Effort: "high"}
+		in, _, err := c.inputs(ctx, row, other, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h := toldParts(t, string(readFile(t, in.Instruction)), instructions.Spec); !reflect.DeepEqual(h, []string{"## The card", "## The developer's note"}) {
+			t.Errorf("the headings are %q", h)
+		}
+	})
+
+	t.Run("spec, again without a note", func(t *testing.T) {
+		c, main := stagedCore(t)
+		if _, err := c.store.Move(1, store.State{Stage: store.Spec, WaitsFor: store.Developer}, store.CauseRule); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.store.Decide(1, store.Again, ""); err != nil {
+			t.Fatal(err)
+		}
+		in, _, err := c.inputs(ctx, newRow(c, main), card(c), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := string(readFile(t, in.Instruction)), instructions.Spec+"## The card\n\nThe card's text."; got != want {
+			t.Errorf("the spec run again is told\n%q\nwant\n%q", got, want)
+		}
+	})
+
+	// After a send-back to spec, the spec run is told the spec it replaces,
+	// the newest report or review, which says why, and the note, if any.
+	t.Run("spec, sent back to spec", func(t *testing.T) {
+		for _, tc := range []struct {
+			what     string
+			stage    store.Stage
+			doc      *store.Doc
+			note     string
+			headings []string
+			end      string
+		}{
+			{"from implement, with a note", store.Implement, &store.Doc{Kind: store.KindReport, Text: "# Report\n\nThe spec names a file that is gone.\n"},
+				"Write it for the new layout.", []string{"## The card", "## The last spec", "## The last report", "## The developer's note"},
+				"## The last report\n\n# Report\n\nThe spec names a file that is gone.\n\n## The developer's note\n\n" + noteIntro + "\n\nWrite it for the new layout."},
+			{"from review, without a note", store.Review, &store.Doc{Kind: store.KindReview, Text: "Verdict: goes back\n\n1. The spec asks for two things.\n"},
+				"", []string{"## The card", "## The last spec", "## The last review"},
+				"## The last spec\n\n# The spec\n\n## The last review\n\nVerdict: goes back\n\n1. The spec asks for two things.\n"},
+		} {
+			t.Run(tc.what, func(t *testing.T) {
+				c, main := stagedCore(t)
+				endRun(t, c, tc.stage, store.State{Stage: tc.stage, WaitsFor: store.Developer}, tc.doc)
+				if _, err := c.store.Decide(1, store.ToSpec, tc.note); err != nil {
+					t.Fatal(err)
+				}
+				in, _, err := c.inputs(ctx, newRow(c, main), card(c), false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := string(readFile(t, in.Instruction))
+				if h := toldParts(t, got, instructions.Spec); !reflect.DeepEqual(h, tc.headings) {
+					t.Errorf("the headings are %q, want %q", h, tc.headings)
+				}
+				if !strings.HasSuffix(got, tc.end) {
+					t.Errorf("the spec run is told\n%s\nwant it to end with\n%s", got, tc.end)
+				}
+			})
+		}
+	})
+
+	t.Run("implement, sent back from a review that passed", func(t *testing.T) {
+		c, main := stagedCore(t)
+		endRun(t, c, store.Implement, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})
+		tip := commitOnBranch(t, c.Repo, main, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+		endRun(t, c, store.Review, reviewPassed, &store.Doc{Kind: store.KindReview, Text: "Verdict: passes\n\nAll good.\n"})
+		if _, err := c.store.Decide(1, store.SendBack, "Keep the old heading."); err != nil {
+			t.Fatal(err)
+		}
+		in, _, err := c.inputs(ctx, newRow(c, tip), card(c), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := instructions.Implement + "## The card\n\nThe card's text.\n\n## The approved spec\n\n# The spec\n\n" +
+			"## The last review\n\nVerdict: passes\n\nAll good.\n\n## The developer's note\n\n" + noteIntro + "\n\nKeep the old heading."
+		if got := string(readFile(t, in.Instruction)); got != want {
+			t.Errorf("the implement run after a send-back is told\n%q\nwant\n%q", got, want)
+		}
+	})
+
+	t.Run("review, again with a note", func(t *testing.T) {
+		c, main := stagedCore(t)
+		tip := commitOnBranch(t, c.Repo, main, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+		endRun(t, c, store.Review, reviewNeedsYou, nil)
+		if _, err := c.store.Decide(1, store.Again, "Read the tests too."); err != nil {
+			t.Fatal(err)
+		}
+		in, _, err := c.inputs(ctx, newRow(c, tip), card(c), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(readFile(t, in.Instruction))
+		if h := toldParts(t, got, instructions.Review); !reflect.DeepEqual(h, []string{"## The card", "## The approved spec", "## The change", "## The developer's note"}) {
+			t.Errorf("the headings are %q", h)
+		}
+		if !strings.HasSuffix(got, "\n\nRead the tests too.") {
+			t.Errorf("the note is not the end of\n%s", got)
+		}
+	})
+
 	t.Run("spec, with a branch", func(t *testing.T) {
 		c, main := stagedCore(t)
 		commitOnBranch(t, c.Repo, main, map[string]string{"NOTES.md": "x\n"})
@@ -580,6 +746,54 @@ func TestStageInputs(t *testing.T) {
 			t.Errorf("a spec run starts from %q (%v), want main's %s", commit, err, main)
 		}
 	})
+}
+
+// TestStartedInAGoneDirectory runs the git commands of a tick from a working
+// directory that has been removed, as a core started in a directory removed
+// later does: each runs in the instance's copy of the repo (card 16).
+func TestStartedInAGoneDirectory(t *testing.T) {
+	ctx := t.Context()
+	c, main := stagedCore(t)
+	tip := commitOnBranch(t, c.Repo, main, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.store.Move(1, reviewWaits, store.CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	cd, _ := c.store.Card(1)
+	commit, held, err := c.startsFrom(ctx, cd)
+	if err != nil || held != "" || commit != tip {
+		t.Fatalf("startsFrom: %q, %q, %v", commit, held, err)
+	}
+	if _, held, err := c.inputs(ctx, store.RunRow{ID: "ab12cd34-1-2", Card: 1, Commit: tip, Model: "m", Effort: "high"}, cd, false); err != nil || held != "" {
+		t.Errorf("inputs: %q, %v", held, err)
+	}
+	if ch, err := c.change(ctx, 1); err != nil || ch == nil || len(ch.Commits) != 1 {
+		t.Errorf("change: %+v, %v", ch, err)
+	}
+}
+
+// TestMebibytes says a size over the limit for a person, and never as the
+// limit.
+func TestMebibytes(t *testing.T) {
+	for n, want := range map[int64]string{
+		1<<20 + 1:         "1.01 MiB",
+		1<<20 + 50<<10:    "1.05 MiB",
+		1<<20 + 60<<10:    "1.1 MiB",
+		1_363_149:         "1.3 MiB",
+		25<<20 + 900<<10:  "25.9 MiB",
+		25<<20 + 1000<<10: "26.0 MiB",
+	} {
+		if got := mebibytes(n); got != want {
+			t.Errorf("mebibytes(%d) = %q, want %q", n, got, want)
+		}
+	}
 }
 
 func TestFenced(t *testing.T) {

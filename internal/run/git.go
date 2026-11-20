@@ -21,7 +21,7 @@ import (
 // git at another repo or index. A failure carries what git printed to standard
 // error.
 func git(ctx context.Context, repo string, stdin io.Reader, env []string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"--git-dir=" + repo}, args...)...)
+	cmd := gitCommand(ctx, repo, args...)
 	cmd.Env = append(gitEnv(), env...)
 	cmd.Stdin = stdin
 	var stderr strings.Builder
@@ -31,6 +31,20 @@ func git(ctx context.Context, repo string, stdin io.Reader, env []string, args .
 		return nil, fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
+}
+
+// gitCommand is git on a repo, run in the repo's directory, which the core
+// owns, and never in the directory the process was started in, which may have
+// been removed since: git cannot start without a directory it can read. Git
+// outside any repo, on os.DevNull, runs in the root directory, which is always
+// there.
+func gitCommand(ctx context.Context, repo string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"--git-dir=" + repo}, args...)...)
+	cmd.Dir = repo
+	if repo == os.DevNull {
+		cmd.Dir = "/"
+	}
+	return cmd
 }
 
 // gitLine is git with its output trimmed of the final newline.
@@ -104,7 +118,7 @@ func placingTar(ctx context.Context, repo string, entries []treeEntry) ([]byte, 
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "--git-dir="+repo, "cat-file", "--batch")
+	cmd := gitCommand(ctx, repo, "cat-file", "--batch")
 	cmd.Env = gitEnv()
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -238,7 +252,7 @@ func commitSave(ctx context.Context, repo, tree, parent, id string, date time.Ti
 
 // branchAt returns the commit a branch is at, or "" when it does not exist.
 func branchAt(ctx context.Context, repo, ref string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "--git-dir="+repo, "rev-parse", "--verify", "--quiet", ref)
+	cmd := gitCommand(ctx, repo, "rev-parse", "--verify", "--quiet", ref)
 	cmd.Env = gitEnv()
 	out, err := cmd.Output()
 	var exit *exec.ExitError
@@ -262,7 +276,7 @@ func moveBranch(ctx context.Context, repo, ref, commit, old string) error {
 
 // isSymbolic reports whether a ref is a symbolic ref.
 func isSymbolic(ctx context.Context, repo, ref string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "--git-dir="+repo, "symbolic-ref", "--quiet", ref)
+	cmd := gitCommand(ctx, repo, "symbolic-ref", "--quiet", ref)
 	cmd.Env = gitEnv()
 	err := cmd.Run()
 	var exit *exec.ExitError

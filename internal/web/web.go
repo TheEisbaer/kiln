@@ -183,6 +183,7 @@ type (
 		Stage     store.Stage    `json:"stage"`
 		WaitsFor  store.WaitsFor `json:"waits_for"`
 		Reason    string         `json:"reason"`
+		Dropped   bool           `json:"dropped"`
 		Run       *flightJSON    `json:"run"`
 		Documents []string       `json:"documents"`
 	}
@@ -194,13 +195,18 @@ type (
 	cardJSON struct {
 		tileJSON
 		Text      string         `json:"text"`
-		Moves     []store.Action `json:"moves"`
+		Moves     []moveJSON     `json:"moves"`
+		Note      string         `json:"note"`
 		History   []entryJSON    `json:"history"`
 		Runs      []runJSON      `json:"runs"`
 		Documents []documentJSON `json:"documents"`
 		Activity  []activityJSON `json:"activity"`
 		Change    *changeJSON    `json:"change"`
 		Now       time.Time      `json:"now"`
+	}
+	moveJSON struct {
+		Action store.Action `json:"action"`
+		Note   store.Note   `json:"note"`
 	}
 	changeJSON struct {
 		Branch   string       `json:"branch"`
@@ -224,6 +230,8 @@ type (
 		WaitsFor store.WaitsFor `json:"waits_for"`
 		Run      string         `json:"run"`
 		Reason   string         `json:"reason"`
+		Note     string         `json:"note"`
+		Dropped  bool           `json:"dropped"`
 	}
 	runJSON struct {
 		ID      string       `json:"id"`
@@ -265,7 +273,7 @@ func started(t time.Time) *time.Time {
 
 func tile(s store.Summary) tileJSON {
 	t := tileJSON{ID: s.ID, Title: title(s.Text), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
-		Documents: s.Kinds}
+		Dropped: s.Dropped, Documents: s.Kinds}
 	if t.Documents == nil {
 		t.Documents = []string{}
 	}
@@ -366,17 +374,21 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 		return cardJSON{}, err
 	}
 	sum := store.Summary{Card: c}
-	if len(history) > 0 {
-		sum.Reason = history[len(history)-1].Reason
-	}
-	out := cardJSON{Text: c.Text, Moves: store.Moves(c.State), History: []entryJSON{}, Runs: []runJSON{},
+	out := cardJSON{Text: c.Text, History: []entryJSON{}, Runs: []runJSON{},
 		Documents: []documentJSON{}, Activity: []activityJSON{}, Now: time.Now().UTC()}
-	if out.Moves == nil {
-		out.Moves = []store.Action{}
+	if len(history) > 0 {
+		last := history[len(history)-1]
+		sum.Reason, sum.Dropped = last.Reason, store.Dropped(last.State, last.Cause, last.Reason)
+		// The note that the run the card waits for is told, as the tick
+		// reads it (store.Note).
+		if c.WaitsFor == store.Run {
+			out.Note = last.Note()
+		}
 	}
 	for _, e := range history {
 		out.History = append(out.History, entryJSON{Number: e.Number, At: e.At, Cause: e.Cause, Stage: e.Stage,
-			WaitsFor: e.WaitsFor, Run: e.Run, Reason: e.Reason})
+			WaitsFor: e.WaitsFor, Run: e.Run, Reason: e.Reason, Note: e.Note(),
+			Dropped: store.Dropped(e.State, e.Cause, e.Reason)})
 	}
 	for _, r := range runs {
 		out.Runs = append(out.Runs, runJSON{ID: r.ID, Commit: r.Commit, Model: r.Model, Effort: r.Effort,
@@ -385,6 +397,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 			sum.InFlight = &r
 		}
 	}
+	out.Moves = movesJSON(store.Moves(c.State, sum.InFlight != nil))
 	seen := map[string]bool{}
 	for _, d := range docs {
 		out.Documents = append(out.Documents, documentJSON{Kind: d.Kind, Run: d.Run, Text: d.Text})
@@ -442,19 +455,30 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Action store.Action `json:"action"`
+		Note   string       `json:"note"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		fail(w, http.StatusBadRequest, `the body must be {"action": …}`)
+		fail(w, http.StatusBadRequest, `the body must be {"action": …, "note": …}, the note optional`)
 		return
 	}
-	c, err := h.store.Decide(id, body.Action)
+	c, err := h.store.Decide(id, body.Action, body.Note)
 	switch {
 	case errors.Is(err, store.ErrNoCard):
 		fail(w, http.StatusNotFound, fmt.Sprintf("no card %d", id))
 		return
+	case errors.Is(err, store.ErrNote):
+		// The sentence of what does not fit, such as "this move needs a note
+		// that says what should change".
+		fail(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), store.ErrNote.Error()+": "))
+		return
 	case errors.Is(err, store.ErrRefused):
+		inFlight, ferr := h.store.InFlight(c.ID)
+		if ferr != nil {
+			fail(w, http.StatusInternalServerError, ferr.Error())
+			return
+		}
 		reply(w, http.StatusConflict, map[string]any{"error": err.Error(), "stage": c.Stage, "waits_for": c.WaitsFor,
-			"moves": nonNil(store.Moves(c.State))})
+			"moves": movesJSON(store.Moves(c.State, inFlight != nil))})
 		return
 	case err != nil:
 		fail(w, http.StatusInternalServerError, err.Error())
@@ -469,11 +493,14 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 	reply(w, http.StatusOK, out)
 }
 
-func nonNil(a []store.Action) []store.Action {
-	if a == nil {
-		return []store.Action{}
+// movesJSON are the moves a card's state allows, each with what it takes of a
+// note, so that the page asks for a note where one is needed.
+func movesJSON(moves []store.Allowed) []moveJSON {
+	out := []moveJSON{}
+	for _, m := range moves {
+		out = append(out, moveJSON{Action: m.Action, Note: m.Note})
 	}
-	return a
+	return out
 }
 
 func reply(w http.ResponseWriter, status int, v any) {

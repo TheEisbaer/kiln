@@ -166,6 +166,20 @@ func TestTick(t *testing.T) {
 		f.standInOutput = readFile(t, filepath.Join(c.data, "runs", c.run, "output.jsonl"))
 	})
 
+	// A core whose working directory is removed runs every command in a
+	// directory it owns, and its card's run ends as it would (card 16).
+	t.Run("a core started in a directory that is gone", func(t *testing.T) {
+		c := f.newCase(t, f.standIn)
+		f.card(t, c, "Add a line to NOTES.md.")
+		core, done := f.start(t, child{Command: "core", Config: f.config(c), GoneDir: true})
+		f.waitEnded(t, c)
+		f.stop(t, core, done)
+		f.assertEnded(t, c, store.Finished)
+		if strings.Contains(core.Stderr.(*bytes.Buffer).String(), "working directory") {
+			t.Errorf("the core says:\n%s", core.Stderr)
+		}
+	})
+
 	t.Run("killed, then started again", func(t *testing.T) {
 		for _, point := range []string{"after-instruction", "before-add", "after-add", "following",
 			"record", "record, damaged", "before-end", "after-end"} {

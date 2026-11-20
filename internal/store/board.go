@@ -86,10 +86,12 @@ func (s *Store) Runs(card int64) ([]RunAt, error) {
 }
 
 // Summary is what the board shows of a card: the card, the reason of its last
-// entry, its run in flight, if any, and the kinds of the documents it has.
+// entry and whether that entry dropped it, its run in flight, if any, and the
+// kinds of the documents it has.
 type Summary struct {
 	Card
 	Reason   string
+	Dropped  bool
 	InFlight *RunAt
 	Kinds    []string
 }
@@ -122,20 +124,22 @@ func (s *Store) Board() ([]Summary, error) {
 		return nil, err
 	}
 
-	rows, err = tx.Query(`SELECT card, reason FROM entries
+	rows, err = tx.Query(`SELECT card, cause, reason FROM entries
 		WHERE number IN (SELECT max(number) FROM entries GROUP BY card)`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var card int64
+		var cause Cause
 		var reason sql.NullString
-		if err := rows.Scan(&card, &reason); err != nil {
+		if err := rows.Scan(&card, &cause, &reason); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		if i, ok := at[card]; ok {
 			out[i].Reason = reason.String
+			out[i].Dropped = Dropped(out[i].State, cause, reason.String)
 		}
 	}
 	if err := errorsOf(rows); err != nil {

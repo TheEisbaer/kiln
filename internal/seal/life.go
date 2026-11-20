@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"path"
 	"strings"
 	"time"
@@ -281,7 +280,7 @@ func ReadRun(ctx context.Context, id string, follow bool, stdout, stderr io.Writ
 	if follow {
 		args = append(args, "--follow")
 	}
-	cmd := exec.CommandContext(ctx, "docker", append(args, c.id)...)
+	cmd := commandIn(ctx, "docker", append(args, c.id)...)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker logs: %w", err)

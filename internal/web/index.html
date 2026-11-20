@@ -278,6 +278,10 @@ button:disabled { opacity: .55; cursor: default; }
 .badge.ready { color: var(--dot-review); }
 .badge.done { color: var(--dot-done); }
 .badge.idle { color: var(--muted); }
+.badge.dropped { color: var(--muted); border-style: dashed; background: transparent; }
+.tile.dropped { background: transparent; box-shadow: none; border-style: dashed; border-color: var(--line); }
+.tile.dropped .t { color: var(--muted); font-weight: 500; }
+.tile.dropped:hover { background: var(--surface); }
 .pulse { position: relative; width: 8px; height: 8px; flex: none; }
 .pulse::before, .pulse::after {
   content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--accent);
@@ -333,6 +337,18 @@ button:disabled { opacity: .55; cursor: default; }
 .moves { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 20px; }
 .moves .note { font-size: 12.5px; color: var(--muted); align-self: center; }
 .moves .err { font-size: 12.5px; color: var(--amber-ink); align-self: center; }
+.moves .drop {
+  margin-left: auto; align-self: center; padding: 4px 10px; font-size: 12.5px;
+  color: var(--muted); background: transparent; border-color: transparent;
+}
+.moves .drop:hover { color: var(--del); background: var(--del-soft); border-color: transparent; }
+.yournote {
+  border-radius: 10px; padding: 10px 14px; margin: 0 0 16px;
+  background: var(--surface); border: 1px solid var(--line-soft); border-left: 3px solid var(--accent);
+}
+.yournote .label { font-size: 11.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+.words { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font-size: 13.5px; }
+.reason .words { margin-top: 6px; color: var(--text-2); }
 .section { margin-top: 26px; }
 .section > h2 {
   font-size: 11.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
@@ -424,6 +440,7 @@ button:disabled { opacity: .55; cursor: default; }
 .timeline .when { margin-left: auto; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .timeline .why { font-size: 12.5px; color: var(--text-2); margin-top: 2px; overflow-wrap: anywhere; }
 .timeline .run { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+.timeline .words { font-size: 12.5px; color: var(--text-2); margin-top: 4px; padding-left: 10px; border-left: 2px solid color-mix(in srgb, var(--accent) 45%, var(--line)); }
 
 /* The dialog */
 dialog {
@@ -446,6 +463,11 @@ dialog .need { margin: 8px 0 0; font-size: 12.5px; color: var(--amber-ink); }
 dialog .act { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 14px; }
 dialog .act .hint { margin-right: auto; font-size: 12px; color: var(--faint); }
 dialog .act .err { margin-right: auto; font-size: 12.5px; color: var(--amber-ink); }
+dialog.small { width: min(520px, calc(100vw - 32px)); }
+dialog.small textarea { min-height: 130px; }
+dialog label { display: block; font-size: 12.5px; font-weight: 600; color: var(--text-2); margin: 0 0 6px; }
+button.danger { background: var(--del); border-color: var(--del); color: var(--bg); font-weight: 600; }
+button.danger:hover { filter: brightness(1.06); background: var(--del); border-color: var(--del); }
 kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; }
 
 @media (max-width: 900px) {
@@ -489,6 +511,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
     <h1 id="p-title"></h1>
     <div id="p-reason"></div>
     <div class="moves" id="p-moves"></div>
+    <div id="p-note"></div>
     <div id="p-live"></div>
     <div id="p-docs"></div>
     <div class="section"><h2>The card</h2><pre class="cardtext" id="p-text"></pre></div>
@@ -508,6 +531,19 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
     </div>
   </div>
 </dialog>
+<dialog id="note" class="small" aria-labelledby="n-title">
+  <div class="in">
+    <h2 id="n-title"></h2>
+    <p id="n-what"></p>
+    <label for="n-text" id="n-label">What should change?</label>
+    <textarea id="n-text" spellcheck="true"></textarea>
+    <div class="act">
+      <span class="hint" id="n-hint"></span>
+      <button type="button" id="n-cancel">Cancel</button>
+      <button type="button" id="n-go" class="primary"></button>
+    </div>
+  </div>
+</dialog>
 <script>
 "use strict";
 // Every text of a card, a run or a document is put in with textContent or as
@@ -517,13 +553,20 @@ const STAGES = [
   ["backlog", "Backlog"], ["spec", "Spec"], ["implement", "Implement"], ["review", "Review"], ["done", "Done"],
 ];
 const STAGE_NAME = Object.fromEntries(STAGES);
-// The label of a move; "again" is named for the card's stage.
+// The label of a move; "again" is named for the card's stage, and sends a spec
+// that waits for approval back.
 const MOVES = {
-  approve: "Approve the spec",
+  approve: "Approve",
   "send-back": "Send back to implement",
-  done: "Mark done",
+  done: "Done",
+  "to-spec": "Send back to spec",
+  drop: "Drop the card",
 };
 const AGAIN = { spec: "Run the spec again", implement: "Run implement again", review: "Run the review again" };
+function moveLabel(c, action) {
+  if (action === "again") return c.stage === "spec" && c.waits_for === "approval" ? "Send back with a note" : AGAIN[c.stage] || "Run again";
+  return MOVES[action] || action;
+}
 const KIND_NAME = { spec: "The spec", report: "The report", review: "The review" };
 const WAITS = {
   run: "waits for a run", approval: "waits for your approval", developer: "needs you",
@@ -609,6 +652,7 @@ function badgeOf(c) {
   if (c.waits_for === "developer") return c.stage === "backlog" ? ["idle", "not started"] : ["needs", "needs you"];
   if (c.waits_for === "room") return ["idle", "queued"];
   if (c.waits_for === "host") return ["ready", "ready to merge"];
+  if (c.dropped) return ["dropped", "dropped"];
   return ["done", "done"];
 }
 
@@ -680,12 +724,13 @@ function buildColumns() {
 }
 
 function tileOf(c) {
-  const t = el("article", "tile" + (needsYou(c) ? " needs" : ""));
+  const t = el("article", "tile" + (needsYou(c) ? " needs" : "") + (c.dropped ? " dropped" : ""));
   t.tabIndex = 0;
   t.dataset.id = c.id;
   t.append(el("span", "id", "#" + c.id), el("div", "t", c.title || "(no title)"));
   const foot = el("div", "foot");
-  foot.append(badge(c));
+  // In the column done, a finished card shows no badge, and a dropped one says so.
+  if (c.stage !== "done" || c.dropped) foot.append(badge(c));
   if (c.documents.length) foot.append(el("span", "docs", c.documents.join(" · ")));
   t.append(foot);
   t.addEventListener("click", () => openCard(c.id));
@@ -991,7 +1036,7 @@ function renderMissing(id) {
   $("p-id").textContent = "#" + id;
   $("p-state").replaceChildren();
   $("p-title").textContent = "There is no card #" + id + ".";
-  for (const k of ["p-reason", "p-moves", "p-live", "p-docs", "p-history"]) $(k).replaceChildren();
+  for (const k of ["p-reason", "p-moves", "p-note", "p-live", "p-docs", "p-history"]) $(k).replaceChildren();
   $("p-text").textContent = "";
   cardKeys = {};
 }
@@ -1012,17 +1057,35 @@ function renderCard(c) {
     st.replaceChildren(el("span", "dot " + c.stage), el("span", null, STAGE_NAME[c.stage]), badge(c));
     $("p-title").textContent = c.title || "(no title)";
   });
-  part("reason", [c.stage, c.waits_for, c.reason, !!c.run], () => {
+  const last = c.history[c.history.length - 1];
+  part("reason", [c.stage, c.waits_for, c.reason, !!c.run, c.dropped, c.note], () => {
     const box = $("p-reason");
     box.replaceChildren();
-    // While a run is in flight, the last reason is of an earlier run.
-    if (c.run || (!c.reason && !needsYou(c))) return;
+    if (c.dropped) {
+      const r = el("div", "reason");
+      r.append(el("b", null, "Dropped by you."));
+      if (last && last.note) r.append(el("div", "words", last.note));
+      box.append(r);
+      return;
+    }
+    // While a run is in flight, the last reason is of an earlier run; a note
+    // of the developer's shows as theirs, below.
+    if (c.run || c.note || (!c.reason && !needsYou(c))) return;
     const r = el("div", "reason" + (needsYou(c) ? " needs" : ""));
     if (needsYou(c)) r.append(el("b", null, "Needs you. "));
     reasonInto(r, c.reason, stopped(c));
     box.append(r);
   });
+  shownCard = c;
   part("moves", [c.id, c.stage, c.moves, c.waits_for, sentBack(c)], () => renderMoves(c));
+  part("note", [c.note, c.stage], () => {
+    const box = $("p-note");
+    box.replaceChildren();
+    if (!c.note) return;
+    const n = el("div", "yournote");
+    n.append(el("div", "label", "Your note to the " + STAGE_NAME[c.stage].toLowerCase() + " run"), el("div", "words", c.note));
+    box.append(n);
+  });
   part("live", c.run, () => {
     const box = $("p-live");
     box.replaceChildren();
@@ -1056,47 +1119,147 @@ function sentBack(c) {
   return !!d && d.kind === "review" && /^Verdict: goes back[ \t\r]*(\n|$)/.test(d.text);
 }
 
-// renderMoves shows the moves the card's state allows, the one that matters
-// first and filled: after a review that sends the change back, sending it
-// back; otherwise running the stage again.
+// first is the move that matters first in a state: approving a spec, marking
+// a passed review done, sending back a change a review sent back, and running
+// the stage again otherwise.
+function first(c) {
+  if (c.waits_for === "approval") return c.stage === "review" ? "done" : "approve";
+  return sentBack(c) ? "send-back" : "again";
+}
+
+// renderMoves shows the moves the card's state allows: the one that matters
+// first and filled, the others quiet, sending back to spec last, and dropping
+// the card small and apart, on the right.
 function renderMoves(c) {
   const box = $("p-moves");
   box.replaceChildren();
-  const moves = c.moves.slice();
-  if (sentBack(c)) moves.sort((a, b) => (b === "send-back") - (a === "send-back"));
-  else moves.sort((a, b) => (b === "again") - (a === "again"));
+  const rank = (m) => m.action === first(c) ? 0 : m.action === "to-spec" ? 2 : 1;
+  const moves = c.moves.filter((m) => m.action !== "drop").sort((a, b) => rank(a) - rank(b));
   moves.forEach((m, i) => {
-    const label = m === "again" ? AGAIN[c.stage] || "Run again" : MOVES[m] || m;
-    const b = el("button", i === 0 ? "primary" : "", label);
+    const b = el("button", i === 0 && rank(m) === 0 ? "primary" : "", moveLabel(c, m.action));
     b.type = "button";
-    b.addEventListener("click", () => decide(c.id, m, box));
+    b.addEventListener("click", () => m.note === "none" ? decide(c.id, m.action, "", box) : openNote(m));
     box.append(b);
   });
-  if (!c.moves.length) {
+  if (!moves.length) {
     const note = c.waits_for === "run" ? "Kiln works on it; nothing to do." :
       c.waits_for === "nothing" ? "Nothing left to do." : "No move for this state.";
     box.append(el("span", "note", note));
   }
+  const drop = c.moves.find((m) => m.action === "drop");
+  if (drop) {
+    const b = el("button", "drop", MOVES.drop);
+    b.type = "button";
+    b.addEventListener("click", () => openNote(drop));
+    box.append(b);
+  }
 }
 
-async function decide(id, action, box) {
+// decide sends a move, with a note, and shows the card as it is after it. It
+// answers what the dialog of a note needs to know: done, "moved" when the card
+// had moved meanwhile, or the sentence of a note that does not fit.
+async function decide(id, action, note, box) {
   for (const b of box.querySelectorAll("button")) b.disabled = true;
   try {
-    const r = await api("POST", "/api/cards/" + id + "/decide", { action });
+    const r = await api("POST", "/api/cards/" + id + "/decide", { action, note });
     if (r.status === 409) {
       cardKeys.moves = null;
       await refreshCard();
       $("p-moves").append(el("span", "err", "The card moved meanwhile: it is in " + r.data.stage + ", " + (WAITS[r.data.waits_for] || r.data.waits_for) + "."));
-      return;
+      return { moved: true };
+    }
+    if (r.status === 400) {
+      for (const b of box.querySelectorAll("button")) b.disabled = false;
+      return { refused: sentence((r.data && r.data.error) || "the move was refused") };
     }
     if (!r.ok) throw new Error(r.data && r.data.error);
     setOnline(true);
     renderCard(r.data);
     refreshBoard().catch(() => {});
+    return { done: true };
   } catch (e) {
     setOnline(false);
     for (const b of box.querySelectorAll("button")) b.disabled = false;
+    return { refused: "The core does not answer; nothing was moved." };
   }
+}
+
+// The dialog of a note
+
+let shownCard = null; // the card whose page shows, as last rendered
+let noteMove = null;  // the move the dialog of a note is open for
+
+// noteText is what the dialog says for a move: its title, what happens, the
+// label of its text area and of its button.
+function noteText(c, m) {
+  const stage = STAGE_NAME[c.stage].toLowerCase();
+  const optional = m.note === "optional" ? " A note is optional; the run is told it." : "";
+  switch (m.action) {
+    case "drop": {
+      const branch = c.change && c.change.branch ? " Its branch " + c.change.branch + " stays." : "";
+      return { title: "Drop #" + c.id + " “" + (c.title || "(no title)") + "”?",
+        what: "It goes to done as dropped, and no run is started for it." + branch,
+        label: "Why? Optional; the history keeps it.", go: "Drop the card" };
+    }
+    case "to-spec":
+      return { title: "Send back to spec", what: "The card waits for a new spec run. It is told the spec it replaces and the last report or review." + optional,
+        label: "What should change?", go: "Send back to spec" };
+    case "send-back":
+      return { title: "Send back to implement", what: c.waits_for === "approval" ?
+        "The review passed. The card goes back to implement; the run is told the review and your note, which wins where it differs from the spec." :
+        "The card goes back to implement and waits for a run." + optional,
+        label: "What should change?", go: "Send back" };
+    case "again":
+      if (c.stage === "spec" && c.waits_for === "approval") return { title: "Send the spec back",
+        what: "The card waits for a new spec run. It is told your note and the spec it replaces, and revises it.",
+        label: "What should change?", go: "Send back" };
+      return { title: moveLabel(c, "again"), what: "The card waits for another " + stage + " run." + optional,
+        label: "What should change?", go: moveLabel(c, "again") };
+  }
+  return { title: moveLabel(c, m.action), what: optional.trim(), label: "What should change?", go: moveLabel(c, m.action) };
+}
+
+function openNote(m) {
+  const c = shownCard;
+  if (!c) return;
+  noteMove = { id: c.id, action: m.action, note: m.note };
+  const t = noteText(c, m);
+  $("n-title").textContent = t.title;
+  $("n-what").textContent = t.what;
+  $("n-label").textContent = t.label;
+  $("n-text").value = "";
+  $("n-text").placeholder = m.note === "required" ? "Say what should change, and why." : "";
+  $("n-go").textContent = t.go;
+  $("n-go").className = m.action === "drop" ? "danger" : "primary";
+  const hint = $("n-hint");
+  hint.className = "hint";
+  hint.replaceChildren();
+  const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+  hint.append(el("kbd", null, mac ? "⌘" : "Ctrl"), document.createTextNode(" "), el("kbd", null, "Enter"), document.createTextNode(m.note === "required" ? " sends it, once there is a note" : " sends it"));
+  noteReady();
+  $("note").showModal();
+  $("n-text").focus();
+}
+
+// noteReady turns the dialog's button on, for a required note only once there
+// is text.
+function noteReady() {
+  $("n-go").disabled = !!noteMove && noteMove.note === "required" && !$("n-text").value.trim();
+}
+
+async function sendNote() {
+  if (!noteMove || $("n-go").disabled) return;
+  const { id, action } = noteMove;
+  $("n-go").disabled = true;
+  const r = await decide(id, action, $("n-text").value, $("p-moves"));
+  if (r.refused) {
+    const hint = $("n-hint");
+    hint.className = "err";
+    hint.textContent = r.refused;
+    noteReady();
+    return;
+  }
+  $("note").close();
 }
 
 function activityItem(a) {
@@ -1269,11 +1432,14 @@ function renderHistory(history) {
     const li = el("li");
     const mark = el("span", "mark dot " + e.stage);
     const l1 = el("div", "line1");
-    l1.append(el("span", "to", STAGE_NAME[e.stage] + ", " + (e.stage === "backlog" && e.waits_for === "developer" ? "not started" : WAITS[e.waits_for] || e.waits_for)));
+    const to = e.dropped ? "dropped" : e.stage === "backlog" && e.waits_for === "developer" ? "not started" : WAITS[e.waits_for] || e.waits_for;
+    l1.append(el("span", "to", STAGE_NAME[e.stage] + ", " + to));
     l1.append(el("span", "by", "by " + (e.cause === "developer" ? "you" : e.cause === "run" ? "its run" : "the " + e.cause)));
     l1.append(el("span", "when", when(e.at)));
     li.append(mark, l1);
-    if (e.reason) { const w = el("div", "why"); reasonInto(w, e.reason, ""); li.append(w); }
+    // The developer's note is their words, as they wrote them.
+    if (e.cause === "developer") { if (e.note) li.append(el("div", "words", e.note)); }
+    else if (e.reason) { const w = el("div", "why"); reasonInto(w, e.reason, ""); li.append(w); }
     if (e.run) li.append(el("div", "run", e.run));
     ol.append(li);
   }
@@ -1341,11 +1507,18 @@ $("dialog").addEventListener("close", () => $("new").blur());
 $("d-text").addEventListener("input", () => { if ($("d-text").value.trim()) $("d-need").hidden = true; });
 $("d-add").addEventListener("click", addCard);
 $("d-text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addCard(); } });
+$("n-cancel").addEventListener("click", () => $("note").close());
+$("n-go").addEventListener("click", sendNote);
+$("n-text").addEventListener("input", noteReady);
+$("n-text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendNote(); } });
+// A click outside the dialog, on its backdrop, closes it without a move.
+$("note").addEventListener("click", (e) => { if (e.target === $("note")) $("note").close(); });
+$("note").addEventListener("close", () => { noteMove = null; if (document.activeElement) document.activeElement.blur(); });
 $("p-close").addEventListener("click", closeCard);
 $("scrim").addEventListener("click", closeCard);
 window.addEventListener("hashchange", fromHash);
 document.addEventListener("keydown", (e) => {
-  if ($("dialog").open) return;
+  if ($("dialog").open || $("note").open) return;
   if (e.key === "Escape" && openId !== null) closeCard();
   const typing = /INPUT|TEXTAREA/.test(document.activeElement.tagName);
   if (e.key === "n" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); openDialog(); }

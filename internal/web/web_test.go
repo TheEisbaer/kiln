@@ -167,7 +167,8 @@ func TestCard(t *testing.T) {
 	}
 	c := decode[cardJSON](t, w)
 	if c.ID != id || c.Title != "The card" || c.Text != "The card\n\nits text <b>" || c.Stage != "spec" || c.WaitsFor != "approval" ||
-		c.Reason != "exit 0" || !reflect.DeepEqual(c.Moves, []store.Action{"approve"}) || c.Run != nil {
+		c.Reason != "exit 0" || c.Run != nil || c.Note != "" || c.Dropped ||
+		!reflect.DeepEqual(c.Moves, []moveJSON{{"approve", "none"}, {"again", "required"}, {"drop", "optional"}}) {
 		t.Errorf("the card: %+v", c)
 	}
 	if want := []documentJSON{{"spec", "r1", doc}}; !reflect.DeepEqual(c.Documents, want) {
@@ -184,7 +185,7 @@ func TestCard(t *testing.T) {
 	}
 
 	// The activity of the run in flight, and only of it.
-	if _, err := f.store.Decide(id, store.Approve); err != nil {
+	if _, err := f.store.Decide(id, store.Approve, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.store.AddRun(store.RunRow{ID: "r2", Card: id, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}); err != nil {
@@ -302,23 +303,35 @@ func TestCreate(t *testing.T) {
 	}
 }
 
-// TestDecide sends every row of the table, and three moves that are not in
-// it.
+// TestDecide sends every row of the table, with a note where it takes one,
+// moves that are not in it, and notes that do not fit.
 func TestDecide(t *testing.T) {
 	f := newFixture(t)
+	post := func(id int64, body string) *httptest.ResponseRecorder {
+		return f.do(t, "POST", fmt.Sprintf("/api/cards/%d/decide", id), body)
+	}
+	spec := store.State{Stage: store.Spec, WaitsFor: store.Approval}
+	passed := store.State{Stage: store.Review, WaitsFor: store.Approval}
 	for _, row := range []struct {
-		action   string
-		from, to store.State
+		action, note string
+		from, to     store.State
 	}{
-		{"approve", store.State{Stage: store.Spec, WaitsFor: store.Approval}, store.State{Stage: store.Implement, WaitsFor: store.Run}},
-		{"again", store.State{Stage: store.Spec, WaitsFor: store.Developer}, store.State{Stage: store.Spec, WaitsFor: store.Run}},
-		{"again", store.State{Stage: store.Implement, WaitsFor: store.Developer}, store.State{Stage: store.Implement, WaitsFor: store.Run}},
-		{"again", store.State{Stage: store.Review, WaitsFor: store.Developer}, store.State{Stage: store.Review, WaitsFor: store.Run}},
-		{"send-back", store.State{Stage: store.Review, WaitsFor: store.Developer}, store.State{Stage: store.Implement, WaitsFor: store.Run}},
-		{"done", store.State{Stage: store.Review, WaitsFor: store.Approval}, store.State{Stage: store.Done, WaitsFor: store.Nothing}},
+		{"approve", "", spec, store.State{Stage: store.Implement, WaitsFor: store.Run}},
+		{"again", "Name the table.", spec, store.State{Stage: store.Spec, WaitsFor: store.Run}},
+		{"again", "", store.State{Stage: store.Spec, WaitsFor: store.Developer}, store.State{Stage: store.Spec, WaitsFor: store.Run}},
+		{"again", "", store.State{Stage: store.Implement, WaitsFor: store.Developer}, store.State{Stage: store.Implement, WaitsFor: store.Run}},
+		{"again", "Try once more.", store.State{Stage: store.Review, WaitsFor: store.Developer}, store.State{Stage: store.Review, WaitsFor: store.Run}},
+		{"send-back", "", store.State{Stage: store.Review, WaitsFor: store.Developer}, store.State{Stage: store.Implement, WaitsFor: store.Run}},
+		{"send-back", "Keep the old name.", passed, store.State{Stage: store.Implement, WaitsFor: store.Run}},
+		{"done", "", passed, store.State{Stage: store.Done, WaitsFor: store.Nothing}},
+		{"to-spec", "The spec no longer fits.", store.State{Stage: store.Implement, WaitsFor: store.Developer}, store.State{Stage: store.Spec, WaitsFor: store.Run}},
+		{"to-spec", "", store.State{Stage: store.Review, WaitsFor: store.Developer}, store.State{Stage: store.Spec, WaitsFor: store.Run}},
+		{"drop", "", store.State{Stage: store.Backlog, WaitsFor: store.Developer}, store.State{Stage: store.Done, WaitsFor: store.Nothing}},
+		{"drop", "Not needed.", store.State{Stage: store.Spec, WaitsFor: store.Run}, store.State{Stage: store.Done, WaitsFor: store.Nothing}},
 	} {
 		id := f.card(t, "a card", row.from)
-		w := f.do(t, "POST", fmt.Sprintf("/api/cards/%d/decide", id), `{"action":"`+row.action+`"}`)
+		body, _ := json.Marshal(map[string]string{"action": row.action, "note": "  " + row.note + "\n"})
+		w := post(id, string(body))
 		c := decode[cardJSON](t, w)
 		if w.Code != 200 || c.Stage != row.to.Stage || c.WaitsFor != row.to.WaitsFor {
 			t.Errorf("%s from %v: %d %+v", row.action, row.from, w.Code, c)
@@ -326,25 +339,75 @@ func TestDecide(t *testing.T) {
 		if got, _ := f.store.Card(id); got.State != row.to {
 			t.Errorf("%s from %v: the store has %v", row.action, row.from, got.State)
 		}
+		// The note is the developer's words in the history, and the card's
+		// note while it waits for the run that follows.
+		e := c.History[len(c.History)-1]
+		if e.Note != row.note || e.Cause != "developer" || e.Dropped != (row.action == "drop") || c.Dropped != e.Dropped {
+			t.Errorf("%s from %v: the last entry is %+v, dropped %v", row.action, row.from, e, c.Dropped)
+		}
+		if want := map[bool]string{true: row.note}[row.to.WaitsFor == store.Run]; c.Note != want {
+			t.Errorf("%s from %v: the card's note is %q, want %q", row.action, row.from, c.Note, want)
+		}
 	}
 
+	refused := func(id int64, body string, from store.State, code int, what string) map[string]any {
+		t.Helper()
+		before, _ := f.store.History(id)
+		w := post(id, body)
+		got := decode[map[string]any](t, w)
+		if w.Code != code {
+			t.Errorf("%s: %d %v; want %d", what, w.Code, got, code)
+		}
+		if after, _ := f.store.History(id); len(after) != len(before) {
+			t.Errorf("%s was refused and wrote an entry", what)
+		}
+		if c, _ := f.store.Card(id); c.State != from {
+			t.Errorf("%s was refused and moved the card to %v", what, c.State)
+		}
+		return got
+	}
 	for _, row := range []struct {
 		action string
 		from   store.State
 	}{
 		{"approve", store.State{Stage: store.Spec, WaitsFor: store.Run}},         // a spec not written yet
 		{"send-back", store.State{Stage: store.Spec, WaitsFor: store.Developer}}, // not in review
-		{"drop", store.State{Stage: store.Review, WaitsFor: store.Developer}},    // no such move
+		{"drop", store.State{Stage: store.Done, WaitsFor: store.Nothing}},        // done already
+		{"shelve", store.State{Stage: store.Review, WaitsFor: store.Developer}},  // no such move
 	} {
 		id := f.card(t, "a card", row.from)
-		before, _ := f.store.History(id)
-		w := f.do(t, "POST", fmt.Sprintf("/api/cards/%d/decide", id), `{"action":"`+row.action+`"}`)
-		got := decode[map[string]any](t, w)
-		if w.Code != 409 || got["stage"] != string(row.from.Stage) || got["waits_for"] != string(row.from.WaitsFor) {
-			t.Errorf("%s from %v: %d %v; want 409 with the card's state", row.action, row.from, w.Code, got)
+		got := refused(id, `{"action":"`+row.action+`"}`, row.from, 409, fmt.Sprintf("%s from %v", row.action, row.from))
+		if got["stage"] != string(row.from.Stage) || got["waits_for"] != string(row.from.WaitsFor) {
+			t.Errorf("%s from %v: %v; want the card's state", row.action, row.from, got)
 		}
-		if after, _ := f.store.History(id); len(after) != len(before) {
-			t.Errorf("%s from %v was refused and wrote an entry", row.action, row.from)
+	}
+
+	// A drop of a card with a run in flight is refused as a move not in the
+	// table, and the moves it is answered with have no drop.
+	inFlight := f.card(t, "a card", store.State{Stage: store.Implement, WaitsFor: store.Run})
+	if err := f.store.AddRun(store.RunRow{ID: "r9", Card: inFlight, Commit: "c0ffee", Model: "claude-sonnet-5-5", Effort: "medium"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := refused(inFlight, `{"action":"drop","note":"x"}`, store.State{Stage: store.Implement, WaitsFor: store.Run}, 409, "a drop in flight"); fmt.Sprint(got["moves"]) != "[]" {
+		t.Errorf("the moves of a card with a run in flight: %v", got["moves"])
+	}
+
+	// A note that does not fit is refused with 400 and a sentence.
+	for _, tc := range []struct {
+		what, body string
+		from       store.State
+		want       string
+	}{
+		{"a spec sent back without a note", `{"action":"again"}`, spec, "this move needs a note that says what should change"},
+		{"a spec sent back with white space", `{"action":"again","note":" \n\t "}`, spec, "this move needs a note that says what should change"},
+		{"a passing review sent back without a note", `{"action":"send-back","note":""}`, passed, "this move needs a note that says what should change"},
+		{"an approval with a note", `{"action":"approve","note":"fine"}`, spec, "this move takes no note"},
+		{"done with a note", `{"action":"done","note":"fine"}`, passed, "this move takes no note"},
+		{"a note too long", `{"action":"again","note":"` + strings.Repeat("a", 16<<10+1) + `"}`, spec, "the note is 16.1 KiB, more than 16 KiB"},
+	} {
+		id := f.card(t, "a card", tc.from)
+		if got := refused(id, tc.body, tc.from, 400, tc.what); got["error"] != tc.want {
+			t.Errorf("%s: the error is %q, want %q", tc.what, got["error"], tc.want)
 		}
 	}
 
