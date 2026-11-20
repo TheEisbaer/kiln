@@ -49,6 +49,7 @@ const usage = `usage:
             [--image kiln-run] [--proxy kiln-proxy] [--spec-hosts <* or names, by commas>]
             [--listen 127.0.0.1:4747, a loopback address; empty serves no screen]
             [--page <file>, read on every request instead of the embedded page]
+            [--runs 3, the most runs in flight at once, from 1 to 8]
   kiln card --data <dir> <text>
   kiln run --repo <bare repo> --commit <commit> --branch <branch> --run <id>
            --instruction <file> --model <id> --effort <low|medium|high> --runs <dir>
@@ -77,7 +78,7 @@ func main() {
 }
 
 // coreCommand is `kiln core`. SIGINT or SIGTERM ends it, after the following
-// of a run, which goes on.
+// of every run, which goes on.
 func coreCommand(args []string, stdout, stderr io.Writer) int {
 	var cfg tick.Config
 	fs := flag.NewFlagSet("kiln core", flag.ContinueOnError)
@@ -91,6 +92,7 @@ func coreCommand(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.Proxy, "proxy", proxyName, "the proxy container")
 	fs.StringVar(&cfg.Listen, "listen", "127.0.0.1:4747", "the loopback address the screen is served on; empty serves none")
 	fs.StringVar(&cfg.Page, "page", "", "a file the screen's page is read from on every request instead of the embedded one, for work on the screen")
+	fs.IntVar(&cfg.Runs, "runs", tick.DefaultRuns, fmt.Sprintf("the most runs in flight at once, from 1 to %d", tick.MaxRuns))
 	hosts := fs.String("spec-hosts", "", "the hosts a spec run may reach: * for every public host, or names separated by commas; none by default")
 	if err := fs.Parse(args); err != nil {
 		return 2

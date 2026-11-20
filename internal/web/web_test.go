@@ -40,7 +40,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { s.Close() })
 	act := NewActivity()
-	h, err := Handler(s, Info{Instance: "ab12cd34", Repo: "/data/repo.git", Model: "claude-opus-5-5"}, act, addr)
+	h, err := Handler(s, Info{Instance: "ab12cd34", Repo: "/data/repo.git", Model: "claude-opus-5-5", Runs: 3}, act, addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,18 +115,18 @@ func TestPage(t *testing.T) {
 func TestBoard(t *testing.T) {
 	f := newFixture(t)
 	if b := decode[boardJSON](t, f.do(t, "GET", "/api/board", "")); b.Instance != "ab12cd34" || b.Repo != "/data/repo.git" ||
-		b.Models != (modelsJSON{"claude-opus-5-5", "claude-opus-5-5", "claude-opus-5-5"}) || b.Cards == nil || len(b.Cards) != 0 {
+		b.Models != (modelsJSON{"claude-opus-5-5", "claude-opus-5-5", "claude-opus-5-5"}) || b.Runs != 3 || b.Cards == nil || len(b.Cards) != 0 {
 		t.Fatalf("an empty board: %+v", b)
 	}
 	spec := f.card(t, "\n  Write the screen  \nwith more", store.State{Stage: store.Spec, WaitsFor: store.Run})
-	if err := f.store.AddRun(store.RunRow{ID: "r1", Card: spec, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}); err != nil {
+	if err := f.store.AddRun(store.RunRow{ID: "r1", Card: spec, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.store.EndRun("r1", store.Finished, "exit 0, not saved", store.State{Stage: store.Spec, WaitsFor: store.Approval}, ptr("# Spec")); err != nil {
 		t.Fatal(err)
 	}
 	running := f.card(t, "Runs", store.State{Stage: store.Spec, WaitsFor: store.Run})
-	if err := f.store.AddRun(store.RunRow{ID: "r2", Card: running, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}); err != nil {
+	if err := f.store.AddRun(store.RunRow{ID: "r2", Card: running, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
 	}
 
@@ -189,7 +189,7 @@ func TestCard(t *testing.T) {
 	// JSON text.
 	doc := "# Spec\n<script>alert(1)</script>\x1b]0;title\x07\x1b[2J\n"
 	id := f.card(t, "The card\n\nits text <b>", store.State{Stage: store.Spec, WaitsFor: store.Run})
-	if err := f.store.AddRun(store.RunRow{ID: "r1", Card: id, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}); err != nil {
+	if err := f.store.AddRun(store.RunRow{ID: "r1", Card: id, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.store.EndRun("r1", store.Finished, "exit 0", store.State{Stage: store.Spec, WaitsFor: store.Approval}, ptr(doc)); err != nil {
@@ -226,7 +226,7 @@ func TestCard(t *testing.T) {
 	if _, err := f.store.Decide(id, store.Approve, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.AddRun(store.RunRow{ID: "r2", Card: id, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}); err != nil {
+	if err := f.store.AddRun(store.RunRow{ID: "r2", Card: id, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
@@ -423,7 +423,7 @@ func TestDecide(t *testing.T) {
 	// A drop of a card with a run in flight is refused as a move not in the
 	// table, and the moves it is answered with have no drop.
 	inFlight := f.card(t, "a card", store.State{Stage: store.Implement, WaitsFor: store.Run})
-	if err := f.store.AddRun(store.RunRow{ID: "r9", Card: inFlight, Commit: "c0ffee", Model: "claude-sonnet-5-5", Effort: "medium"}); err != nil {
+	if err := f.store.AddRun(store.RunRow{ID: "r9", Card: inFlight, Commit: "c0ffee", Model: "claude-sonnet-5-5", Effort: "medium"}, 8); err != nil {
 		t.Fatal(err)
 	}
 	if got := refused(inFlight, `{"action":"drop","note":"x"}`, store.State{Stage: store.Implement, WaitsFor: store.Run}, 409, "a drop in flight"); fmt.Sprint(got["moves"]) != "[]" {

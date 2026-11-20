@@ -373,8 +373,9 @@ func TestTick(t *testing.T) {
 				if tc.image != "" {
 					cfg.Image = tc.image
 				}
-				// A core that does not end by its hook ends after one tick.
-				ch := child{Command: "core", Config: cfg, Hook: tc.hook, ExitAt: "ticked"}
+				// A core that does not end by its hook ends once its follower
+				// has returned.
+				ch := child{Command: "core", Config: cfg, Hook: tc.hook, ExitAt: "followed"}
 				if code, out, errOut := f.kiln(t, ch); code != tc.exitCode {
 					t.Fatalf("the faulty core exited with %d, want %d\n%s%s", code, tc.exitCode, out, errOut)
 				}
@@ -865,6 +866,124 @@ func TestTick(t *testing.T) {
 		f.assertRun(t, c, 2, implementModel, "medium", c.commit, store.Finished)
 	})
 
+	// Three cards are in flight at the same moment, each with its container,
+	// through a spec run and then an implement run and a review run. The core
+	// is killed while three runs are followed, in spec and in implement, and
+	// started again: every run ends once, with its document, every save is
+	// made once, and no card stays in flight (card 17).
+	t.Run("three runs at once, killed and started again", func(t *testing.T) {
+		t.Parallel()
+		c := f.newCase(t, f.standIn)
+		cards := []int64{1, 2, 3}
+		for _, card := range cards {
+			ch := child{Command: "card", Config: Config{Data: c.data}, Text: fmt.Sprintf("Add a line to NOTES.md. kiln-case-three-%d %s", card, gateWord)}
+			if code, out, errOut := f.kiln(t, ch); code != 0 || strings.TrimSpace(out) != fmt.Sprint(card) {
+				t.Fatalf("kiln card: exit status %d\n%s\n%s", code, out, errOut)
+			}
+		}
+		runOf := func(card int64, n int) string { return fmt.Sprintf("%s-%d-%d", c.instance, card, n) }
+		// killedAtGates waits until the nth run of every card waits at its gate,
+		// kills the core there, and opens the gates while no core runs.
+		killedAtGates := func(n int) {
+			t.Helper()
+			core, done := f.core(t, c, "")
+			waitUntil(t, fmt.Sprintf("run %d of every card waits at its gate", n), func() bool {
+				for _, card := range cards {
+					if _, err := docker(t.Context(), "exec", "kiln-run-"+runOf(card, n), "test", "-e", "/tmp/waiting"); err != nil {
+						return false
+					}
+				}
+				return true
+			})
+			running := must(t, "ps", "--filter", "label=kiln.instance="+c.instance, "--filter", "status=running", "--format", "{{.Names}}")
+			if k := strings.Count(running, "kiln-run-"); k != 3 {
+				t.Errorf("%d run containers of the instance run at once, want 3:\n%s", k, running)
+			}
+			core.Process.Signal(syscall.SIGKILL)
+			<-done
+			for _, card := range cards {
+				must(t, "exec", "kiln-run-"+runOf(card, n), "touch", "/tmp/gate")
+			}
+		}
+		// until starts a core, waits until every card is in the state with
+		// nothing of the instance left, opening the gates of the cards' nth
+		// runs as they come, and stops the core.
+		until := func(want store.State, gates int) {
+			t.Helper()
+			core, done := f.core(t, c, "")
+			waitUntil(t, fmt.Sprintf("every card is in %s waiting for %s", want.Stage, want.WaitsFor), func() bool {
+				for _, card := range cards {
+					if gates > 0 {
+						dockerQuiet("exec", "kiln-run-"+runOf(card, gates), "touch", "/tmp/gate")
+					}
+				}
+				s := f.open(t, c)
+				defer s.Close()
+				for _, card := range cards {
+					if got, err := s.Card(card); err != nil || got.State != want {
+						return false
+					}
+				}
+				return instanceLeft(t, c.instance) == ""
+			})
+			f.stop(t, core, done)
+		}
+
+		killedAtGates(1)
+		until(finished, 0)
+		s := f.open(t, c)
+		for _, card := range cards {
+			if _, err := s.Decide(card, store.Approve, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.Close()
+		killedAtGates(2)
+		until(reviewPassed, 3)
+
+		s = f.open(t, c)
+		defer s.Close()
+		if runs, err := s.InFlightRuns(); err != nil || len(runs) != 0 {
+			t.Errorf("runs in flight: %v (%v)", runs, err)
+		}
+		for _, card := range cards {
+			word := fmt.Sprintf("kiln-case-three-%d", card)
+			runs, err := s.Runs(card)
+			if err != nil || len(runs) != 3 {
+				t.Fatalf("card %d has the runs %+v (%v), want 3", card, runs, err)
+			}
+			docs, err := s.Documents(card)
+			if err != nil || len(docs) != 3 {
+				t.Fatalf("card %d has the documents %+v (%v), want 3", card, docs, err)
+			}
+			for i, kind := range []string{store.KindSpec, store.KindReport, store.KindReview} {
+				id := runOf(card, i+1)
+				if r := runs[i]; r.ID != id || r.Ending != store.Finished {
+					t.Errorf("run %d of card %d is %+v, want %s finished", i+1, card, r.RunRow, id)
+				}
+				if d := docs[i]; d.Kind != kind || d.Run != id || d.Text != readTarEntry(t, filepath.Join(c.data, "runs", id, "documents.tar"), "out/"+kind+".md") {
+					t.Errorf("document %d of card %d is %+v, want the %s of %s as written", i+1, card, d, kind, id)
+				}
+				// Each run's container started once.
+				if n := c.starts.count("kiln-run-" + id); n != 1 {
+					t.Errorf("the container of run %s started %d times, want 1", id, n)
+				}
+			}
+			if !strings.Contains(docs[0].Text, word) {
+				t.Errorf("the spec of card %d is %q", card, docs[0].Text)
+			}
+			branch := fmt.Sprintf("refs/heads/kiln/card-%d", card)
+			tip := gitIn(t, c.repo, "rev-parse", branch)
+			if n := gitIn(t, c.repo, "rev-list", "--count", c.commit+".."+tip); n != "1" {
+				t.Errorf("%s commits on %s, want 1", n, branch)
+			}
+			assertSaveNamed(t, c.repo, tip, "feat: "+word, runOf(card, 2))
+		}
+		if n := c.starts.count("kiln-run-"); n != 9 {
+			t.Errorf("the instance's run containers started %d times, want 9", n)
+		}
+	})
+
 	t.Run("one run of the real Claude Code", func(t *testing.T) {
 		t.Parallel()
 		if f.standInOutput == nil {
@@ -1154,7 +1273,7 @@ func copyHolds(t *testing.T, repo string) (refs, objects string) {
 // config is the configuration of a case's core.
 func (f *fixture) config(c *testCase) Config {
 	cfg := Config{Data: c.data, Repo: c.repo, Model: model, ImplementModel: implementModel, ReviewModel: reviewModel,
-		Image: c.image, Proxy: cmp.Or(c.proxy, f.proxy.Name), Listen: c.listen}
+		Image: c.image, Proxy: cmp.Or(c.proxy, f.proxy.Name), Listen: c.listen, Runs: DefaultRuns}
 	if !c.noHosts {
 		cfg.Hosts, cfg.WayOutImage, cfg.WayOutNetwork = hosts, f.wayOutImage, f.outward
 	}

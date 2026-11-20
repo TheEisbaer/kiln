@@ -6,11 +6,13 @@
 package store
 
 import (
+	"cmp"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,7 +21,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 5
+const version = 6
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -205,6 +207,15 @@ ALTER TABLE entries ADD COLUMN reason TEXT;`); err != nil {
 		// The table holds every run's document, one per run, by its kind; the
 		// rows that are there are specs.
 		_, err := tx.Exec(`ALTER TABLE specs ADD COLUMN kind TEXT NOT NULL DEFAULT 'spec'`)
+		return err
+	},
+	func(tx *sql.Tx) error {
+		// When a card got its state, so that the tick takes the card that has
+		// waited longest first without reading the history (ADR 0042, rule
+		// 3): for a card that was there, the time of its last entry, which
+		// wrote that state.
+		_, err := tx.Exec(`ALTER TABLE cards ADD COLUMN since TEXT;
+UPDATE cards SET since = (SELECT at FROM entries WHERE entries.card = cards.id ORDER BY number DESC LIMIT 1);`)
 		return err
 	},
 }
@@ -402,9 +413,12 @@ func (s *Store) change(create bool, id int64, text string, next func(from State,
 		}
 	}
 
+	// The card's row and its entry carry the same time: since is when the
+	// card got the state it has.
+	at := time.Now().UTC().Format(time.RFC3339Nano)
 	if create {
-		res, err := tx.Exec(`INSERT INTO cards (text, stage, waits_for) VALUES (?, ?, ?)`,
-			text, to.Stage, to.WaitsFor)
+		res, err := tx.Exec(`INSERT INTO cards (text, stage, waits_for, since) VALUES (?, ?, ?, ?)`,
+			text, to.Stage, to.WaitsFor, at)
 		if err != nil {
 			return Card{}, err
 		}
@@ -416,8 +430,8 @@ func (s *Store) change(create bool, id int64, text string, next func(from State,
 		if card.State == to && end == nil {
 			return card, nil
 		}
-		if _, err := tx.Exec(`UPDATE cards SET stage = ?, waits_for = ? WHERE id = ?`,
-			to.Stage, to.WaitsFor, id); err != nil {
+		if _, err := tx.Exec(`UPDATE cards SET stage = ?, waits_for = ?, since = ? WHERE id = ?`,
+			to.Stage, to.WaitsFor, at, id); err != nil {
 			return Card{}, err
 		}
 	}
@@ -428,7 +442,6 @@ func (s *Store) change(create bool, id int64, text string, next func(from State,
 			return Card{}, err
 		}
 	}
-	at := time.Now().UTC().Format(time.RFC3339Nano)
 	var run sql.NullString
 	if end != nil {
 		run = sql.NullString{String: end.id, Valid: true}
@@ -458,22 +471,68 @@ func (s *Store) Instance() (string, error) {
 	return id, err
 }
 
-// Waiting lists the cards that wait for a run, by ID.
+// furthest ranks the stages that wait for a run, the one furthest along first.
+var furthest = map[Stage]int{Review: 0, Implement: 1, Spec: 2}
+
+// Waiting lists the cards that wait for a run, in the order the tick takes
+// them: the one furthest along first, review, then implement, then spec, so
+// that cards reach the developer before new ones begin; among those of a
+// stage, the one that has waited longest; and among those, by ID.
 func (s *Store) Waiting() ([]int64, error) {
-	rows, err := s.db.Query(`SELECT id FROM cards WHERE waits_for = ? ORDER BY id`, Run)
+	type waiting struct {
+		id    int64
+		rank  int
+		since time.Time
+	}
+	rows, err := s.db.Query(`SELECT id, stage, since FROM cards WHERE waits_for = ?`, Run)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []int64
+	var cards []waiting
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var w waiting
+		var stage Stage
+		var since string
+		if err := rows.Scan(&w.id, &stage, &since); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		w.rank = furthest[stage]
+		if w.since, err = time.Parse(time.RFC3339Nano, since); err != nil {
+			return nil, fmt.Errorf("card %d: %w", w.id, err)
+		}
+		cards = append(cards, w)
 	}
-	return ids, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(cards, func(a, b waiting) int {
+		return cmp.Or(cmp.Compare(a.rank, b.rank), a.since.Compare(b.since), cmp.Compare(a.id, b.id))
+	})
+	ids := make([]int64, len(cards))
+	for i, w := range cards {
+		ids[i] = w.id
+	}
+	return ids, nil
+}
+
+// InFlightRuns lists every run in flight, by its card.
+func (s *Store) InFlightRuns() (map[int64]string, error) {
+	rows, err := s.db.Query(`SELECT card, id FROM runs WHERE ending IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs := map[int64]string{}
+	for rows.Next() {
+		var card int64
+		var id string
+		if err := rows.Scan(&card, &id); err != nil {
+			return nil, err
+		}
+		runs[card] = id
+	}
+	return runs, rows.Err()
 }
 
 // InFlight returns the card's run in flight, or nil when it has none.
@@ -500,12 +559,15 @@ func (s *Store) Run(id string) (RunRow, error) {
 	return readRun(s.db, id)
 }
 
-// AddRun writes a run in flight. The same row written again writes nothing;
-// anything else under the same ID is refused, and so is a second run in flight
-// for the card, which the store's unique index refuses, and a run of a card
-// that does not wait for one, such as a card the developer dropped after the
-// tick read it (card 16).
-func (s *Store) AddRun(r RunRow) error {
+// AddRun writes a run in flight, while fewer than limit runs are in flight.
+// The same row written again writes nothing; anything else under the same ID
+// is refused, and so is a second run in flight for the card, which the store's
+// unique index refuses, a run of a card that does not wait for one, such as a
+// card the developer dropped after the tick read it (card 16), and a run that
+// would make more than limit runs in flight (card 17). The tick counts before
+// it starts a run, and the store refuses as well, as it does a second run in
+// flight per card.
+func (s *Store) AddRun(r RunRow, limit int) error {
 	if r.ID == "" || r.Card == 0 || r.Commit == "" || r.Model == "" || r.Effort == "" {
 		return fmt.Errorf("a run needs an ID, a card, a commit, a model and an effort: %+v", r)
 	}
@@ -533,12 +595,23 @@ func (s *Store) AddRun(r RunRow) error {
 	if card.WaitsFor != Run {
 		return fmt.Errorf("run %s not written: card %d is in %s waiting for %s, not for a run", r.ID, r.Card, card.Stage, card.WaitsFor)
 	}
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM runs WHERE ending IS NULL`).Scan(&n); err != nil {
+		return err
+	}
+	if n >= limit {
+		return fmt.Errorf("%w: run %s not written: %d runs are in flight, and the limit is %d", ErrLimit, r.ID, n, limit)
+	}
 	if _, err := tx.Exec(`INSERT INTO runs (id, card, commit_id, model, effort, started) VALUES (?, ?, ?, ?, ?, ?)`,
 		r.ID, r.Card, r.Commit, r.Model, r.Effort, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("run %s not written; card %d may have a run in flight already: %w", r.ID, r.Card, err)
 	}
 	return tx.Commit()
 }
+
+// ErrLimit is AddRun's error for a run that would make more runs in flight
+// than its limit.
+var ErrLimit = errors.New("the limit of runs in flight is reached")
 
 // EndRun ends a run in flight, finished or failed, and moves its card to the
 // state to, in one transaction through change: the run's ending, the card's

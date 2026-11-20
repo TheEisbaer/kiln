@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 6"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 7"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 6 was opened")
+		t.Fatal("a store of version 7 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 6") || !strings.Contains(msg, "version 5") {
+	if msg := err.Error(); !strings.Contains(msg, "version 7") || !strings.Contains(msg, "version 6") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,14 +271,14 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 6 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 6 and 0", v, tables)
+	if v != 7 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 7 and 0", v, tables)
 	}
 }
 
 func mustAddRun(t *testing.T, s *Store, r RunRow) {
 	t.Helper()
-	if err := s.AddRun(r); err != nil {
+	if err := s.AddRun(r, 8); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -322,22 +322,80 @@ func countRows(t *testing.T, s *Store, table string) int {
 	return n
 }
 
+// TestWaiting lists the cards that wait for a run in the order the tick takes
+// them: review, then implement, then spec, and in each stage the card that
+// has waited longest first, by when it got its state.
 func TestWaiting(t *testing.T) {
 	s := open(t)
-	a, b, c := mustCreate(t, s, "a"), mustCreate(t, s, "b"), mustCreate(t, s, "c")
+	a, b, c, d, e := mustCreate(t, s, "a"), mustCreate(t, s, "b"), mustCreate(t, s, "c"), mustCreate(t, s, "d"), mustCreate(t, s, "e")
 	if ids, err := s.Waiting(); err != nil || len(ids) != 0 {
 		t.Fatalf("Waiting with every card in the backlog: %v, %v", ids, err)
 	}
-	for _, card := range []Card{c, a} {
-		if _, err := s.Move(card.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+	move := func(card Card, to State) {
+		t.Helper()
+		if _, err := s.Move(card.ID, to, CauseDeveloper); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.Move(b.ID, State{Spec, Approval}, CauseRun); err != nil {
+	move(c, State{Spec, Run})
+	move(a, State{Spec, Run})
+	move(b, State{Spec, Approval})
+	move(d, State{Implement, Run})
+	move(e, State{Review, Run})
+	if ids, err := s.Waiting(); err != nil || !reflect.DeepEqual(ids, []int64{e.ID, d.ID, c.ID, a.ID}) {
+		t.Errorf("Waiting is %v, %v, want review, implement, then the spec that waited longest: %v", ids, err, []int64{e.ID, d.ID, c.ID, a.ID})
+	}
+	// A move to the state a card has writes nothing, and the card keeps its
+	// place; one that leaves the state and comes back waits from its return.
+	move(c, State{Spec, Run})
+	if ids, _ := s.Waiting(); !reflect.DeepEqual(ids, []int64{e.ID, d.ID, c.ID, a.ID}) {
+		t.Errorf("after a repeated move Waiting is %v", ids)
+	}
+	move(c, State{Spec, Developer})
+	move(c, State{Spec, Run})
+	if ids, _ := s.Waiting(); !reflect.DeepEqual(ids, []int64{e.ID, d.ID, a.ID, c.ID}) {
+		t.Errorf("after card %d came back Waiting is %v", c.ID, ids)
+	}
+	// since is the time of the entry that wrote the state.
+	h := mustHistory(t, s, c.ID)
+	var since string
+	if err := s.db.QueryRow("SELECT since FROM cards WHERE id = ?", c.ID).Scan(&since); err != nil ||
+		since != h[len(h)-1].At.Format(time.RFC3339Nano) {
+		t.Errorf("card %d has its state since %q (%v), and its last entry is of %s", c.ID, since, err, h[len(h)-1].At)
+	}
+}
+
+// TestAddRunLimit refuses a run that would make more runs in flight than the
+// limit, and writes the same row again at the limit, since it adds none.
+func TestAddRunLimit(t *testing.T) {
+	s := open(t)
+	var cards []Card
+	for _, text := range []string{"a", "b", "c"} {
+		card := mustCreate(t, s, text)
+		if _, err := s.Move(card.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+			t.Fatal(err)
+		}
+		cards = append(cards, card)
+	}
+	for i, card := range cards[:2] {
+		if err := s.AddRun(theRun(card.ID, fmt.Sprintf("r%d", i+1)), 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.AddRun(theRun(cards[2].ID, "r3"), 2); !errors.Is(err, ErrLimit) {
+		t.Errorf("a third run under a limit of 2: %v", err)
+	}
+	if err := s.AddRun(theRun(cards[0].ID, "r1"), 2); err != nil {
+		t.Errorf("the same row again at the limit: %v", err)
+	}
+	if runs, err := s.InFlightRuns(); err != nil || !reflect.DeepEqual(runs, map[int64]string{cards[0].ID: "r1", cards[1].ID: "r2"}) {
+		t.Errorf("InFlightRuns is %v, %v", runs, err)
+	}
+	if _, err := s.EndRun("r1", Finished, "", State{Spec, Approval}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if ids, err := s.Waiting(); err != nil || !reflect.DeepEqual(ids, []int64{a.ID, c.ID}) {
-		t.Errorf("Waiting is %v, %v, want cards %d and %d by ID", ids, err, a.ID, c.ID)
+	if err := s.AddRun(theRun(cards[2].ID, "r3"), 2); err != nil {
+		t.Errorf("a run after one has ended: %v", err)
 	}
 }
 
@@ -384,12 +442,12 @@ func TestRuns(t *testing.T) {
 	} {
 		r := first
 		change(&r)
-		if err := s.AddRun(r); err == nil {
+		if err := s.AddRun(r, 8); err == nil {
 			t.Errorf("AddRun with another %s under the same ID was accepted", name)
 		}
 	}
 	// A second run in flight for the card is refused, by the store itself.
-	if err := s.AddRun(theRun(card.ID, "ab12cd34-1-2")); err == nil {
+	if err := s.AddRun(theRun(card.ID, "ab12cd34-1-2"), 8); err == nil {
 		t.Error("a second run in flight for one card was accepted")
 	}
 	if n, _ := s.RunCount(card.ID); n != 1 {
@@ -397,7 +455,7 @@ func TestRuns(t *testing.T) {
 	}
 	// A run is written in flight, with every field.
 	for _, r := range []RunRow{{}, {ID: "x", Card: other.ID}, func() RunRow { r := theRun(other.ID, "x"); r.Ending = Finished; return r }()} {
-		if err := s.AddRun(r); err == nil {
+		if err := s.AddRun(r, 8); err == nil {
 			t.Errorf("AddRun of %+v was accepted", r)
 		}
 	}
@@ -670,6 +728,33 @@ func dump(t *testing.T, path string) string {
 	return b.String()
 }
 
+// withoutSince is a line of a dump without the cards' column since, which
+// version 6 added, when the dump is of a store moved forward: a card's row is
+// the only one of five columns there.
+func withoutSince(line string, migrated bool) string {
+	if parts := strings.Split(line, " | "); migrated && len(parts) == 5 {
+		return strings.Join(parts[:4], " | ")
+	}
+	return line
+}
+
+// assertSince asserts when each card of a store got its state, as the cards'
+// column since holds it.
+func assertSince(t *testing.T, path string, want map[int64]string) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for id, at := range want {
+		var since string
+		if err := db.QueryRow("SELECT since FROM cards WHERE id = ?", id).Scan(&since); err != nil || since != at {
+			t.Errorf("card %d has the state since %q (%v), want %s, the time of its last entry", id, since, err, at)
+		}
+	}
+}
+
 // TestMigrateV2 moves a store of version 2 forward: every card, entry and run
 // is kept, and the store has the shape of one made at the current version.
 func TestMigrateV2(t *testing.T) {
@@ -723,8 +808,10 @@ func TestMigrateV2(t *testing.T) {
 			if migrated && strings.HasPrefix(line, "ab12cd34-") { // a run's row
 				line = strings.TrimSuffix(line, " | <nil>")
 			}
+			line = withoutSince(line, migrated)
 			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") &&
-				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") && !strings.HasPrefix(line, "runs | ") {
+				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") && !strings.HasPrefix(line, "runs | ") &&
+				!strings.HasPrefix(line, "cards | ") {
 				out = append(out, line)
 			}
 		}
@@ -736,6 +823,7 @@ func TestMigrateV2(t *testing.T) {
 	if id, err := s.Instance(); err != nil || id != "ab12cd34" {
 		t.Errorf("the instance is %q, %v", id, err)
 	}
+	assertSince(t, path, map[int64]string{1: "2026-11-18T10:09:00Z", 2: "2026-11-18T11:00:01Z"})
 	if r, err := s.InFlight(2); err != nil || r == nil || r.ID != "ab12cd34-2-1" {
 		t.Errorf("the run in flight is %+v, %v", r, err)
 	}
@@ -866,7 +954,9 @@ func TestMigrateV3(t *testing.T) {
 			if migrated && strings.HasPrefix(line, "ab12cd34-") { // a run's row
 				line = strings.TrimSuffix(line, " | <nil>")
 			}
-			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") && !strings.HasPrefix(line, "runs | ") {
+			line = withoutSince(line, migrated)
+			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") && !strings.HasPrefix(line, "runs | ") &&
+				!strings.HasPrefix(line, "cards | ") {
 				out = append(out, line)
 			}
 		}
@@ -875,6 +965,7 @@ func TestMigrateV3(t *testing.T) {
 	if keep(dump(t, path), true) != keep(before, false) {
 		t.Errorf("the move forward changed what version 3 held:\n%s\nwas\n%s", dump(t, path), before)
 	}
+	assertSince(t, path, map[int64]string{1: "2026-11-19T10:05:00Z", 2: "2026-11-19T11:00:01Z"})
 	// The spec is kept, byte for byte, as a spec.
 	want := SpecRow{Run: "ab12cd34-1-1", Commit: "c0ffee", Text: oldSpec}
 	if sp, err := s.Spec(1); err != nil || sp != want || !strings.Contains(sp.Text, "\xff") {
@@ -1056,8 +1147,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 5 {
-		t.Fatalf("the store is version %d after Open, want 5", v)
+	if v := userVersion(t, s); v != version || version != 6 {
+		t.Fatalf("the store is version %d after Open, want 6", v)
 	}
 	// What version 1 held is still there, and has no run or reason.
 	card, err := s.Card(1)
@@ -1451,7 +1542,7 @@ func asChild(mode, path string) {
 		fail(err)
 	}
 	if strings.HasPrefix(mode, "endrun-") {
-		if err := s.AddRun(theRun(1, "r1")); err != nil {
+		if err := s.AddRun(theRun(1, "r1"), 8); err != nil {
 			fail(err)
 		}
 		var spec *Doc

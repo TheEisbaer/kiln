@@ -131,6 +131,8 @@ type Info struct {
 	// The models of the spec runs, the implement runs and the review runs the
 	// core starts.
 	Model, ImplementModel, ReviewModel string
+	// Runs is the most runs the core has in flight at once.
+	Runs int
 	// Change is the change on a card's branch, or nil when the card has no
 	// branch. The tick hands it in, so that this package runs no command. Nil
 	// shows no change on any card.
@@ -269,6 +271,7 @@ type (
 		Build    string     `json:"build"`
 		Repo     string     `json:"repo"`
 		Models   modelsJSON `json:"models"`
+		Runs     int        `json:"runs"`
 		Now      time.Time  `json:"now"`
 		Cards    []tileJSON `json:"cards"`
 	}
@@ -389,7 +392,7 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Repo: h.info.Repo, Models: h.models(), Now: time.Now().UTC(),
+	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Repo: h.info.Repo, Models: h.models(), Runs: h.info.Runs, Now: time.Now().UTC(),
 		Cards: []tileJSON{}}
 	for _, c := range cards {
 		b.Cards = append(b.Cards, tile(c))

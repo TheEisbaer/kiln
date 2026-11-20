@@ -368,7 +368,7 @@ func endRun(t *testing.T, c *core, s store.Stage, to store.State, doc *store.Doc
 		t.Fatal(err)
 	}
 	id := fmt.Sprintf("ab12cd34-1-%d", n+1)
-	if err := c.store.AddRun(store.RunRow{ID: id, Card: 1, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}); err != nil {
+	if err := c.store.AddRun(store.RunRow{ID: id, Card: 1, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.store.EndRun(id, store.Finished, "", to, doc); err != nil {
