@@ -1275,8 +1275,14 @@ func (f *fixture) assertLoop(t *testing.T, c *testCase, entries, documents []str
 	if strings.Join(got, ", ") != strings.Join(want, ", ") {
 		t.Errorf("the entries are %q, want %q", got, want)
 	}
-	if n, err := s.RunCount(1); err != nil || n != len(documents) {
-		t.Errorf("card 1 has %d runs (%v), want %d", n, err, len(documents))
+	// Each run is a document's run; an implement run has two documents.
+	runs := map[string]bool{}
+	for _, d := range documents {
+		_, n, _ := strings.Cut(d, " ")
+		runs[n] = true
+	}
+	if n, err := s.RunCount(1); err != nil || n != len(runs) {
+		t.Errorf("card 1 has %d runs (%v), want %d", n, err, len(runs))
 	}
 	if r, err := s.InFlight(1); err != nil || r != nil {
 		t.Errorf("a run is in flight: %+v (%v)", r, err)

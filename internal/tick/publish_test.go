@@ -1,6 +1,7 @@
 package tick
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -687,7 +688,7 @@ func TestRunPublish(t *testing.T) {
 	}
 	var n int
 	fmt.Sscan(string(readFile(t, pid)), &n)
-	waitUntil(t, "the command's child has ended", func() bool { return syscall.Kill(n, 0) != nil })
+	waitUntil(t, "the command's child has ended", func() bool { return ended(n) })
 }
 
 // hangingSSH is a stand-in for ssh that says whether it has a terminal it
@@ -747,7 +748,7 @@ func TestFetchCannotAsk(t *testing.T) {
 	}
 	var pid int
 	fmt.Sscan(string(readFile(t, filepath.Join(dir, "pid"))), &pid)
-	waitUntil(t, "ssh has ended", func() bool { return syscall.Kill(pid, 0) != nil })
+	waitUntil(t, "ssh has ended", func() bool { return ended(pid) })
 }
 
 // TestFetchDoesNotHoldRuns starts a spec run while the fetch hangs: the tick
@@ -990,4 +991,21 @@ func TestWorkflowEntries(t *testing.T) {
 	if files, err := workflowFiles(ctx, c.Repo, tip); err != nil || !slices.Equal(files, []string{".github/workflows"}) {
 		t.Errorf("a .github/workflows that is a submodule: %q, %v", files, err)
 	}
+}
+
+// ended reports whether a process has ended: it is gone, or it is a zombie,
+// dead and not yet reaped. A child whose parent was killed with it is the
+// child of the first process then, which in a container, such as the one the
+// check runs the tests in, often reaps nothing.
+func ended(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return true
+	}
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false // no /proc, as on macOS: the kill above decides
+	}
+	// The state follows the command's name, which is in parentheses.
+	_, rest, ok := strings.Cut(string(stat[bytes.LastIndexByte(stat, ')')+1:]), " ")
+	return ok && strings.HasPrefix(rest, "Z")
 }
