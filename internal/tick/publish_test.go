@@ -175,12 +175,15 @@ func (p *publishing) publish(t *testing.T, s *store.Store, card int64, yes bool)
 	}
 }
 
-// waitFor waits until the card is in the state, and returns its last entry.
+// waitFor waits until the card is in the state, and its last entry's reason
+// begins with what, and returns that entry; on failure it says where the
+// card is.
 func (p *publishing) waitFor(t *testing.T, card int64, want store.State, what string) store.Entry {
 	t.Helper()
 	var last store.Entry
-	waitUntil(t, fmt.Sprintf("card %d is in %s waiting for %s, %s", card, want.Stage, want.WaitsFor, what), func() bool {
-		ok := false
+	var at store.State
+	deadline := time.Now().Add(waitLimit)
+	for {
 		p.look(t, func(s *store.Store) {
 			c, err := s.Card(card)
 			if err != nil {
@@ -190,12 +193,16 @@ func (p *publishing) waitFor(t *testing.T, card int64, want store.State, what st
 			if err != nil {
 				t.Fatal(err)
 			}
-			last = h[len(h)-1]
-			ok = c.State == want && what == "" || c.State == want && strings.HasPrefix(last.Reason, what)
+			at, last = c.State, h[len(h)-1]
 		})
-		return ok
-	})
-	return last
+		if at == want && strings.HasPrefix(last.Reason, what) {
+			return last
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("card %d is in %v with the last entry %+v, want %v and a reason that begins %q", card, at, last, want, what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // calls is how often the publish command ran.
@@ -260,7 +267,7 @@ func TestPublished(t *testing.T) {
 	}
 	commit := gitIn(t, p.cfg.Repo, "rev-parse", "refs/kiln/publish/card-1")
 	p.with(t, func(s *store.Store) {
-		if pub, err := s.Publication(card); err != nil || pub != (store.Publication{Commit: commit, Address: "https://git.example/pull/1"}) {
+		if pub, err := s.Publication(card); err != nil || pub != (store.Publication{Commit: commit, Address: "https://git.example/pull/1", Branch: "card/1-add-a-line-to-the-notes"}) {
 			t.Errorf("the publication is %+v (%v)", pub, err)
 		}
 	})
@@ -681,4 +688,306 @@ func TestRunPublish(t *testing.T) {
 	var n int
 	fmt.Sscan(string(readFile(t, pid)), &n)
 	waitUntil(t, "the command's child has ended", func() bool { return syscall.Kill(n, 0) != nil })
+}
+
+// hangingSSH is a stand-in for ssh that says whether it has a terminal it
+// could ask on and what it was given, and then hangs, as an ssh that waits for
+// a passphrase or a host's answer does, holding git's standard error. Its
+// process is the sleep it ends in.
+const hangingSSH = `#!/bin/sh
+dir=%s
+echo "$$" > "$dir/pid"
+echo "$*" > "$dir/args"
+if ( : < /dev/tty ) 2>/dev/null; then echo tty > "$dir/tty"; else echo none > "$dir/tty"; fi
+exec sleep 60
+`
+
+// hangingOrigin points a copy's origin at an ssh address whose ssh is the
+// stand-in, and returns the stand-in's directory.
+func hangingOrigin(t *testing.T, repo string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(script, []byte(fmt.Sprintf(hangingSSH, dir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, repo, "remote", "set-url", "origin", "ssh://kiln-test.invalid/repo.git")
+	gitIn(t, repo, "config", "core.sshCommand", script)
+	t.Setenv("GIT_SSH_COMMAND", "")
+	return dir
+}
+
+// TestFetchCannotAsk fetches from an origin whose ssh hangs: ssh is told to
+// ask nothing and has no terminal to ask on, and at the fetch's limit it is
+// ended with git, and the fetch with them.
+func TestFetchCannotAsk(t *testing.T) {
+	c, _ := stagedCore(t)
+	dir := hangingOrigin(t, c.Repo)
+	var errOut strings.Builder
+	c.errOut = &errOut
+	was := fetchLimit
+	fetchLimit = 500 * time.Millisecond
+	t.Cleanup(func() { fetchLimit = was })
+
+	start := time.Now()
+	if rounds := c.refreshMain(t.Context(), time.Minute); rounds != 1 {
+		t.Errorf("%d rounds of fetching ended, want 1", rounds)
+	}
+	if took := time.Since(start); took > 4*time.Second {
+		t.Errorf("the fetch took %s with a limit of %s", took, fetchLimit)
+	}
+	if !strings.Contains(errOut.String(), "git fetch did not end within 500ms") {
+		t.Errorf("the core said %q", errOut.String())
+	}
+	if got := strings.TrimSpace(string(readFile(t, filepath.Join(dir, "tty")))); got != "none" {
+		t.Errorf("ssh had a terminal: %s", got)
+	}
+	if args := string(readFile(t, filepath.Join(dir, "args"))); !strings.HasPrefix(args, "-o BatchMode=yes ") {
+		t.Errorf("ssh was given %q", args)
+	}
+	var pid int
+	fmt.Sscan(string(readFile(t, filepath.Join(dir, "pid"))), &pid)
+	waitUntil(t, "ssh has ended", func() bool { return syscall.Kill(pid, 0) != nil })
+}
+
+// TestFetchDoesNotHoldRuns starts a spec run while the fetch hangs: the tick
+// waits for it no longer than fetchWait.
+func TestFetchDoesNotHoldRuns(t *testing.T) {
+	b := newBench(t, 3)
+	hangingOrigin(t, b.cfg.Repo)
+	was := fetchWait
+	fetchWait = 100 * time.Millisecond
+	t.Cleanup(func() { fetchWait = was })
+	var card int64
+	b.with(t, func(s *store.Store) { card = b.card(t, s, store.Spec) })
+	e := newFakeEngine()
+	start := time.Now()
+	core := b.start(t, e, 3)
+	waitUntil(t, "the spec run starts", func() bool { return slices.Contains(e.snapshot().started, card) })
+	if took := time.Since(start); took > 10*time.Second {
+		t.Errorf("the run started after %s, while the fetch hung", took)
+	}
+	e.open(card, "exit")
+	e.waitGone(t, card)
+	core.stop(t)
+}
+
+// resolve commits files on top of the card's branch, as a run's save would,
+// and returns the new tip.
+func (p *publishing) resolve(t *testing.T, card int64, files map[string]string) string {
+	t.Helper()
+	branch := fmt.Sprintf("refs/heads/kiln/card-%d", card)
+	return p.save(t, card, branch, files, fmt.Sprintf("%s-%d-9", p.instance, card))
+}
+
+// TestPublishMarkers has a run after a conflict save only part of its work:
+// the next implement run starts there and is told the files that still hold
+// Kiln's conflict markers, and not the review that passed; a branch that
+// still holds one, as after a run that finished and left it, is not
+// published: the card goes back to implement, and the command is not run.
+func TestPublishMarkers(t *testing.T) {
+	p := newPublishing(t)
+	var card int64
+	p.with(t, func(s *store.Store) {
+		card = p.card(t, s, map[string]string{"NOTES.md": "# Notes\nA line of the card.\n", "card.txt": "the card's\n"})
+		p.publish(t, s, card, false)
+	})
+	p.moveOrigin(t, map[string]string{"NOTES.md": "# Notes\nA line of other work.\n", "card.txt": "main's\n"})
+	e := newFakeEngine()
+	core := p.start(t, e, 3)
+	last := p.waitFor(t, card, implementWaits, "")
+	waitUntil(t, "the implement run starts", func() bool { return slices.Contains(e.snapshot().started, card) })
+	core.stop(t)
+	if last.Reason != "main moved and the change no longer applies: NOTES.md, card.txt" {
+		t.Errorf("the entry is %+v", last)
+	}
+
+	// The run resolves NOTES.md, its save is kept, and it fails.
+	partial := p.resolve(t, card, map[string]string{"NOTES.md": "# Notes\nA line of other work.\nA line of the card.\n"})
+	p.with(t, func(s *store.Store) {
+		if _, err := s.EndRun(fmt.Sprintf("%s-1-4", p.instance), store.Failed, "exit 1, no result, saved", implementNeedsYou); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Decide(card, store.Again, ""); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e = newFakeEngine()
+	core = p.start(t, e, 3)
+	waitUntil(t, "the second implement run starts", func() bool { return slices.Contains(e.snapshot().started, card) })
+	core.stop(t)
+	run := fmt.Sprintf("%s-1-5", p.instance)
+	p.with(t, func(s *store.Store) {
+		if r, err := s.Run(run); err != nil || r.Commit != partial {
+			t.Errorf("the run is %+v (%v), want it from the partial save %s", r, err, partial)
+		}
+		if _, err := s.EndRun(run, store.Finished, "exit 0, result success, 1 turns, $0.0001, no change", reviewPassed); err != nil {
+			t.Fatal(err)
+		}
+	})
+	told := string(readFile(t, filepath.Join(p.cfg.Data, "instructions", run+".md")))
+	if h := toldParts(t, told, instructions.Implement); !slices.Equal(h, []string{"## The card", "## The approved spec", "## What changed in main"}) {
+		t.Errorf("the run after a partial save is told the headings %q", h)
+	}
+	if !strings.HasSuffix(told, mainMoved(card, []string{"card.txt"})) {
+		t.Errorf("the run after a partial save is told\n%s", told)
+	}
+
+	// Published as it is, with card.txt still marked: back to implement.
+	p.with(t, func(s *store.Store) { p.publish(t, s, card, false) })
+	core = p.start(t, newFakeEngine(), 3)
+	last = p.waitFor(t, card, implementWaits, "")
+	core.stop(t)
+	if last.Reason != "main moved and the change no longer applies: card.txt" || p.calls(t) != 0 {
+		t.Errorf("the entry is %+v, and the command ran %d times", last, p.calls(t))
+	}
+	if got := gitIn(t, p.cfg.Repo, "rev-parse", "refs/heads/kiln/card-1"); got != partial {
+		t.Errorf("the branch moved from %s to %s", partial, got)
+	}
+}
+
+// TestPublishBranchKept publishes a card again after its spec's title changed:
+// the command is given the branch of the first publishing, so that the card
+// keeps one pull request.
+func TestPublishBranchKept(t *testing.T) {
+	p := newPublishing(t)
+	var card int64
+	p.with(t, func(s *store.Store) {
+		card = p.card(t, s, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+		p.publish(t, s, card, false)
+	})
+	core := p.start(t, newFakeEngine(), 3)
+	p.waitFor(t, card, atHost, "published as ")
+	core.stop(t)
+	p.with(t, func(s *store.Store) {
+		if _, err := s.DecideWith(card, store.SendBack, "Name it otherwise.", store.Options{Publishing: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Move(card, waiting, store.CauseDeveloper); err != nil {
+			t.Fatal(err)
+		}
+		id := fmt.Sprintf("%s-%d-4", p.instance, card)
+		if err := s.AddRun(store.RunRow{ID: id, Card: card, Commit: p.commit, Model: "m", Effort: "high"}, MaxRuns); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.EndRun(id, store.Finished, "staged", finished, &store.Doc{Kind: store.KindSpec, Text: "# Spec\n\nPull request title: `feat: another name entirely`\n"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Move(card, reviewPassed, store.CauseRun); err != nil {
+			t.Fatal(err)
+		}
+		p.publish(t, s, card, false)
+	})
+	core = p.start(t, newFakeEngine(), 3)
+	p.waitFor(t, card, atHost, "published as ")
+	core.stop(t)
+	first, second := p.env(t, 1), p.env(t, 2)
+	if first[envBranch] != "card/1-add-a-line-to-the-notes" || second[envBranch] != first[envBranch] || second[envTitle] != "feat: another name entirely" {
+		t.Errorf("the branches are %q and %q, the second title %q", first[envBranch], second[envBranch], second[envTitle])
+	}
+}
+
+// TestPublishError has the publishing itself fail, not the command, as with a
+// data directory it cannot write: the card needs you, with the reason, once,
+// and has its moves again.
+func TestPublishError(t *testing.T) {
+	p := newPublishing(t)
+	var card int64
+	p.with(t, func(s *store.Store) {
+		card = p.card(t, s, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+		p.publish(t, s, card, false)
+	})
+	if err := os.WriteFile(filepath.Join(p.cfg.Data, "publish"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := newFakeEngine()
+	core := p.start(t, e, 3)
+	last := p.waitFor(t, card, reviewNeedsYou, "publishing failed: ")
+	e.waitTicks(t, 20)
+	core.stop(t)
+	if !strings.Contains(last.Reason, "not a directory") || p.calls(t) != 0 {
+		t.Errorf("the entry is %+v, and the command ran %d times", last, p.calls(t))
+	}
+	p.with(t, func(s *store.Store) {
+		h, _ := s.History(card)
+		if h[len(h)-1].Number != last.Number {
+			t.Errorf("entries after the failure: %+v", h[len(h)-1])
+		}
+		c, _ := s.Card(card)
+		if m, _ := s.Moves(c, true); len(m) == 0 || m[0] != (store.Allowed{Action: store.Again, Note: store.OptionalNote}) {
+			t.Errorf("the moves after the failure: %v", m)
+		}
+	})
+	if strings.Count(core.out.String(), "publishing failed") != 1 {
+		t.Errorf("the core said\n%s", core.out)
+	}
+}
+
+// TestMergedBySquash closes a card whose change the Git host merged as a
+// squash commit of its own, on a main that had moved on meanwhile; a main
+// that has only part of the change leaves the card at the Git host.
+func TestMergedBySquash(t *testing.T) {
+	for _, tc := range []struct {
+		what   string
+		merged map[string]string
+		closed bool
+	}{
+		{"the whole change", map[string]string{"NOTES.md": "# Notes\nA line.\n", "b.txt": "b\n"}, true},
+		{"part of it", map[string]string{"NOTES.md": "# Notes\nA line.\n"}, false},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			p := newPublishing(t)
+			var card int64
+			p.with(t, func(s *store.Store) {
+				card = p.card(t, s, map[string]string{"NOTES.md": "# Notes\nA line.\n", "b.txt": "b\n"})
+				p.publish(t, s, card, false)
+			})
+			e := newFakeEngine()
+			core := p.start(t, e, 3)
+			p.waitFor(t, card, atHost, "published as ")
+			p.moveOrigin(t, map[string]string{"other.txt": "other work\n"})
+			p.moveOrigin(t, tc.merged)
+			if tc.closed {
+				e := p.waitFor(t, card, closed, "")
+				if e.Reason != "merged" || e.Cause != store.CauseHost {
+					t.Errorf("the entry is %+v", e)
+				}
+			} else {
+				from := time.Now()
+				waitUntil(t, "five rounds of fetching", func() bool { return time.Since(from) > 5*fetchEvery })
+				e.waitTicks(t, 5)
+				p.waitFor(t, card, atHost, "published as ")
+			}
+			core.stop(t)
+		})
+	}
+}
+
+// TestWorkflowEntries counts as a change to the workflow files a .github or a
+// .github/workflows that the change makes a symlink or a submodule.
+func TestWorkflowEntries(t *testing.T) {
+	ctx := t.Context()
+	c, main := stagedCore(t)
+	work := filepath.Join(t.TempDir(), "work")
+	gitIn(t, filepath.Dir(work), "clone", "--quiet", c.Repo, work)
+	if err := os.Symlink("ci", filepath.Join(work, ".github")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, work, map[string]string{"ci/workflows/check.yml": "on: push\n"})
+	gitIn(t, work, "add", "--all")
+	gitIn(t, work, "commit", "--quiet", "--message", "a symlink")
+	gitIn(t, work, "push", "--quiet", "origin", "HEAD:refs/heads/kiln/card-1")
+	tip := gitIn(t, work, "rev-parse", "HEAD")
+	if files, err := workflowFiles(ctx, c.Repo, tip); err != nil || !slices.Equal(files, []string{".github"}) {
+		t.Errorf("a .github that is a symlink: %q, %v", files, err)
+	}
+
+	gitIn(t, work, "rm", "--quiet", ".github")
+	gitIn(t, work, "update-index", "--add", "--cacheinfo", "160000,"+main+",.github/workflows")
+	gitIn(t, work, "commit", "--quiet", "--message", "a submodule")
+	gitIn(t, work, "push", "--quiet", "origin", "HEAD:refs/heads/kiln/card-1")
+	tip = gitIn(t, work, "rev-parse", "HEAD")
+	if files, err := workflowFiles(ctx, c.Repo, tip); err != nil || !slices.Equal(files, []string{".github/workflows"}) {
+		t.Errorf("a .github/workflows that is a submodule: %q, %v", files, err)
+	}
 }

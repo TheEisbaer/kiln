@@ -330,6 +330,7 @@ type (
 	changeJSON struct {
 		Branch    string       `json:"branch"`
 		Repo      string       `json:"repo"`
+		Tip       string       `json:"tip"`
 		Commits   []commitJSON `json:"commits"`
 		Diff      string       `json:"diff"`
 		Size      int64        `json:"size"`
@@ -471,7 +472,7 @@ func (h *handler) change(ctx context.Context, card int64) *changeJSON {
 	if ch == nil {
 		return nil
 	}
-	out := &changeJSON{Branch: ch.Branch, Repo: ch.Repo, Commits: []commitJSON{}, Diff: ch.Diff, Size: ch.Size,
+	out := &changeJSON{Branch: ch.Branch, Repo: ch.Repo, Tip: ch.Tip, Commits: []commitJSON{}, Diff: ch.Diff, Size: ch.Size,
 		TooLarge: ch.TooLarge, Command: ch.Command, Workflows: append([]string{}, ch.Workflows...)}
 	for _, c := range ch.Commits {
 		out.Commits = append(out.Commits, commitJSON{Hash: c.Hash, Title: c.Title})
@@ -592,6 +593,8 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		Action      store.Action `json:"action"`
 		Note        string       `json:"note"`
 		WorkflowYes bool         `json:"workflow_yes"`
+		// The tip of the change the page showed when the developer said yes.
+		Tip string `json:"tip"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		fail(w, http.StatusBadRequest, `the body must be {"action": …, "note": …}, the note optional`)
@@ -612,9 +615,13 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ch != nil && len(ch.Workflows) > 0 {
-			if !body.WorkflowYes {
+			switch {
+			case !body.WorkflowYes:
 				h.refuse(w, id, "this change touches workflow files, which the Git host runs as soon as it is published; "+
-					`publish it with {"action": "publish", "workflow_yes": true} once you have read them`, ch.Workflows)
+					`publish it with {"action": "publish", "workflow_yes": true, "tip": …} once you have read them`, ch.Workflows, ch.Tip)
+				return
+			case body.Tip != ch.Tip:
+				h.refuse(w, id, "the change is no longer the one you said yes to; read its workflow files again", ch.Workflows, ch.Tip)
 				return
 			}
 			opts.WorkflowYes = ch.Tip
@@ -631,7 +638,7 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), store.ErrNote.Error()+": "))
 		return
 	case errors.Is(err, store.ErrRefused):
-		h.refuse(w, c.ID, err.Error(), nil)
+		h.refuse(w, c.ID, err.Error(), nil, "")
 		return
 	case err != nil:
 		fail(w, http.StatusInternalServerError, err.Error())
@@ -648,8 +655,8 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 
 // refuse answers a move that is refused with 409: the sentence, the card's
 // state and the moves it allows, and the workflow files that need the
-// developer's yes, if that is why.
-func (h *handler) refuse(w http.ResponseWriter, id int64, msg string, workflows []string) {
+// developer's yes and the tip of the change they are in, if that is why.
+func (h *handler) refuse(w http.ResponseWriter, id int64, msg string, workflows []string, tip string) {
 	c, err := h.store.Card(id)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
@@ -662,7 +669,7 @@ func (h *handler) refuse(w http.ResponseWriter, id int64, msg string, workflows 
 	}
 	out := map[string]any{"error": run.Printable(msg), "stage": c.Stage, "waits_for": c.WaitsFor, "moves": movesJSON(moves)}
 	if workflows != nil {
-		out["workflows"] = workflows
+		out["workflows"], out["tip"] = workflows, tip
 	}
 	reply(w, http.StatusConflict, out)
 }

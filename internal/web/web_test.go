@@ -753,7 +753,15 @@ func TestPublish(t *testing.T) {
 	if c, _ := f.store.Card(touches); c.State != passed {
 		t.Errorf("the refused publish moved the card to %v", c.State)
 	}
-	if w, got := post(touches, `{"action":"publish","workflow_yes":true}`); w.Code != 200 || got["waits_for"] != "host" {
+	if got["tip"] != "beef" {
+		t.Errorf("the refusal names the tip %v", got["tip"])
+	}
+	// A yes for a tip the page showed earlier is refused as well.
+	if w, got := post(touches, `{"action":"publish","workflow_yes":true,"tip":"c0ffee"}`); w.Code != 409 ||
+		!strings.Contains(fmt.Sprint(got["error"]), "no longer the one you said yes to") {
+		t.Errorf("a yes for another tip: %d %v", w.Code, got)
+	}
+	if w, got := post(touches, `{"action":"publish","workflow_yes":true,"tip":"beef"}`); w.Code != 200 || got["waits_for"] != "host" {
 		t.Errorf("publish with the yes: %d %v", w.Code, got)
 	}
 	if p, _ := f.store.Publication(touches); p.WorkflowYes != "beef" {

@@ -36,7 +36,7 @@ Kiln needs a container engine with the `docker` command, and Git. The commands r
 
    It starts the container `kiln-proxy` with the credential the command printed, and returns. To give the proxy a fresh credential, run it again: it replaces the proxy. What that means for a run in flight is under "The push card" in [docs/open-points.md](docs/open-points.md).
 
-4. Make the instance's copy of the target repo, a bare clone. Runs start from its `HEAD`, which must be `main`. While it runs, the core fetches `main` from the copy's `origin`, at most once in 30 seconds, before it starts a run or publishes a card; a fetch that fails is printed, and the `main` that is there is used.
+4. Make the instance's copy of the target repo, a bare clone. Runs start from its `HEAD`, which must be `main`. While it runs, the core fetches `main` from the copy's `origin`, at most once in 30 seconds, before it starts a run or publishes a card. The fetch asks nothing: ssh runs in batch mode with no terminal, so a key with a passphrase needs an agent. A fetch that fails is printed, and the `main` that is there is used.
 
    ```sh
    git clone --bare <target repo> <bare repo>

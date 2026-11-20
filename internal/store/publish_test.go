@@ -125,6 +125,17 @@ func TestPublishMoves(t *testing.T) {
 	if p, _ := s.Publication(card.ID); p != (Publication{}) {
 		t.Errorf("the publication after a second publish: %+v", p)
 	}
+	// The branch on the Git host is named once and kept, also when the
+	// card is published anew, so that it has one pull request.
+	if b, err := s.PublishBranch(card.ID, "card/1-a-card"); err != nil || b != "card/1-a-card" {
+		t.Errorf("the first branch: %q, %v", b, err)
+	}
+	if b, err := s.PublishBranch(card.ID, "card/1-another-title"); err != nil || b != "card/1-a-card" {
+		t.Errorf("the branch named again: %q, %v", b, err)
+	}
+	if _, err := s.PublishBranch(other0(t, s), "card/9-x"); err == nil {
+		t.Error("a branch for a card never published was kept")
+	}
 
 	// A publishing that failed leaves the card under "needs you", from where
 	// it is published again; a review that went back offers no publish.
@@ -168,7 +179,7 @@ func TestPublishMoves(t *testing.T) {
 	if !b[0].Merged || b[0].Dropped || b[1].Merged {
 		t.Errorf("the board: %+v", b)
 	}
-	if p, _ := s.Publication(card.ID); p.Address != "https://git.example/pull/7" || p.Commit != "f00d" {
+	if p, _ := s.Publication(card.ID); p.Address != "https://git.example/pull/7" || p.Commit != "f00d" || p.Branch != "card/1-a-card" {
 		t.Errorf("the publication of a merged card: %+v", p)
 	}
 }
@@ -287,4 +298,10 @@ func TestMigrateV6(t *testing.T) {
 	if docs, _ := s.Documents(1); len(docs) != 4 {
 		t.Errorf("the documents: %+v", docs)
 	}
+}
+
+// other0 is a card that was never published.
+func other0(t *testing.T, s *Store) int64 {
+	t.Helper()
+	return mustCreate(t, s, "never published").ID
 }

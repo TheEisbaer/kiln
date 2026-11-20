@@ -9,13 +9,16 @@ import (
 
 // Publication is what the store keeps of a card's publishing (card 19): the
 // commit of the card's branch whose workflow files the developer said yes to
-// with the move publish, if any; and, once the core has published it, the
-// commit it published and the pull request's address. A card never published
-// has none of them.
+// with the move publish, if any; once the core has published it, the commit it
+// published and the pull request's address; and the branch on the Git host it
+// is published on, named at its first publishing and kept for every later
+// one, so that one card has one pull request. A card never published has none
+// of them.
 type Publication struct {
 	WorkflowYes string
 	Commit      string
 	Address     string
+	Branch      string
 }
 
 // The reasons on the entries of publishing that the store tells apart.
@@ -75,12 +78,42 @@ func (s *Store) Publication(card int64) (Publication, error) {
 }
 
 func readPublication(q querier, card int64) (Publication, error) {
-	var yes, commit, address sql.NullString
-	err := q.QueryRow(`SELECT workflow_yes, commit_id, address FROM publishes WHERE card = ?`, card).Scan(&yes, &commit, &address)
+	var yes, commit, address, branch sql.NullString
+	err := q.QueryRow(`SELECT workflow_yes, commit_id, address, branch FROM publishes WHERE card = ?`, card).
+		Scan(&yes, &commit, &address, &branch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Publication{}, nil
 	}
-	return Publication{WorkflowYes: yes.String, Commit: commit.String, Address: address.String}, err
+	return Publication{WorkflowYes: yes.String, Commit: commit.String, Address: address.String, Branch: branch.String}, err
+}
+
+// PublishBranch returns the branch a card is published on: the one kept, or
+// else name, which is kept from now on. A card the developer never published
+// has none, and is refused.
+func (s *Store) PublishBranch(card int64, name string) (string, error) {
+	if name == "" {
+		return "", errors.New("a branch needs a name")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE publishes SET branch = ? WHERE card = ? AND branch IS NULL`, name, card)
+	if err != nil {
+		return "", err
+	}
+	if _, err := res.RowsAffected(); err != nil {
+		return "", err
+	}
+	p, err := readPublication(tx, card)
+	if err != nil {
+		return "", err
+	}
+	if p.Branch == "" {
+		return "", fmt.Errorf("card %d has no publication", card)
+	}
+	return p.Branch, tx.Commit()
 }
 
 // Publishing lists the cards that wait for the Git host and have no pull

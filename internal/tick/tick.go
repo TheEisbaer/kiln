@@ -332,9 +332,11 @@ type core struct {
 	// until it has returned, a guard like followed (publish.go).
 	publishing map[int64]bool
 
-	// fetchMu is held while main is brought up to date, and guards main.
+	// fetchMu guards main, the fetching of main; checked is the rounds of it
+	// after which the tick last looked for merged cards, read by the tick only.
 	fetchMu sync.Mutex
 	main    mainState
+	checked int
 }
 
 // b2i is 1 for true and 0 for false.
@@ -1034,9 +1036,10 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 		if err != nil {
 			return "", "", err
 		}
-		// A run that starts from Kiln's merge of main into the card's branch
-		// is told which files collide (card 19).
-		collide, err := unresolved(ctx, c.Repo, row.Commit, card.ID)
+		// A run that starts from a commit that still holds Kiln's conflict
+		// markers, from its merge of main into the card's branch, is told
+		// which files they are in (card 19).
+		collide, err := markedFiles(ctx, c.Repo, row.Commit, card.ID)
 		if err != nil {
 			return "", "", err
 		}
@@ -1045,10 +1048,10 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 		// under it; it has nothing to fix then, and is told only after the
 		// developer's send-back.
 		v := verdictLine(last.Text)
-		if last.Kind == store.KindReview && (v == goesBack || (v == passes && collide == nil)) {
+		if last.Kind == store.KindReview && (v == goesBack || (v == passes && len(collide) == 0)) {
 			parts = append(parts, "## The last review", fenced(last.Text, "markdown"))
 		}
-		if collide != nil {
+		if len(collide) > 0 {
 			parts = append(parts, mainMovedHeading, mainMoved(card.ID, collide))
 		}
 		return told(withNote(parts, note)), "", nil
@@ -1071,9 +1074,9 @@ const mainMovedHeading = "## What changed in main"
 // card's branch is told: which files collide, fenced, since the names are the
 // repo's, and what it has to do with them.
 func mainMoved(card int64, files []string) string {
-	return "While the card waited for the Git host, main moved, and the change no longer applies to it. These files collide:\n\n" +
+	return "While the card waited for the Git host, main moved, and the change no longer applied to it. These files still collide:\n\n" +
 		fenced(strings.Join(files, "\n"), "text") + "\n" +
-		"You start from the card's branch with the present main merged in. Every other file is merged already. " +
+		"You start from the card's branch, into which Kiln merged main as it was then. Every other file is merged already. " +
 		"Each file above holds both versions where they collide, between conflict markers: the branch's after " +
 		"`<<<<<<< refs/heads/" + branchOf(card) + "`, the version they both started from after `|||||||`, and main's " +
 		"after `=======`, up to `>>>>>>> refs/heads/main`. Bring the change onto the present main: in each of these " +

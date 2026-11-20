@@ -1221,10 +1221,11 @@ async function decide(id, action, note, box, more) {
   for (const b of box.querySelectorAll("button")) b.disabled = true;
   try {
     const r = await api("POST", "/api/cards/" + id + "/decide", Object.assign({ action, note }, more || {}));
-    // A change the page did not know touches workflow files: it asks first.
-    if (r.status === 409 && action === "publish" && r.data && r.data.workflows && !(more && more.workflow_yes)) {
+    // A change the page did not know touches workflow files, or one that
+    // moved since the yes: it asks first, or again.
+    if (r.status === 409 && action === "publish" && r.data && r.data.workflows) {
       for (const b of box.querySelectorAll("button")) b.disabled = false;
-      askPublish(id, r.data.workflows);
+      askPublish(id, r.data.workflows, r.data.tip, more && more.workflow_yes ? sentence(r.data.error) : "");
       return { asked: true };
     }
     if (r.status === 409) {
@@ -1253,30 +1254,33 @@ async function decide(id, action, note, box, more) {
 // the developer has seen their names and said yes (ADR 0060).
 
 let askFor = null; // the card the question is open for
+let askTip = "";    // the tip of the change whose workflow files it shows
 
 function publish(c, box) {
   const files = (c.change && c.change.workflows) || [];
-  if (files.length) askPublish(c.id, files);
+  if (files.length) askPublish(c.id, files, c.change.tip);
   else decide(c.id, "publish", "", box);
 }
 
-function askPublish(id, files) {
+function askPublish(id, files, tip, said) {
   askFor = id;
+  askTip = tip || "";
   $("a-title").textContent = "Publish #" + id + "?";
   const names = $("a-names");
   names.replaceChildren();
   for (const f of files) { const li = el("li"); li.append(el("code", null, f)); names.append(li); }
-  $("a-hint").className = "hint";
-  $("a-hint").textContent = "";
+  $("a-hint").className = said ? "err" : "hint";
+  $("a-hint").textContent = said || "";
   $("a-go").disabled = false;
-  $("ask").showModal();
+  if (!$("ask").open) $("ask").showModal();
   $("a-cancel").focus();
 }
 
 async function sendPublish() {
   if (askFor === null) return;
   $("a-go").disabled = true;
-  const r = await decide(askFor, "publish", "", $("p-moves"), { workflow_yes: true });
+  const r = await decide(askFor, "publish", "", $("p-moves"), { workflow_yes: true, tip: askTip });
+  if (r.asked) return;
   if (r.refused) {
     $("a-hint").className = "err";
     $("a-hint").textContent = r.refused;

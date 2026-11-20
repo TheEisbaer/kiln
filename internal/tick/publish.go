@@ -2,6 +2,7 @@ package tick
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -44,6 +45,9 @@ var (
 	fetchEvery = 30 * time.Second
 	// fetchLimit bounds one fetch.
 	fetchLimit = 30 * time.Second
+	// fetchWait is the most the tick waits for a fetch before it starts runs
+	// from the main that is there; the fetch goes on beside it.
+	fetchWait = 5 * time.Second
 	// publishLimit bounds one run of the publish command.
 	publishLimit = 5 * time.Minute
 )
@@ -78,42 +82,70 @@ var (
 	publishFailedFor = store.PublishFailedReason + ": "
 )
 
-// mainState is when main was last brought up to date, and the last failure
-// that was printed, kept so that a failure is printed once per text.
+// mainState is the fetching of main: when the last round began, the round
+// under way, if any, which done is closed after, the rounds that have ended,
+// and the last failure that was printed, kept so that a failure is printed
+// once per text.
 type mainState struct {
 	last    time.Time
+	done    chan struct{}
+	rounds  int
 	printed string
 }
 
-// refreshMain brings main up to date from the copy's origin, if it has one, at
-// most once in fetchEvery, and says whether it did a round. A copy without
-// origin is used as it is, and a fetch that fails is printed once per text of
-// its failure; the main that is there is used either way.
-func (c *core) refreshMain(ctx context.Context) bool {
+// refreshMain brings main up to date from the copy's origin, if it has one: a
+// round is started beside the tick at most once in fetchEvery, and refreshMain
+// waits for the round under way, if any, at most wait. A copy without origin
+// is used as it is, and a fetch that fails is printed once per text of its
+// failure; the main that is there is used either way. It returns the rounds
+// that have ended.
+func (c *core) refreshMain(ctx context.Context, wait time.Duration) int {
+	c.fetchMu.Lock()
+	if c.main.done == nil && (c.main.last.IsZero() || time.Since(c.main.last) >= fetchEvery) {
+		c.main.last = time.Now()
+		done := make(chan struct{})
+		c.main.done = done
+		c.followers.Add(1)
+		go func() {
+			defer c.followers.Done()
+			defer close(done)
+			has, err := hasOrigin(ctx, c.Repo)
+			if err == nil && has {
+				fctx, cancel := context.WithTimeout(ctx, fetchLimit)
+				err = fetchMain(fctx, c.Repo)
+				cancel()
+			}
+			c.fetchMu.Lock()
+			defer c.fetchMu.Unlock()
+			c.main.done = nil
+			if ctx.Err() != nil {
+				return
+			}
+			c.main.rounds++
+			if err != nil {
+				if text := run.Printable(err.Error()); text != c.main.printed {
+					fmt.Fprintf(c.errOut, "kiln core: main is not brought up to date from origin: %s\n", text)
+					c.main.printed = text
+				}
+			} else {
+				c.main.printed = ""
+			}
+		}()
+	}
+	done := c.main.done
+	c.fetchMu.Unlock()
+	if done != nil {
+		timer := time.NewTimer(wait)
+		select {
+		case <-done:
+		case <-timer.C:
+		case <-ctx.Done():
+		}
+		timer.Stop()
+	}
 	c.fetchMu.Lock()
 	defer c.fetchMu.Unlock()
-	if !c.main.last.IsZero() && time.Since(c.main.last) < fetchEvery {
-		return false
-	}
-	c.main.last = time.Now()
-	has, err := hasOrigin(ctx, c.Repo)
-	if err == nil && has {
-		fctx, cancel := context.WithTimeout(ctx, fetchLimit)
-		err = fetchMain(fctx, c.Repo)
-		cancel()
-	}
-	if ctx.Err() != nil {
-		return false
-	}
-	if err != nil {
-		if text := run.Printable(err.Error()); text != c.main.printed {
-			fmt.Fprintf(c.errOut, "kiln core: main is not brought up to date from origin: %s\n", text)
-			c.main.printed = text
-		}
-	} else {
-		c.main.printed = ""
-	}
-	return true
+	return c.main.rounds
 }
 
 // hasOrigin reports whether a repo has a remote origin.
@@ -127,24 +159,53 @@ func hasOrigin(ctx context.Context, repo string) (bool, error) {
 	return err == nil, err
 }
 
-// fetchMain fetches origin's main into the repo's main, replacing it. Git
-// never asks on a terminal.
+// fetchMain fetches origin's main into the repo's main, replacing it. Nothing
+// it starts can ask anything: it runs in a session of its own, with no
+// terminal, git never prompts, ssh runs in batch mode and never asks for a
+// passphrase by a program either, and when the context ends the whole session
+// is killed, ssh included, and its pipes are let go after a moment. The ssh
+// command is the developer's GIT_SSH_COMMAND, or the repo's core.sshCommand,
+// or ssh, with -o BatchMode=yes after it.
 func fetchMain(ctx context.Context, repo string) error {
+	ssh := os.Getenv("GIT_SSH_COMMAND")
+	if ssh == "" {
+		configured, err := gitLine(ctx, repo, "config", "--default", "", "--get", "core.sshCommand")
+		if err != nil {
+			return err
+		}
+		ssh = cmp.Or(configured, "ssh")
+	}
 	cmd := gitCommand(ctx, repo, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
 		"origin", "+refs/heads/main:refs/heads/main")
-	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND="+ssh+" -o BatchMode=yes", "SSH_ASKPASS_REQUIRE=never")
+	detach(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("git fetch did not end within %s", fetchLimit)
+		}
 		return fmt.Errorf("git fetch: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// detach runs a command in a session of its own, with no terminal to read or
+// ask on, and kills the whole session when its context ends, letting go of
+// its pipes a moment later even if something still holds them.
+func detach(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 5 * time.Second
 }
 
 // atHostRound is what the tick does for the cards at the Git host: main is
 // brought up to date when a run may start or a card waits for the Git host,
 // and after each round every card with a pull request whose change is in main
 // is closed; then a publisher is started for every card the core publishes.
+//
+// The tick waits for a fetch at most fetchWait, so that a slow origin holds
+// no run back for long; a publisher waits for it to its end.
 func (c *core) atHostRound(ctx context.Context, starts bool) error {
 	toPublish, err := c.store.Publishing()
 	if err != nil {
@@ -154,7 +215,11 @@ func (c *core) atHostRound(ctx context.Context, starts bool) error {
 	if err != nil {
 		return err
 	}
-	if (starts || len(toPublish) > 0 || len(published) > 0) && c.refreshMain(ctx) {
+	if !(starts || len(toPublish) > 0 || len(published) > 0) {
+		return c.startPublishers(ctx, toPublish)
+	}
+	if rounds := c.refreshMain(ctx, fetchWait); rounds != c.checked {
+		c.checked = rounds
 		ids := slices.Sorted(func(yield func(int64) bool) {
 			for id := range published {
 				if !yield(id) {
@@ -168,6 +233,12 @@ func (c *core) atHostRound(ctx context.Context, starts bool) error {
 			}
 		}
 	}
+	return c.startPublishers(ctx, toPublish)
+}
+
+// startPublishers starts a publisher for each card the core publishes, when it
+// has a publish command.
+func (c *core) startPublishers(ctx context.Context, toPublish []int64) error {
 	if c.PublishCommand == "" {
 		return nil
 	}
@@ -229,8 +300,17 @@ func (c *core) startPublisher(ctx context.Context, id int64) {
 		defer c.followers.Done()
 		err := c.publish(ctx, id)
 		if ctx.Err() == nil {
+			// An error of the publishing itself leaves the card under
+			// "needs you" too, with its moves, and is not tried again on
+			// every tick.
 			if err != nil {
-				fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", id, run.Printable(err.Error()))
+				card, rerr := c.store.Card(id)
+				if rerr == nil {
+					rerr = c.publishFailed(card, err.Error())
+				}
+				if rerr != nil && !errors.Is(rerr, store.ErrRefused) {
+					fmt.Fprintf(c.errOut, "kiln core: card %d: %s; %s\n", id, run.Printable(err.Error()), run.Printable(rerr.Error()))
+				}
 			}
 			at("published")
 		}
@@ -259,7 +339,7 @@ func (c *core) publish(ctx context.Context, id int64) error {
 	if card.State != atHost || pub.Address != "" {
 		return nil
 	}
-	c.refreshMain(ctx)
+	c.refreshMain(ctx, fetchLimit+10*time.Second)
 	branch := branchOf(id)
 	tip, err := branchTip(ctx, c.Repo, branch)
 	if err != nil {
@@ -273,9 +353,9 @@ func (c *core) publish(ctx context.Context, id int64) error {
 		return err
 	}
 
-	// A branch still at Kiln's merge of main, whose conflicts no run has
-	// resolved yet, goes back as it is.
-	if files, err := unresolved(ctx, c.Repo, tip, id); err != nil || files != nil {
+	// A branch that still holds Kiln's conflict markers, from a merge of
+	// main that no run has resolved, or not all of it, goes back as it is.
+	if files, err := markedFiles(ctx, c.Repo, tip, id); err != nil || len(files) > 0 {
 		if err != nil {
 			return err
 		}
@@ -329,6 +409,12 @@ func (c *core) publish(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
+	// The branch on the Git host is named at the first publishing and kept,
+	// so that a title that changes later opens no second pull request.
+	branchName, err := c.store.PublishBranch(id, publishBranch(id, title))
+	if err != nil {
+		return err
+	}
 	commit, err := commitTree(ctx, c.Repo, tree, publishMessage(title, id, runID), []string{main}, []string{tip, main})
 	if err != nil {
 		return err
@@ -341,7 +427,7 @@ func (c *core) publish(ctx context.Context, id int64) error {
 		envCard + "=" + strconv.FormatInt(id, 10),
 		envRepo + "=" + c.Repo,
 		envCommit + "=" + commit,
-		envBranch + "=" + publishBranch(id, title),
+		envBranch + "=" + branchName,
 		envTitle + "=" + title,
 		envTextFile + "=" + textFile,
 	}
@@ -459,26 +545,39 @@ func (c *core) mergeMain(ctx context.Context, card int64, tip, main string) erro
 	return err
 }
 
-// unresolved returns the files that collide in Kiln's merge of main into a
-// card's branch, when the commit is that merge, and nil otherwise: a commit
-// with two parents and mergeMessage as its message, whose parents collide.
-func unresolved(ctx context.Context, repo, commit string, card int64) ([]string, error) {
-	out, err := gitLine(ctx, repo, "cat-file", "commit", commit)
-	if err != nil {
-		return nil, err
+// The conflict markers of Kiln's merge of main into a card's branch, by
+// which its lines are told from any other text: the branch's side opens with
+// the branch's ref, and main's side ends with main's.
+func markerLines(card int64) []string {
+	return []string{"<<<<<<< refs/heads/" + branchOf(card), ">>>>>>> refs/heads/main"}
+}
+
+// markedFiles are the files of a commit that still hold a line of Kiln's
+// conflict markers for the card, whole, as mergeMain wrote them: a merge of
+// main that no run has resolved, or a run that resolved only part of it.
+func markedFiles(ctx context.Context, repo, commit string, card int64) ([]string, error) {
+	args := []string{"grep", "--no-color", "-I", "-l", "-z", "-E"}
+	for _, line := range markerLines(card) {
+		args = append(args, "-e", "^"+regexp.QuoteMeta(line)+"$")
 	}
-	headers, message, _ := strings.Cut(out, "\n\n")
-	var parents []string
-	for _, line := range strings.Split(headers, "\n") {
-		if p, ok := strings.CutPrefix(line, "parent "); ok {
-			parents = append(parents, p)
-		}
-	}
-	if len(parents) != 2 || message+"\n" != mergeMessage(card) {
+	cmd := gitCommand(ctx, repo, append(args, commit, "--")...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 && stderr.Len() == 0 {
 		return nil, nil
 	}
-	_, files, err := mergeTree(ctx, repo, parents[0], parents[1])
-	return files, err
+	if err != nil {
+		return nil, fmt.Errorf("git grep on %s: %w: %s", repo, err, strings.TrimSpace(stderr.String()))
+	}
+	var files []string
+	for _, f := range strings.Split(string(out), "\x00") {
+		if f != "" {
+			files = append(files, strings.TrimPrefix(f, commit+":"))
+		}
+	}
+	return files, nil
 }
 
 // commitTree makes a commit of a tree on the parents, by Kiln, with the
@@ -634,8 +733,20 @@ func workflowFiles(ctx context.Context, repo, commit string) ([]string, error) {
 	}
 	files := []string{}
 	for _, f := range strings.Split(string(out), "\x00") {
-		if strings.HasPrefix(f, workflows) {
+		if strings.HasPrefix(f, workflows) || f == ".github" || f == strings.TrimSuffix(workflows, "/") {
 			files = append(files, f)
+		}
+	}
+	// A .github or .github/workflows that is a symlink or a submodule, which
+	// puts the workflow files somewhere the diff above does not look.
+	entries, err := gitLine(ctx, repo, "ls-tree", "-z", "--full-tree", "--end-of-options", commit, ".github", strings.TrimSuffix(workflows, "/"))
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range strings.Split(entries, "\x00") {
+		meta, path, ok := strings.Cut(e, "\t")
+		if mode, _, _ := strings.Cut(meta, " "); ok && (mode == "120000" || mode == "160000") && !slices.Contains(files, path) {
+			files = append(files, path)
 		}
 	}
 	return files, nil
@@ -660,9 +771,7 @@ func (c *core) runPublish(ctx context.Context, env []string) (address, failure s
 		}
 	}
 	cmd.Env = append(cmd.Env, env...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = 5 * time.Second
+	detach(cmd)
 	stdout, stderr := &tail{max: 64 << 10}, &tail{max: 4 * maxReason}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()

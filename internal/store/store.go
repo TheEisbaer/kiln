@@ -239,7 +239,8 @@ CREATE TABLE publishes (
 	card INTEGER PRIMARY KEY,
 	workflow_yes TEXT,
 	commit_id TEXT,
-	address TEXT
+	address TEXT,
+	branch TEXT
 ) STRICT;`)
 		return err
 	},
