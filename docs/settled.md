@@ -229,6 +229,8 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 ## ADR 0049: Kiln's repo is public on GitHub, under the developer's personal account
 
+> Since ADR 0060 Kiln's app may change workflow files, and such a change is published only after the developer's yes. The lines below still hold.
+
 - The engine tests are started by `check/in-image`: always on the Git host's runner, and on the developer's machine only with `--engine`, so that a test built from a card's branch does not run there unasked (ADR 0048). They are compiled in the toolchain image with the network off and run on the machine that runs the check, since the image has no engine.
 
 ## ADR 0056: Kiln's stage instructions live in one protected place

@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: superseded in part by ADR 0060
 ---
 
 # Kiln's repo is public on GitHub, under the developer's personal account
+
+> Revised in part by ADR 0060: Kiln's app has the permission to change workflow files. What keeps a workflow file written by a run from running unseen is the developer's yes before the change is published.
 
 ADR 0026 put Kiln's repo as a private repo under the developer's account on their employer's GitHub, with Kiln acting on the Git host as an app of its own, and named a public repo as the fallback if that proved impossible. It did. Confirmed on 2026-11-16: an account managed by an enterprise can create an app but cannot install it on its own account. The install page offered only an organisation, the address for the developer's own account answered "not found", and the Git host's documentation says that standard apps cannot be installed on such accounts. Without a second identity the developer would be both the author and the required approver of the same pull request, which the Git host refuses, so "a protected path always needs the developer" (ADR 0006) could not be enforced.
 
