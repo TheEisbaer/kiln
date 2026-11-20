@@ -32,6 +32,10 @@
   --dot-implement: #5aa8f5;
   --dot-review: #3fc7b5;
   --dot-done: #7cc47a;
+  --add: #8fd48c;
+  --add-soft: rgba(124, 196, 122, 0.10);
+  --del: #f2958b;
+  --del-soft: rgba(240, 110, 100, 0.11);
   --shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 24px rgba(0,0,0,0.28);
   --panel-shadow: -24px 0 60px rgba(0,0,0,0.5);
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
@@ -63,6 +67,10 @@
     --dot-implement: #2f86da;
     --dot-review: #17a493;
     --dot-done: #4f9d4c;
+    --add: #2b7529;
+    --add-soft: rgba(79, 157, 76, 0.11);
+    --del: #b23a2e;
+    --del-soft: rgba(200, 60, 50, 0.09);
     --shadow: 0 1px 2px rgba(30, 25, 15, 0.06), 0 4px 14px rgba(30, 25, 15, 0.05);
     --panel-shadow: -24px 0 60px rgba(30, 25, 15, 0.16);
   }
@@ -122,7 +130,7 @@ button:disabled { opacity: .55; cursor: default; }
 .brand .name { font-weight: 650; font-size: 17px; letter-spacing: .2px; }
 .where { display: flex; flex-direction: column; min-width: 0; flex: 1; padding-left: 14px; border-left: 1px solid var(--line); }
 .where .repo { font-family: var(--mono); font-size: 12.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.where .meta { font-size: 12px; color: var(--muted); }
+.where .meta { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .offline {
   margin: 12px 28px 0;
   padding: 9px 14px;
@@ -248,8 +256,9 @@ button:disabled { opacity: .55; cursor: default; }
   overflow: hidden;
   overflow-wrap: anywhere;
 }
-.tile .foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.tile .docs { margin-left: auto; font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.tile .foot { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tile .foot .badge { flex: none; }
+.tile .docs { margin-left: auto; min-width: 0; font-size: 11px; color: var(--faint); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .badge {
   display: inline-flex;
   align-items: center;
@@ -314,6 +323,13 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .reason.needs { background: var(--amber-soft); border-color: var(--amber-line); color: var(--amber-ink); }
 .reason b { font-weight: 600; }
+.facts { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; vertical-align: baseline; }
+.said + .facts { margin-left: 10px; }
+.fact { font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fact.mono { font-size: 11px; }
+.fact.failed { color: var(--amber-ink); }
+.reason .fact { color: var(--muted); }
+.reason.needs .fact { color: var(--amber-ink); opacity: .8; }
 .moves { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 20px; }
 .moves .note { font-size: 12.5px; color: var(--muted); align-self: center; }
 .moves .err { font-size: 12.5px; color: var(--amber-ink); align-self: center; }
@@ -371,6 +387,28 @@ button:disabled { opacity: .55; cursor: default; }
 .doc table { border-collapse: collapse; font-size: 13px; min-width: 50%; }
 .doc th, .doc td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
 .doc th { background: var(--bg-2); color: var(--text); font-weight: 600; }
+/* The change */
+.change-where { font-size: 13px; color: var(--text-2); margin: 0 0 10px; overflow-wrap: anywhere; }
+.change-where code, .change-note code { font-family: var(--mono); font-size: 12.5px; background: var(--surface); border: 1px solid var(--line-soft); border-radius: 5px; padding: 1px 5px; }
+.commits { list-style: none; margin: 0 0 12px; padding: 0; font-size: 13px; }
+.commits li { display: flex; gap: 10px; align-items: baseline; padding: 2px 0; color: var(--text-2); }
+.commits .hash { font-family: var(--mono); font-size: 12px; color: var(--muted); flex: none; }
+.change-note { background: var(--surface); border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 14px; font-size: 13px; color: var(--text-2); }
+.change-note pre { margin: 8px 0 0; padding: 8px 10px; background: var(--bg-2); border: 1px solid var(--line-soft); border-radius: 6px; overflow-x: auto; font: 12.5px/1.5 var(--mono); }
+.file { border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; margin: 0 0 12px; background: var(--surface); }
+.file .fhead { display: flex; gap: 10px; align-items: baseline; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); background: var(--bg-2); }
+.file .path { font-family: var(--mono); font-size: 12.5px; color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.file .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
+.file .counts { margin-left: auto; font-family: var(--mono); font-size: 11.5px; white-space: nowrap; }
+.file .counts .a { color: var(--add); }
+.file .counts .d { color: var(--del); margin-left: 6px; }
+.file pre { margin: 0; overflow-x: auto; font: 12px/1.55 var(--mono); tab-size: 4; }
+.file pre .lines { display: inline-block; min-width: 100%; padding: 6px 0; }
+.file pre .l { display: block; padding: 0 14px; white-space: pre; color: var(--text-2); }
+.file pre .l.add { color: var(--add); background: var(--add-soft); }
+.file pre .l.del { color: var(--del); background: var(--del-soft); }
+.file pre .l.hunk { color: var(--faint); padding-top: 4px; padding-bottom: 2px; }
+.file pre .l.note { color: var(--muted); font-style: italic; }
 .older summary { cursor: pointer; color: var(--muted); font-size: 12.5px; padding: 6px 2px; }
 .older .doc { margin-top: 8px; }
 
@@ -404,6 +442,7 @@ dialog textarea {
   border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
   font: 14px/1.5 var(--sans);
 }
+dialog .need { margin: 8px 0 0; font-size: 12.5px; color: var(--amber-ink); }
 dialog .act { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 14px; }
 dialog .act .hint { margin-right: auto; font-size: 12px; color: var(--faint); }
 dialog .act .err { margin-right: auto; font-size: 12.5px; color: var(--amber-ink); }
@@ -461,6 +500,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
     <h2 id="d-title">New card</h2>
     <p>One idea, small enough for one pull request. Its first line is its title. It waits for a spec run once it is added.</p>
     <textarea id="d-text" placeholder="What should change, and why?" spellcheck="true"></textarea>
+    <div class="need" id="d-need" hidden>Write what the card is about.</div>
     <div class="act">
       <span class="hint" id="d-hint"><kbd>&#8984;</kbd> <kbd>Enter</kbd> adds it</span>
       <button type="button" id="d-cancel">Cancel</button>
@@ -477,12 +517,14 @@ const STAGES = [
   ["backlog", "Backlog"], ["spec", "Spec"], ["implement", "Implement"], ["review", "Review"], ["done", "Done"],
 ];
 const STAGE_NAME = Object.fromEntries(STAGES);
+// The label of a move; "again" is named for the card's stage.
 const MOVES = {
-  approve: ["Approve the spec", true],
-  again: ["Run again", false],
-  "send-back": ["Send back to implement", false],
-  done: ["Mark done", true],
+  approve: "Approve the spec",
+  "send-back": "Send back to implement",
+  done: "Mark done",
 };
+const AGAIN = { spec: "Run the spec again", implement: "Run implement again", review: "Run the review again" };
+const KIND_NAME = { spec: "The spec", report: "The report", review: "The review" };
 const WAITS = {
   run: "waits for a run", approval: "waits for your approval", developer: "needs you",
   room: "queued", host: "ready to merge", nothing: "done",
@@ -503,6 +545,62 @@ const tiles = new Map(); // id -> {el, key}
 const columns = {};
 
 function needsYou(c) { return c.waits_for === "developer" && c.stage !== "backlog"; }
+
+// A reason ends with its run's line, as the run writes it: "exit 0, result
+// success, 1 turns, $0.0001, not saved". The part before it is the reason, said
+// as a sentence; the run's line becomes small facts beside it.
+const RUN_LINE = /(?:^|; )exit (\d+)(, killed for memory)?, (?:no result|result (\S+), (\d+) turns, \$([\d.]+)), (?:saved (\S+)|no change|not saved)$/;
+
+function reasonParts(reason) {
+  reason = reason || "";
+  const m = reason.match(RUN_LINE);
+  if (!m) return { sentence: sentence(reason), facts: [], failed: false };
+  const [, exit, oom, subtype, turns, cost, saved] = m;
+  const facts = [];
+  const failed = exit !== "0" || !!oom || subtype !== "success";
+  if (failed) facts.push(["failed", "failed: exit " + exit + (oom || "") + ", " + (subtype ? "result " + subtype : "no result")]);
+  if (turns !== undefined) facts.push(["", turns === "1" ? "1 turn" : turns + " turns"], ["", "$" + cost]);
+  if (saved) facts.push(["mono", saved.slice(0, 7), "the commit it saved"]);
+  return { sentence: sentence(reason.slice(0, m.index)), facts, failed };
+}
+
+// sentence starts a reason with a capital letter and ends it with a full stop.
+// A first word that is a name, such as review.md, keeps its letters.
+function sentence(text) {
+  text = text.trim();
+  if (!text) return "";
+  if (/^[a-z]+(\s|$|[,:;])/.test(text)) text = text[0].toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(text) ? text : text + ".";
+}
+
+function factsOf(facts) {
+  const f = el("span", "facts");
+  for (const [cls, text, title] of facts) {
+    const e = el("span", "fact" + (cls ? " " + cls : ""), text);
+    if (title) e.title = title;
+    f.append(e);
+  }
+  return f;
+}
+
+// reasonInto puts a reason in an element: its sentence, or the fallback when
+// it has none, and the facts of its run.
+function reasonInto(parent, reason, fallback) {
+  const r = reasonParts(reason);
+  const text = r.sentence || (typeof fallback === "function" ? fallback(r) : fallback) || "";
+  if (text) parent.append(el("span", "said", text));
+  if (r.facts.length) parent.append(factsOf(r.facts));
+}
+
+// stopped is what a card that waits says when its last reason has only its
+// run's line.
+function stopped(c) {
+  return (r) => {
+    if (c.waits_for === "approval") return c.stage === "review" ? "The review passes." : "The spec is ready to read.";
+    if (r.failed || needsYou(c)) return "The " + STAGE_NAME[c.stage].toLowerCase() + " run stopped.";
+    return "The last run finished.";
+  };
+}
 
 function badgeOf(c) {
   if (c.waits_for === "run" && c.run) return ["live", "running"];
@@ -599,7 +697,11 @@ function renderBoard(b) {
   skew = Date.parse(b.now) - Date.now();
   $("repo").textContent = b.repo;
   $("repo").title = b.repo;
-  $("meta").textContent = "instance " + b.instance + " · runs on " + b.model;
+  const m = b.models;
+  $("meta").textContent = "instance " + b.instance + " · " + (m.spec === m.implement && m.spec === m.review ?
+    "spec, implement, review on " + m.spec :
+    "spec on " + m.spec + " · implement on " + m.implement + " · review on " + m.review);
+  $("meta").title = $("meta").textContent;
   const ids = new Set();
   const per = Object.fromEntries(STAGES.map(([s]) => [s, []]));
   for (const c of b.cards) {
@@ -653,7 +755,9 @@ function renderStrip(cards) {
       const r = el("div", "row");
       r.tabIndex = 0;
       r.append(el("span", "id", "#" + c.id), el("span", "t", c.title || "(no title)"));
-      r.append(el("span", "why", why(c)));
+      const w = el("span", "why");
+      why(w, c);
+      r.append(w);
       r.addEventListener("click", () => openCard(c.id));
       r.addEventListener("keydown", (e) => { if (e.key === "Enter") openCard(c.id); });
       rows.append(r);
@@ -661,14 +765,20 @@ function renderStrip(cards) {
     g.append(h, rows);
     groups.append(g);
   };
-  if (needs.length) group("needs", "Needs you", needs, (c) => c.reason || "stopped in " + STAGE_NAME[c.stage]);
-  if (approvals.length) group("approve", "Waits for your approval", approvals, (c) => "the " + STAGE_NAME[c.stage].toLowerCase() + " is ready to read");
+  if (needs.length) group("needs", "Needs you", needs, (w, c) => reasonInto(w, c.reason, stopped(c)));
+  if (approvals.length) group("approve", "Waits for your approval", approvals,
+    (w, c) => w.append(document.createTextNode(c.stage === "review" ? "The review passes; the change is ready to read." : "The spec is ready to read.")));
   strip.append(groups);
 }
 
 // Markdown, by hand: every piece of text becomes a text node.
 
+// A text over LONG characters is put in as it is: the pattern below takes time
+// that grows with the square of a long line's length, such as one of unclosed [.
+const LONG = 5000;
+
 function inline(parent, text) {
+  if (text.length > LONG) { parent.append(document.createTextNode(text)); return; }
   const re = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\[([^\]\n]+)\]\(([^)\s]+)\)|(?<![\w*])\*(?!\s)([^*\n]+?)\*(?![\w*])|(?<![\w_])_(?!\s)([^_\n]+?)_(?![\w_])|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
   let last = 0, m;
   while ((m = re.exec(text))) {
@@ -779,7 +889,9 @@ function blocks(root, lines) {
     const para = [];
     while (i < lines.length && lines[i].trim() && (para.length === 0 || !startsBlock(lines, i))) para.push(lines[i++].trim());
     const p = el("p");
-    inline(p, para.join(" "));
+    const joined = para.join(" ");
+    if (joined.length <= LONG) inline(p, joined);
+    else para.forEach((l, k) => { if (k) p.append(document.createTextNode(" ")); inline(p, l); });
     root.append(p);
   }
 }
@@ -838,6 +950,8 @@ function closeCard() {
 }
 function hideCard() {
   openId = null;
+  // No focus ring is left behind on what the page put focus on.
+  if ($("panel").contains(document.activeElement) || document.activeElement === $("new")) document.activeElement.blur();
   $("panel").classList.remove("on");
   $("panel").setAttribute("aria-hidden", "true");
   $("scrim").classList.remove("on");
@@ -898,16 +1012,17 @@ function renderCard(c) {
     st.replaceChildren(el("span", "dot " + c.stage), el("span", null, STAGE_NAME[c.stage]), badge(c));
     $("p-title").textContent = c.title || "(no title)";
   });
-  part("reason", [c.stage, c.waits_for, c.reason], () => {
+  part("reason", [c.stage, c.waits_for, c.reason, !!c.run], () => {
     const box = $("p-reason");
     box.replaceChildren();
-    if (!c.reason && !needsYou(c)) return;
+    // While a run is in flight, the last reason is of an earlier run.
+    if (c.run || (!c.reason && !needsYou(c))) return;
     const r = el("div", "reason" + (needsYou(c) ? " needs" : ""));
     if (needsYou(c)) r.append(el("b", null, "Needs you. "));
-    r.append(document.createTextNode(c.reason || "It stopped in " + STAGE_NAME[c.stage] + "."));
+    reasonInto(r, c.reason, stopped(c));
     box.append(r);
   });
-  part("moves", [c.id, c.moves, c.waits_for], () => renderMoves(c));
+  part("moves", [c.id, c.stage, c.moves, c.waits_for, sentBack(c)], () => renderMoves(c));
   part("live", c.run, () => {
     const box = $("p-live");
     box.replaceChildren();
@@ -928,22 +1043,35 @@ function renderCard(c) {
     box.append(sec);
   });
   if (c.run) renderActivity(c.activity);
-  part("docs", c.documents, () => renderDocuments(c.documents));
+  part("docs", [c.documents, c.change], () => renderDocuments(c.documents, c.change));
   part("text", c.text, () => { $("p-text").textContent = c.text; });
   part("history", c.history, () => renderHistory(c.history));
   tickClocks();
 }
 
+// sentBack says whether the card's newest document is a review that sends the
+// change back.
+function sentBack(c) {
+  const d = c.documents[c.documents.length - 1];
+  return !!d && d.kind === "review" && /^Verdict: goes back[ \t\r]*(\n|$)/.test(d.text);
+}
+
+// renderMoves shows the moves the card's state allows, the one that matters
+// first and filled: after a review that sends the change back, sending it
+// back; otherwise running the stage again.
 function renderMoves(c) {
   const box = $("p-moves");
   box.replaceChildren();
-  for (const m of c.moves) {
-    const [label, primary] = MOVES[m] || [m, false];
-    const b = el("button", primary ? "primary" : "", label);
+  const moves = c.moves.slice();
+  if (sentBack(c)) moves.sort((a, b) => (b === "send-back") - (a === "send-back"));
+  else moves.sort((a, b) => (b === "again") - (a === "again"));
+  moves.forEach((m, i) => {
+    const label = m === "again" ? AGAIN[c.stage] || "Run again" : MOVES[m] || m;
+    const b = el("button", i === 0 ? "primary" : "", label);
     b.type = "button";
     b.addEventListener("click", () => decide(c.id, m, box));
     box.append(b);
-  }
+  });
   if (!c.moves.length) {
     const note = c.waits_for === "run" ? "Kiln works on it; nothing to do." :
       c.waits_for === "nothing" ? "Nothing left to do." : "No move for this state.";
@@ -1005,16 +1133,21 @@ function renderActivity(list) {
   if (atBottom) log.scrollTop = log.scrollHeight;
 }
 
-function renderDocuments(docs) {
+// renderDocuments shows the card's documents, newest first, each kind under
+// its heading with its earlier ones folded, and the change on the card's
+// branch before the spec it builds.
+function renderDocuments(docs, change) {
   const box = $("p-docs");
   box.replaceChildren();
   const kinds = [];
-  for (const d of docs) if (!kinds.includes(d.kind)) kinds.push(d.kind);
+  for (const d of docs.slice().reverse()) if (!kinds.includes(d.kind)) kinds.push(d.kind);
+  let changeShown = !change;
   for (const kind of kinds) {
+    if (kind === "spec" && !changeShown) { box.append(renderChange(change)); changeShown = true; }
     const of = docs.filter((d) => d.kind === kind);
     const newest = of[of.length - 1];
     const sec = el("div", "section");
-    const h = el("h2", null, kind === "spec" ? "The spec" : kind);
+    const h = el("h2", null, KIND_NAME[kind] || "The " + kind);
     h.append(el("span", "sub", "by run " + newest.run));
     sec.append(h);
     const doc = el("div", "doc");
@@ -1032,6 +1165,101 @@ function renderDocuments(docs) {
     }
     box.append(sec);
   }
+  if (!changeShown) box.append(renderChange(change));
+}
+
+function size(n) {
+  if (n < 1024) return n + " bytes";
+  if (n < 1 << 20) return (n / 1024).toFixed(1) + " KiB";
+  return (n / (1 << 20)).toFixed(1) + " MiB";
+}
+
+// renderChange shows where the card's change is, its commits, and its diff.
+function renderChange(ch) {
+  const sec = el("div", "section");
+  const h = el("h2", null, "The change");
+  sec.append(h);
+  if (ch.error) {
+    sec.append(el("div", "change-note", "The change cannot be read: " + ch.error));
+    return sec;
+  }
+  const where = el("p", "change-where");
+  where.append(document.createTextNode("On the branch "), el("code", null, ch.branch),
+    document.createTextNode(" in "), el("code", null, ch.repo));
+  sec.append(where);
+  if (ch.commits.length) {
+    const ul = el("ul", "commits");
+    for (const c of ch.commits) {
+      const li = el("li");
+      li.append(el("span", "hash", c.hash), el("span", null, c.title));
+      ul.append(li);
+    }
+    sec.append(ul);
+  }
+  if (ch.too_large) {
+    const note = el("div", "change-note", "The diff is " + size(ch.size) + ", more than 1 MiB, so it is not shown here. This prints it:");
+    note.append(el("pre", null, ch.command));
+    sec.append(note);
+  } else if (!ch.diff) {
+    sec.append(el("div", "change-note", "The branch changes no file."));
+  } else {
+    sec.append(diffView(ch.diff));
+  }
+  return sec;
+}
+
+// diffView renders a diff as git writes it: a heading per file, then its
+// lines, added ones green and removed ones red.
+function diffView(diff) {
+  const all = el("div", "diff");
+  let file = null;
+  const finish = () => {
+    if (!file) return;
+    file.counts.replaceChildren(el("span", "a", "+" + file.add), el("span", "d", "−" + file.del));
+  };
+  const start = (path) => {
+    finish();
+    const f = el("div", "file");
+    const head = el("div", "fhead");
+    const name = el("span", "path", path);
+    const counts = el("span", "counts");
+    head.append(name, counts);
+    const pre = el("pre");
+    const lines = el("code", "lines");
+    pre.append(lines);
+    f.append(head, pre);
+    all.append(f);
+    file = { head, name, counts, lines, add: 0, del: 0, inHunk: false };
+  };
+  const line = (cls, text) => file.lines.append(el("span", "l" + (cls ? " " + cls : ""), text));
+  const tag = (text) => file.head.insertBefore(el("span", "tag", text), file.counts);
+  for (const l of diff.replace(/\n$/, "").split("\n")) {
+    if (l.startsWith("diff --git ")) {
+      const rest = l.slice(11);
+      const n = (rest.length - 5) / 2;
+      const p = Number.isInteger(n) && rest.startsWith("a/") && rest.slice(n + 2, n + 5) === " b/" ? rest.slice(n + 5) : rest;
+      start(p);
+      continue;
+    }
+    if (!file) start("");
+    if (!file.inHunk) {
+      if (l.startsWith("@@")) { file.inHunk = true; line("hunk", l); continue; }
+      if (l.startsWith("+++ ") || l.startsWith("--- ") || l.startsWith("index ")) continue;
+      if (l.startsWith("new file mode")) { tag("new"); continue; }
+      if (l.startsWith("deleted file mode")) { tag("deleted"); continue; }
+      if (l.startsWith("rename from ")) { file.name.textContent = l.slice(12) + " → " + file.name.textContent; continue; }
+      if (/^(rename to|similarity index|dissimilarity index|old mode|new mode|copy from|copy to) /.test(l)) continue;
+      line("note", l);
+      continue;
+    }
+    if (l.startsWith("@@")) line("hunk", l);
+    else if (l.startsWith("+")) { file.add++; line("add", l); }
+    else if (l.startsWith("-")) { file.del++; line("del", l); }
+    else if (l.startsWith("\\")) line("note", l);
+    else line("", l);
+  }
+  finish();
+  return all;
 }
 
 function renderHistory(history) {
@@ -1045,7 +1273,7 @@ function renderHistory(history) {
     l1.append(el("span", "by", "by " + (e.cause === "developer" ? "you" : e.cause === "run" ? "its run" : "the " + e.cause)));
     l1.append(el("span", "when", when(e.at)));
     li.append(mark, l1);
-    if (e.reason) li.append(el("div", "why", e.reason));
+    if (e.reason) { const w = el("div", "why"); reasonInto(w, e.reason, ""); li.append(w); }
     if (e.run) li.append(el("div", "run", e.run));
     ol.append(li);
   }
@@ -1060,13 +1288,14 @@ function openDialog() {
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   $("d-hint").append(el("kbd", null, mac ? "⌘" : "Ctrl"), document.createTextNode(" "), el("kbd", null, "Enter"), document.createTextNode(" adds it"));
   $("d-add").disabled = false;
+  $("d-need").hidden = true;
   d.showModal();
   $("d-text").focus();
 }
 
 async function addCard() {
   const text = $("d-text").value;
-  if (!text.trim()) { $("d-text").focus(); return; }
+  if (!text.trim()) { $("d-need").hidden = false; $("d-text").focus(); return; }
   $("d-add").disabled = true;
   try {
     const r = await api("POST", "/api/cards", { text });
@@ -1107,6 +1336,9 @@ async function poll() {
 buildColumns();
 $("new").addEventListener("click", openDialog);
 $("d-cancel").addEventListener("click", () => $("dialog").close());
+// The dialog gives focus back to "New card" when it closes; no ring is left on it.
+$("dialog").addEventListener("close", () => $("new").blur());
+$("d-text").addEventListener("input", () => { if ($("d-text").value.trim()) $("d-need").hidden = true; });
 $("d-add").addEventListener("click", addCard);
 $("d-text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addCard(); } });
 $("p-close").addEventListener("click", closeCard);

@@ -16,7 +16,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 ## ADR 0008: One planned intervention per card: approval before any code is written
 
-- The developer approves a spec with a move on the screen: it moves the card from spec, waiting for approval, to implement, waiting for a run. The developer's moves are one table in the store (`Decide` in `internal/store`): approve, again, send back and done. Since no state of ADR 0043 is "review, waits for approval", done is the move from review waiting for the Git host (ready to merge), until Kiln publishes (card 13, 2026-11-19). Card 14 adds "review, waits for approval" for a review that passed, and done is the move from it; ready to merge comes with publishing (card 14, 2026-11-19).
+- The developer approves a spec with a move on the screen: it moves the card from spec, waiting for approval, to implement, waiting for a run. The developer's moves are one table in the store (`Decide` in `internal/store`): approve, again, send back and done (card 13, 2026-11-19). Done is the move from review, waiting for approval, where a review that passed leaves the card; ready to merge comes with publishing (card 14, 2026-11-19).
 
 ## ADR 0012: A moving repo sends a card back to implement; a spec that cannot be built sends it back to spec
 

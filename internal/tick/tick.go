@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -231,6 +232,20 @@ type core struct {
 	instance    string
 	out, errOut io.Writer
 	activity    *web.Activity // of the run the tick follows, for the screen
+	changes     changes       // the last change the screen asked for, per card
+}
+
+// changes keeps, per card, the last change the screen was given, by the
+// commits it was made from, so that a card's page that asks every 2 seconds
+// does not make the same diff again each time.
+type changes struct {
+	mu   sync.Mutex
+	last map[int64]cachedChange
+}
+
+type cachedChange struct {
+	base, tip string
+	change    web.Change
 }
 
 // serve serves the screen on the core's Listen address, and prints where. The
@@ -241,7 +256,9 @@ func (c *core) serve() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("the screen: %w", err)
 	}
-	h, err := web.Handler(c.store, web.Info{Instance: c.instance, Repo: c.Repo, Model: c.Model}, c.activity, ln.Addr().String())
+	info := web.Info{Instance: c.instance, Repo: c.Repo, Model: c.model(store.Spec), ImplementModel: c.model(store.Implement),
+		ReviewModel: c.model(store.Review), Change: c.change}
+	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()
 		return nil, err
@@ -789,6 +806,60 @@ func branchTip(ctx context.Context, repo, branch string) (string, error) {
 		return "", nil
 	}
 	return gitLine(ctx, repo, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
+}
+
+// change is the change on a card's branch for the screen: where it is, its
+// commits since it left main, and the diff that a review run is told
+// (changeOf), or nil when the card has no branch.
+func (c *core) change(ctx context.Context, card int64) (*web.Change, error) {
+	branch := branchOf(card)
+	tip, err := branchTip(ctx, c.Repo, branch)
+	if err != nil || tip == "" {
+		return nil, err
+	}
+	base, err := gitLine(ctx, c.Repo, "merge-base", "HEAD", tip)
+	if err != nil {
+		return nil, err
+	}
+	c.changes.mu.Lock()
+	kept, ok := c.changes.last[card]
+	c.changes.mu.Unlock()
+	if ok && kept.base == base && kept.tip == tip {
+		ch := kept.change
+		return &ch, nil
+	}
+	commits, err := gitLine(ctx, c.Repo, "log", "--no-color", "--format=%h%x00%s", base+".."+tip)
+	if err != nil {
+		return nil, err
+	}
+	ch := web.Change{Branch: branch, Repo: c.Repo, Commits: []web.Commit{},
+		Command: "git --git-dir=" + shellWord(c.Repo) + " diff HEAD..." + branch}
+	for _, line := range strings.Split(commits, "\n") {
+		if hash, title, ok := strings.Cut(line, "\x00"); ok {
+			ch.Commits = append(ch.Commits, web.Commit{Hash: hash, Title: title})
+		}
+	}
+	ch.Diff, ch.Size, err = changeOf(ctx, c.Repo, tip)
+	if err != nil {
+		return nil, err
+	}
+	ch.TooLarge = ch.Size > maxDiff
+	c.changes.mu.Lock()
+	if c.changes.last == nil {
+		c.changes.last = map[int64]cachedChange{}
+	}
+	c.changes.last[card] = cachedChange{base, tip, ch}
+	c.changes.mu.Unlock()
+	return &ch, nil
+}
+
+// shellWord is a word as a shell reads it: as it is when it holds only
+// characters a shell leaves alone, else in single quotes.
+func shellWord(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./+:@%,=") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // changeOf is the change of a card's branch at commit, as a diff from where the

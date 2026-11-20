@@ -595,3 +595,57 @@ func TestFenced(t *testing.T) {
 		}
 	}
 }
+
+// TestChange checks the change the screen is handed for a card: none without
+// a branch; the branch, its commits newest first and the diff from where it
+// left main with one; and only the size over the limit.
+func TestChange(t *testing.T) {
+	ctx := t.Context()
+	c, commit := stagedCore(t)
+	if ch, err := c.change(ctx, 1); err != nil || ch != nil {
+		t.Fatalf("the change of a card without a branch: %+v, %v", ch, err)
+	}
+	first := commitOnBranch(t, c.Repo, commit, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+	second := commitOnBranch(t, c.Repo, first, map[string]string{"main.go": "package main\n"})
+	ch, err := c.change(ctx, 1)
+	if err != nil || ch == nil {
+		t.Fatalf("the change of a card with a branch: %+v, %v", ch, err)
+	}
+	diff, size, err := changeOf(ctx, c.Repo, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch.Branch != "kiln/card-1" || ch.Repo != c.Repo || ch.Diff != diff || ch.Size != size || ch.TooLarge ||
+		!strings.Contains(ch.Diff, "+A line.") || !strings.Contains(ch.Diff, "+package main") ||
+		ch.Command != "git --git-dir="+shellWord(c.Repo)+" diff HEAD...kiln/card-1" {
+		t.Errorf("the change: %+v", ch)
+	}
+	if len(ch.Commits) != 2 || !strings.HasPrefix(second, ch.Commits[0].Hash) || !strings.HasPrefix(first, ch.Commits[1].Hash) ||
+		ch.Commits[0].Title != "a save" {
+		t.Errorf("the commits: %+v", ch.Commits)
+	}
+	// The command prints the same diff.
+	if out := gitIn(t, c.Repo, "--git-dir="+c.Repo, "diff", "HEAD...kiln/card-1"); out != strings.TrimSpace(diff) {
+		t.Errorf("the command prints %q, want %q", out, diff)
+	}
+
+	big := strings.Repeat("a line of a large change\n", maxDiff/20)
+	commitOnBranch(t, c.Repo, second, map[string]string{"big.txt": big})
+	ch, err = c.change(ctx, 1)
+	if err != nil || ch == nil || !ch.TooLarge || ch.Diff != "" || ch.Size <= maxDiff || len(ch.Commits) != 3 {
+		t.Errorf("a change over the limit: %+v, %v", ch, err)
+	}
+}
+
+func TestShellWord(t *testing.T) {
+	for in, want := range map[string]string{
+		"/data/repo.git": "/data/repo.git",
+		"/my repo":       "'/my repo'",
+		"it's":           `'it'\''s'`,
+		"":               "''",
+	} {
+		if got := shellWord(in); got != want {
+			t.Errorf("shellWord(%q) is %q, want %q", in, got, want)
+		}
+	}
+}

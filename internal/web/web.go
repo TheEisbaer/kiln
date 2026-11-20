@@ -14,6 +14,7 @@
 package web
 
 import (
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/base64"
@@ -53,11 +54,38 @@ var policy = func() string {
 // maxBody is the largest body of a request that is read.
 const maxBody = 1 << 20
 
-// Info is what the board says about the core.
+// Info is what the board says about the core, and where the card's page gets
+// a card's change from.
 type Info struct {
 	Instance string
 	Repo     string
-	Model    string
+	// The models of the spec runs, the implement runs and the review runs the
+	// core starts.
+	Model, ImplementModel, ReviewModel string
+	// Change is the change on a card's branch, or nil when the card has no
+	// branch. The tick hands it in, so that this package runs no command. Nil
+	// shows no change on any card.
+	Change func(ctx context.Context, card int64) (*Change, error)
+}
+
+// Change is where a card's change is and what it is: its branch in the
+// instance's copy of the repo, the branch's commits since it left main, newest
+// first, and the diff from where it left main to its tip. A diff over the
+// limit is not given: only its size, and the command that prints it.
+type Change struct {
+	Branch   string
+	Repo     string
+	Commits  []Commit
+	Diff     string
+	Size     int64
+	TooLarge bool
+	Command  string
+}
+
+// Commit is one commit of a card's branch: its short hash and its title.
+type Commit struct {
+	Hash  string
+	Title string
 }
 
 // CheckAddress refuses a listen address whose host is not loopback: an IP
@@ -140,9 +168,14 @@ type (
 	boardJSON struct {
 		Instance string     `json:"instance"`
 		Repo     string     `json:"repo"`
-		Model    string     `json:"model"`
+		Models   modelsJSON `json:"models"`
 		Now      time.Time  `json:"now"`
 		Cards    []tileJSON `json:"cards"`
+	}
+	modelsJSON struct {
+		Spec      string `json:"spec"`
+		Implement string `json:"implement"`
+		Review    string `json:"review"`
 	}
 	tileJSON struct {
 		ID        int64          `json:"id"`
@@ -166,7 +199,22 @@ type (
 		Runs      []runJSON      `json:"runs"`
 		Documents []documentJSON `json:"documents"`
 		Activity  []activityJSON `json:"activity"`
+		Change    *changeJSON    `json:"change"`
 		Now       time.Time      `json:"now"`
+	}
+	changeJSON struct {
+		Branch   string       `json:"branch"`
+		Repo     string       `json:"repo"`
+		Commits  []commitJSON `json:"commits"`
+		Diff     string       `json:"diff"`
+		Size     int64        `json:"size"`
+		TooLarge bool         `json:"too_large"`
+		Command  string       `json:"command"`
+		Error    string       `json:"error,omitempty"`
+	}
+	commitJSON struct {
+		Hash  string `json:"hash"`
+		Title string `json:"title"`
 	}
 	entryJSON struct {
 		Number   int64          `json:"number"`
@@ -233,12 +281,24 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	b := boardJSON{Instance: h.info.Instance, Repo: h.info.Repo, Model: h.info.Model, Now: time.Now().UTC(),
+	b := boardJSON{Instance: h.info.Instance, Repo: h.info.Repo, Models: h.models(), Now: time.Now().UTC(),
 		Cards: []tileJSON{}}
 	for _, c := range cards {
 		b.Cards = append(b.Cards, tile(c))
 	}
 	reply(w, http.StatusOK, b)
+}
+
+// models are the models of the three stages; an empty one is the spec's.
+func (h *handler) models() modelsJSON {
+	m := modelsJSON{Spec: h.info.Model, Implement: h.info.ImplementModel, Review: h.info.ReviewModel}
+	if m.Implement == "" {
+		m.Implement = m.Spec
+	}
+	if m.Review == "" {
+		m.Review = m.Spec
+	}
+	return m
 }
 
 // cardID is the card's ID in the request's path, or 0 when it is none.
@@ -266,7 +326,29 @@ func (h *handler) card(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	out.Change = h.change(r.Context(), c.ID)
 	reply(w, http.StatusOK, out)
+}
+
+// change is the change of a card's branch, nil when it has none. A change that
+// cannot be read is said on the card's page, which shows the rest.
+func (h *handler) change(ctx context.Context, card int64) *changeJSON {
+	if h.info.Change == nil {
+		return nil
+	}
+	ch, err := h.info.Change(ctx, card)
+	if err != nil {
+		return &changeJSON{Commits: []commitJSON{}, Error: run.Printable(err.Error())}
+	}
+	if ch == nil {
+		return nil
+	}
+	out := &changeJSON{Branch: ch.Branch, Repo: ch.Repo, Commits: []commitJSON{}, Diff: ch.Diff, Size: ch.Size,
+		TooLarge: ch.TooLarge, Command: ch.Command}
+	for _, c := range ch.Commits {
+		out.Commits = append(out.Commits, commitJSON{Hash: c.Hash, Title: c.Title})
+	}
+	return out
 }
 
 // cardJSON is everything the card's page shows.
@@ -383,6 +465,7 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	out.Change = h.change(r.Context(), c.ID)
 	reply(w, http.StatusOK, out)
 }
 

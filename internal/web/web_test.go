@@ -1,7 +1,9 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,7 +110,7 @@ func TestPage(t *testing.T) {
 func TestBoard(t *testing.T) {
 	f := newFixture(t)
 	if b := decode[boardJSON](t, f.do(t, "GET", "/api/board", "")); b.Instance != "ab12cd34" || b.Repo != "/data/repo.git" ||
-		b.Model != "claude-opus-5-5" || b.Cards == nil || len(b.Cards) != 0 {
+		b.Models != (modelsJSON{"claude-opus-5-5", "claude-opus-5-5", "claude-opus-5-5"}) || b.Cards == nil || len(b.Cards) != 0 {
 		t.Fatalf("an empty board: %+v", b)
 	}
 	spec := f.card(t, "\n  Write the screen  \nwith more", store.State{Stage: store.Spec, WaitsFor: store.Run})
@@ -202,6 +204,68 @@ func TestCard(t *testing.T) {
 		if w := f.do(t, "GET", path, ""); w.Code != 404 {
 			t.Errorf("GET %s: %d", path, w.Code)
 		}
+	}
+}
+
+// TestChange checks the change in a card's answer: none for a card without a
+// branch, the branch, its commits and its diff for one with a branch, and only
+// the size and the command for one whose diff is over the limit.
+func TestChange(t *testing.T) {
+	f := newFixture(t)
+	changes := map[int64]*Change{
+		2: {Branch: "kiln/card-2", Repo: "/data/repo.git", Commits: []Commit{{"ab12cd3", "a save"}, {"0f0f0f0", "a first save"}},
+			Diff: "diff --git a/NOTES.md b/NOTES.md\n+<script>\n", Size: 41, Command: "git --git-dir=/data/repo.git diff HEAD...kiln/card-2"},
+		3: {Branch: "kiln/card-3", Repo: "/data/repo.git", Commits: []Commit{{"1234567", "a save"}}, Size: 2 << 20, TooLarge: true,
+			Command: "git --git-dir=/data/repo.git diff HEAD...kiln/card-3"},
+	}
+	asked := []int64{}
+	h, err := Handler(f.store, Info{Instance: "ab12cd34", Repo: "/data/repo.git", Model: "m",
+		Change: func(_ context.Context, card int64) (*Change, error) {
+			asked = append(asked, card)
+			return changes[card], nil
+		}}, f.act, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h = h
+	for i, to := range []store.State{{Stage: store.Spec, WaitsFor: store.Approval}, {Stage: store.Review, WaitsFor: store.Approval},
+		{Stage: store.Review, WaitsFor: store.Developer}} {
+		if id := f.card(t, fmt.Sprintf("Card %d", i+1), to); id != int64(i+1) {
+			t.Fatalf("card %d has the ID %d", i+1, id)
+		}
+	}
+	get := func(id int64) (*changeJSON, string) {
+		t.Helper()
+		w := f.do(t, "GET", fmt.Sprintf("/api/cards/%d", id), "")
+		if w.Code != 200 {
+			t.Fatalf("GET card %d: %d %s", id, w.Code, w.Body)
+		}
+		return decode[cardJSON](t, w).Change, w.Body.String()
+	}
+	if ch, body := get(1); ch != nil || !strings.Contains(body, `"change":null`) {
+		t.Errorf("a card without a branch has the change %+v", ch)
+	}
+	ch, body := get(2)
+	want := &changeJSON{Branch: "kiln/card-2", Repo: "/data/repo.git", Commits: []commitJSON{{"ab12cd3", "a save"}, {"0f0f0f0", "a first save"}},
+		Diff: changes[2].Diff, Size: 41, Command: "git --git-dir=/data/repo.git diff HEAD...kiln/card-2"}
+	if !reflect.DeepEqual(ch, want) || strings.Contains(body, "<script>") {
+		t.Errorf("a card with a branch has the change %+v, want %+v", ch, want)
+	}
+	ch, _ = get(3)
+	if ch == nil || !ch.TooLarge || ch.Diff != "" || ch.Size != 2<<20 || ch.Command != changes[3].Command || len(ch.Commits) != 1 {
+		t.Errorf("a card whose diff is over the limit has the change %+v", ch)
+	}
+	if !reflect.DeepEqual(asked, []int64{1, 2, 3}) {
+		t.Errorf("the change was asked for the cards %v", asked)
+	}
+
+	// A change that cannot be read is said, and the card is shown.
+	h, _ = Handler(f.store, Info{Change: func(context.Context, int64) (*Change, error) {
+		return nil, errors.New("git log: \x1b[2Jbroken")
+	}}, f.act, addr)
+	f.h = h
+	if ch, _ := get(2); ch == nil || !strings.Contains(ch.Error, "broken") || strings.Contains(ch.Error, "\x1b") {
+		t.Errorf("a change that cannot be read: %+v", ch)
 	}
 }
 
