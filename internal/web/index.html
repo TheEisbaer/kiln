@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-build="">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -498,6 +498,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
   <button id="new" class="primary" type="button">New card</button>
 </header>
 <div id="offline" class="offline" hidden>the core does not answer; trying again every 2 seconds</div>
+<div id="stale" class="offline" hidden>the core serves another version of this page; reload the page to use it</div>
 <section id="strip" class="strip" aria-label="What needs you"></section>
 <main id="board" class="board" aria-label="Board"></main>
 <div id="scrim" class="scrim"></div>
@@ -1487,15 +1488,47 @@ async function refreshBoard() {
   renderBoard(r.data);
 }
 
+// The build this page was served with, which the board's build is compared to.
+const BUILD = document.documentElement.dataset.build;
+let reloading = false;
+
+// reloadFor reloads the page when the core serves another build of it, and
+// says whether it does. It waits while a dialog is open, so that nothing typed
+// is lost, and it reloads once per build: a page already reloaded for this
+// build, or one that cannot keep that in sessionStorage, says so and stays.
+function reloadFor(build) {
+  if (!build || !BUILD || build === BUILD) {
+    try { sessionStorage.removeItem("kiln-reloaded-for"); } catch (e) { /* no storage */ }
+    $("stale").hidden = true;
+    return false;
+  }
+  if ($("dialog").open || $("note").open) return false;
+  try {
+    if (sessionStorage.getItem("kiln-reloaded-for") !== build) {
+      sessionStorage.setItem("kiln-reloaded-for", build);
+      reloading = true;
+      location.reload();
+      return true;
+    }
+  } catch (e) { /* no storage: no reload by itself */ }
+  $("stale").hidden = false;
+  return false;
+}
+
+// poll asks for the board and checks its build before this page's code reads
+// the answer any further; refreshBoard, after a move, does not check.
 async function poll() {
   try {
-    await refreshBoard();
+    const r = await api("GET", "/api/board");
+    if (!r.ok) throw new Error("board: " + r.status);
+    if (reloadFor(r.data && r.data.build)) return;
+    renderBoard(r.data);
     await refreshCard();
     setOnline(true);
   } catch (e) {
     setOnline(false);
   } finally {
-    setTimeout(poll, 2000);
+    if (!reloading) setTimeout(poll, 2000);
   }
 }
 

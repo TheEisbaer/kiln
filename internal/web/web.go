@@ -14,10 +14,12 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,6 +86,39 @@ func ReadPage(file string) ([]byte, string, error) {
 	}
 	return body, p, nil
 }
+
+// buildOf is a page's build: the first 16 hex digits of its SHA-256.
+func buildOf(page []byte) string {
+	sum := sha256.Sum256(page)
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// withBuild is a page as it is served: the page with its build in its one
+// data-build attribute, which the page compares with the board's. The
+// attribute is outside the script and the style, so their hashes in the policy
+// hold for the served page too. A page that does not have exactly one empty
+// attribute is given as it is, and withBuild says so.
+func withBuild(page []byte) ([]byte, bool) {
+	empty := []byte(`data-build=""`)
+	if bytes.Count(page, empty) != 1 {
+		return page, false
+	}
+	return bytes.Replace(page, empty, []byte(`data-build="`+buildOf(page)+`"`), 1), true
+}
+
+// build is the embedded page's build. Only the page goes into it, so a core
+// rebuilt with the same page has the same build, and a page left open on it
+// does not reload.
+var build = buildOf(page)
+
+// served is the embedded page as it is served.
+var served = func() []byte {
+	s, ok := withBuild(page)
+	if !ok {
+		panic(`index.html does not have exactly one data-build=""`)
+	}
+	return s
+}()
 
 // maxBody is the largest body of a request that is read.
 const maxBody = 1 << 20
@@ -195,14 +230,16 @@ type handler struct {
 }
 
 func (h *handler) page(w http.ResponseWriter, r *http.Request) {
-	body, csp := page, policy
+	body, csp := served, policy
 	if h.info.Page != "" {
 		// A file that went wrong is said, never covered by the embedded page.
-		var err error
-		if body, csp, err = ReadPage(h.info.Page); err != nil {
+		file, filePolicy, err := ReadPage(h.info.Page)
+		if err != nil {
 			fail(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		body, _ = withBuild(file)
+		csp = filePolicy
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", csp)
@@ -210,10 +247,26 @@ func (h *handler) page(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
+// buildNow is the build of the page the core serves at this moment: the
+// embedded page's, or with --page the file's as it is now, so that a page left
+// open on an earlier state of the file reloads itself. A file that cannot be
+// read has no build, and a page left open then stays as it is.
+func (h *handler) buildNow() string {
+	if h.info.Page == "" {
+		return build
+	}
+	file, _, err := ReadPage(h.info.Page)
+	if err != nil {
+		return ""
+	}
+	return buildOf(file)
+}
+
 // The API's JSON.
 type (
 	boardJSON struct {
 		Instance string     `json:"instance"`
+		Build    string     `json:"build"`
 		Repo     string     `json:"repo"`
 		Models   modelsJSON `json:"models"`
 		Now      time.Time  `json:"now"`
@@ -336,7 +389,7 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	b := boardJSON{Instance: h.info.Instance, Repo: h.info.Repo, Models: h.models(), Now: time.Now().UTC(),
+	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Repo: h.info.Repo, Models: h.models(), Now: time.Now().UTC(),
 		Cards: []tileJSON{}}
 	for _, c := range cards {
 		b.Cards = append(b.Cards, tile(c))
