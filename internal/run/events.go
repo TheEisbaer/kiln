@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 // event is what is read of one line of Claude Code's stream-json output
@@ -21,12 +22,10 @@ type event struct {
 	// assistant
 	Message struct {
 		Content []struct {
-			Type  string `json:"type"`
-			Text  string `json:"text"`
-			Name  string `json:"name"`
-			Input struct {
-				Description string `json:"description"`
-			} `json:"input"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 	} `json:"message"`
 
@@ -126,8 +125,8 @@ func describe(e event) []string {
 		for _, c := range e.Message.Content {
 			switch c.Type {
 			case "tool_use":
-				if c.Input.Description != "" {
-					lines = append(lines, fmt.Sprintf("tool %s: %s", c.Name, firstLine(c.Input.Description)))
+				if d := inputField(c.Input, "description"); d != "" {
+					lines = append(lines, fmt.Sprintf("tool %s: %s", c.Name, firstLine(d)))
 				} else {
 					lines = append(lines, "tool "+c.Name)
 				}
@@ -144,6 +143,79 @@ func describe(e event) []string {
 	return nil
 }
 
+// inputField is the text of a field of a tool's input, or "" when the input
+// has none or it is not text.
+func inputField(input json.RawMessage, field string) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(input, &fields) != nil {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(fields[field], &s) != nil {
+		return ""
+	}
+	return s
+}
+
+// Activity is one thing a run did, as the screen shows it while the run is
+// followed: a text the agent wrote, or a tool it used, with when it was read.
+type Activity struct {
+	At   time.Time
+	Kind string // "text" or "tool"
+	Text string // the text, or one line of the tool's input
+	Tool string // the tool's name
+}
+
+// The longest text of an activity, in characters, and the longest line of a
+// tool's input.
+const (
+	maxActivityText = 500
+	maxActivityLine = 200
+)
+
+// inputFields are the fields of a tool's input that say best what it does,
+// in the order they are looked for.
+var inputFields = []string{"description", "command", "file_path", "path", "url", "pattern", "query", "prompt"}
+
+// activities are the activities of an event: each text the agent wrote, cut
+// at 500 characters, and each tool use, with its name and one line of its
+// input: the first of inputFields it has, or else the input itself.
+func activities(e event, at time.Time) []Activity {
+	if e.Type != "assistant" {
+		return nil
+	}
+	var out []Activity
+	for _, c := range e.Message.Content {
+		switch c.Type {
+		case "text":
+			if t := strings.TrimSpace(c.Text); t != "" {
+				out = append(out, Activity{At: at, Kind: "text", Text: cut(t, maxActivityText)})
+			}
+		case "tool_use":
+			line := ""
+			for _, f := range inputFields {
+				if line = firstLine(inputField(c.Input, f)); line != "" {
+					break
+				}
+			}
+			if line == "" && len(c.Input) > 0 && string(c.Input) != "{}" {
+				line = firstLine(string(c.Input))
+			}
+			out = append(out, Activity{At: at, Kind: "tool", Tool: c.Name, Text: cut(line, maxActivityLine)})
+		}
+	}
+	return out
+}
+
+// cut is s cut at n characters, with an ellipsis when it was cut.
+func cut(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 // firstLine is the first line of a text that is not empty.
 func firstLine(s string) string {
 	for _, line := range strings.Split(s, "\n") {
@@ -154,18 +226,25 @@ func firstLine(s string) string {
 	return ""
 }
 
-// follower prints the events of a run as they come, and calls mismatch once
-// when system/init names another model than the one asked for.
+// follower prints the events of a run as they come, hands their activities to
+// activity, when it is set, and calls mismatch once when system/init names
+// another model than the one asked for.
 type follower struct {
 	out      io.Writer
 	model    string
 	mismatch func(seen string)
+	activity func(Activity)
 	stopped  bool
 }
 
 func (f *follower) see(e event) {
 	for _, line := range describe(e) {
 		fmt.Fprintln(f.out, printable(line))
+	}
+	if f.activity != nil {
+		for _, a := range activities(e, time.Now().UTC()) {
+			f.activity(a)
+		}
 	}
 	if e.Type == "system" && e.Subtype == "init" && e.Model != f.model && !f.stopped {
 		f.stopped = true

@@ -223,6 +223,43 @@ func TestReadEvents(t *testing.T) {
 	})
 }
 
+// TestActivities checks what following hands to the screen: each text, cut at
+// 500 characters, and each tool use with one line of its input.
+func TestActivities(t *testing.T) {
+	var got []Activity
+	f := &follower{out: io.Discard, model: "claude-haiku-5-5", mismatch: func(string) {},
+		activity: func(a Activity) { got = append(got, a) }}
+	long := strings.Repeat("é", 501)
+	events := output + `{"type":"assistant","message":{"content":[` +
+		`{"type":"tool_use","name":"Read","input":{"file_path":"/work/a.go\nsecond"}},` +
+		`{"type":"tool_use","name":"Odd","input":{"n":1}},` +
+		`{"type":"tool_use","name":"Empty","input":{}},` +
+		`{"type":"text","text":"` + long + `"},{"type":"text","text":"  "}]}}` + "\n"
+	if _, err := readEvents(strings.NewReader(events), f.see); err != nil {
+		t.Fatal(err)
+	}
+	want := []Activity{
+		{Kind: "tool", Tool: "Bash", Text: "Run the script"},
+		{Kind: "text", Text: "Done.\nAnd more."},
+		{Kind: "tool", Tool: "Read", Text: "/work/a.go"},
+		{Kind: "tool", Tool: "Odd", Text: `{"n":1}`},
+		{Kind: "tool", Tool: "Empty", Text: ""},
+		{Kind: "text", Text: strings.Repeat("é", 500) + "…"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("activities %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].At.IsZero() {
+			t.Errorf("activity %d has no time", i)
+		}
+		got[i].At = time.Time{}
+		if got[i] != want[i] {
+			t.Errorf("activity %d is %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestHostSave(t *testing.T) {
 	repo, commit := bareRepo(t, map[string]string{"NOTES.md": "notes\n"})
 	ctx := t.Context()

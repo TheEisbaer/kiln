@@ -52,6 +52,10 @@ type Inputs struct {
 	// save is "not saved". The tick sets it for a spec run; `kiln run` by hand
 	// never does.
 	SkipSave bool
+	// Activity, when it is set, is handed what the run does while it is
+	// followed (step 4), as it comes: the screen's activity. It is not
+	// recorded, and not sent as JSON, as to a test's child.
+	Activity func(Activity) `json:"-"`
 }
 
 // Exit statuses.
@@ -213,6 +217,14 @@ type Verdict struct {
 	// set when its way out was gone when it was collected (ADR 0059).
 	Hosts      []string
 	WayOutGone bool
+	// Saved is the record's save: the saved commit, "no change" or "not
+	// saved". Changed tells the first from the other two.
+	Saved string
+}
+
+// Changed reports whether the run's work was saved as a commit.
+func (v Verdict) Changed() bool {
+	return v.Saved != "" && v.Saved != noChange && v.Saved != notSaved
 }
 
 // Do carries out one run, or the rest of one started before with the same
@@ -274,7 +286,7 @@ func Carry(ctx context.Context, in Inputs, starting func() error, notes io.Write
 		return Verdict{}, err
 	}
 	return Verdict{Finished: rec.status() == 0, Reason: rec.reason(),
-		Hosts: rec.Hosts, WayOutGone: rec.WayOut == wayOutGone}, nil
+		Hosts: rec.Hosts, WayOutGone: rec.WayOut == wayOutGone, Saved: rec.Saved}, nil
 }
 
 // With stored, the run is known to be in the store once starting has
@@ -500,7 +512,7 @@ func (r *run) follow(ctx context.Context) error {
 		done <- err
 	}()
 	var stopErr error
-	f := &follower{out: r.out, model: r.Model, mismatch: func(seen string) {
+	f := &follower{out: r.out, model: r.Model, activity: r.Activity, mismatch: func(seen string) {
 		fmt.Fprintf(r.out, "the run uses the model %s, not %s: it is stopped\n", printable(seen), r.Model)
 		stopErr = seal.StopRun(context.WithoutCancel(ctx), r.ID)
 	}}

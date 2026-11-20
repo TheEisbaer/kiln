@@ -2,25 +2,30 @@
 // store with the container engine, and gives a card that waits for a run its
 // one run, carried to its end before the tick goes on.
 //
-// The data directory holds the store, store.db; the lock, lock; the runs'
-// records, runs/<id>/, as internal/run writes them; and the runs'
-// instructions, instructions/<id>.md: the installed Kiln's instruction for a
-// spec run, followed by the card's text.
+// A card that waits for a run gets the run of its stage: spec, implement or
+// review (see stages). The data directory holds the store, store.db; the lock,
+// lock; the runs' records, runs/<id>/, as internal/run writes them; and the
+// runs' instructions, instructions/<id>.md: the installed Kiln's instruction
+// for the run's stage, followed by what the run is told of its card.
 //
 // Only internal/seal drives the container engine; this package calls it and
 // internal/run.
 package tick
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -29,29 +34,68 @@ import (
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/seal"
 	"github.com/TheEisbaer/kiln/internal/store"
+	"github.com/TheEisbaer/kiln/internal/web"
 )
 
 // Config is what `kiln core` is started with.
 type Config struct {
-	Data   string // the data directory
-	Repo   string // the instance's copy of the target repo, a bare repo
-	Model  string // the model of a run that starts, an exact identifier
-	Effort string // the effort of a run that starts
-	Image  string // the run image
-	Proxy  string // the proxy container's name
-	// The list of hosts of a spec run (ADR 0059), which until the stage cards
-	// is every run the tick starts, and its way out's image and outward
-	// network. An empty list seals a run as before.
+	Data  string // the data directory
+	Repo  string // the instance's copy of the target repo, a bare repo
+	Model string // the model of a spec run that starts, an exact identifier
+	// The models of an implement run and of a review run that start; Model
+	// when empty (ADR 0030).
+	ImplementModel string
+	ReviewModel    string
+	Image          string // the run image
+	Proxy          string // the proxy container's name
+	// The list of hosts of a spec run (ADR 0059), and its way out's image and
+	// outward network. An empty list seals a spec run as before; implement and
+	// review runs have no list.
 	Hosts         []string
 	WayOutImage   string
 	WayOutNetwork string
+	// The loopback address the screen is served on while the core ticks;
+	// empty, none is served.
+	Listen string
 }
+
+// stage is what a run of a card's stage is: its effort, fixed per stage
+// (ADR 0030), the instruction it is told first, the kind of the document it
+// writes, and whether its working tree is saved.
+type stage struct {
+	effort      string
+	instruction string
+	kind        string
+	save        bool
+}
+
+// stages are the stages a card can wait in for a run.
+var stages = map[store.Stage]stage{
+	store.Spec:      {"high", instructions.Spec, store.KindSpec, false},
+	store.Implement: {"medium", instructions.Implement, store.KindReport, true},
+	store.Review:    {"high", instructions.Review, store.KindReview, false},
+}
+
+// model is the model of a run of the stage.
+func (c Config) model(s store.Stage) string {
+	switch {
+	case s == store.Implement && c.ImplementModel != "":
+		return c.ImplementModel
+	case s == store.Review && c.ReviewModel != "":
+		return c.ReviewModel
+	}
+	return c.Model
+}
+
+// maxDiff is the largest change a review run is told: 1 MiB of diff.
+const maxDiff = 1 << 20
 
 // interval is the time between two ticks. Only the test changes it.
 var interval = 2 * time.Second
 
 // atPoint, set only by the test, is called at the named points of a tick. It
-// can exit the process, as a kill there would.
+// can exit the process, as a kill there would. A point of a card's run is
+// called twice: by its name, and as <stage>/<name>.
 var atPoint func(point string)
 
 func at(point string) {
@@ -60,14 +104,20 @@ func at(point string) {
 	}
 }
 
-// The states a run moves its card to, until the stage cards: a card waits in
-// spec for a run, and goes on to wait for the developer's approval when the
-// run finished with a spec and the web, or for the developer, "needs you",
-// otherwise (see destination).
+// The states a run moves its card to. A card waits in spec for a run, and goes
+// on to wait for the developer's approval when the run finished with a spec and
+// the web, or for the developer, "needs you", otherwise (see specDestination).
+// After an implement run and a review run the card goes where laterDestination
+// says.
 var (
 	waiting  = store.State{Stage: store.Spec, WaitsFor: store.Run}
 	finished = store.State{Stage: store.Spec, WaitsFor: store.Approval}
 	failed   = store.State{Stage: store.Spec, WaitsFor: store.Developer}
+
+	implementNeedsYou = store.State{Stage: store.Implement, WaitsFor: store.Developer}
+	reviewWaits       = store.State{Stage: store.Review, WaitsFor: store.Run}
+	reviewNeedsYou    = store.State{Stage: store.Review, WaitsFor: store.Developer}
+	reviewPassed      = store.State{Stage: store.Review, WaitsFor: store.Approval}
 )
 
 // Lock takes the lock on a data directory, creating the directory, and holds
@@ -128,10 +178,17 @@ func AddCard(dir, text string) (int64, error) {
 	return c.ID, nil
 }
 
-// Core is `kiln core`: under the lock, it opens the store and ticks every
-// interval until the context is cancelled. A step that fails prints its
-// error, changes nothing, and is tried again on the next tick.
+// Core is `kiln core`: under the lock, it opens the store, serves the screen
+// on cfg.Listen, if it is set, and ticks every interval until the context is
+// cancelled. A step that fails prints its error, changes nothing, and is
+// tried again on the next tick. The screen's handlers share the store with
+// the tick (see store.Store).
 func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
+	if cfg.Listen != "" {
+		if err := web.CheckAddress(cfg.Listen); err != nil {
+			return err
+		}
+	}
 	s, lock, err := openStore(cfg.Data)
 	if err != nil {
 		return err
@@ -142,8 +199,15 @@ func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
-	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut}
+	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity()}
 	fmt.Fprintf(out, "kiln core: instance %s, data %s\n", instance, cfg.Data)
+	if cfg.Listen != "" {
+		stop, err := c.serve()
+		if err != nil {
+			return err
+		}
+		defer stop()
+	}
 	for {
 		if err := c.tick(ctx); err != nil {
 			if ctx.Err() != nil {
@@ -166,6 +230,32 @@ type core struct {
 	store       *store.Store
 	instance    string
 	out, errOut io.Writer
+	activity    *web.Activity // of the run the tick follows, for the screen
+}
+
+// serve serves the screen on the core's Listen address, and prints where. The
+// function it returns stops serving, waiting a moment for the requests that
+// are under way.
+func (c *core) serve() (func(), error) {
+	ln, err := web.Listen(c.Listen)
+	if err != nil {
+		return nil, fmt.Errorf("the screen: %w", err)
+	}
+	h, err := web.Handler(c.store, web.Info{Instance: c.instance, Repo: c.Repo, Model: c.Model}, c.activity, ln.Addr().String())
+	if err != nil {
+		ln.Close()
+		return nil, err
+	}
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, ErrorLog: log.New(c.errOut, "kiln core: the screen: ", 0)}
+	go srv.Serve(ln)
+	fmt.Fprintf(c.out, "kiln core: the screen is at http://%s/\n", ln.Addr())
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if srv.Shutdown(ctx) != nil {
+			srv.Close()
+		}
+	}, nil
 }
 
 // tick is one tick: the sweep, then each card that waits for a run in turn.
@@ -254,6 +344,15 @@ func (c *core) card(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
+	st, ok := stages[card.Stage]
+	if !ok {
+		return fmt.Errorf("it waits for a run in %s, which has none", card.Stage)
+	}
+	// The points of the run, by their names and by the stage's.
+	mark := func(point string) {
+		at(point)
+		at(string(card.Stage) + "/" + point)
+	}
 	row, err := c.store.InFlight(id)
 	if err != nil {
 		return err
@@ -265,19 +364,25 @@ func (c *core) card(ctx context.Context, id int64) error {
 		if err != nil {
 			return err
 		}
-		commit, err := head(ctx, c.Repo)
+		commit, held, err := c.startsFrom(ctx, card)
 		if err != nil {
 			return err
 		}
+		if held != "" {
+			return c.hold(card, held)
+		}
 		row = &store.RunRow{ID: fmt.Sprintf("%s-%d-%d", c.instance, id, n+1), Card: id,
-			Commit: commit, Model: c.Model, Effort: c.Effort}
+			Commit: commit, Model: c.model(card.Stage), Effort: st.effort}
 	}
-	in, err := c.inputs(*row, card.Text, inFlight)
+	in, held, err := c.inputs(ctx, *row, card, inFlight)
 	if err != nil {
 		return err
 	}
+	if held != "" {
+		return c.hold(card, held)
+	}
 	if !inFlight {
-		at("after-instruction")
+		mark("after-instruction")
 	}
 
 	state, err := seal.InspectRun(ctx, row.ID)
@@ -297,22 +402,26 @@ func (c *core) card(ctx context.Context, id int64) error {
 	switch decide(inFlight, container, recorded) {
 	case start:
 		starting = func() error {
-			at("before-add")
+			mark("before-add")
 			if err := c.store.AddRun(*row); err != nil {
 				return err
 			}
-			at("after-add")
-			fmt.Fprintf(c.out, "card %d: run %s starts\n", id, row.ID)
+			mark("after-add")
+			fmt.Fprintf(c.out, "card %d: %s run %s starts\n", id, card.Stage, row.ID)
 			return nil
 		}
 	case carry:
-		fmt.Fprintf(c.out, "card %d: run %s goes on\n", id, row.ID)
+		fmt.Fprintf(c.out, "card %d: %s run %s goes on\n", id, card.Stage, row.ID)
 	case gone:
 		// Carry, with starting nil, refuses to start it a second time.
 	case leave:
 		return fmt.Errorf("the container kiln-run-%s is %s; it is left alone", row.ID, container)
 	}
 
+	// Following gives the run's output from its first event, so its activity
+	// starts again with every Carry.
+	c.activity.Drop(row.ID)
+	in.Activity = func(a run.Activity) { c.activity.Add(row.ID, a) }
 	verdict, err := run.Carry(ctx, in, starting, c.errOut)
 	switch {
 	case errors.Is(err, run.ErrGone):
@@ -320,98 +429,290 @@ func (c *core) card(ctx context.Context, id int64) error {
 	case err != nil:
 		return err
 	}
-	var spec []byte
-	var problem string
+	var doc run.Document
 	var readErr error
 	if verdict.Finished {
-		spec, problem, readErr = run.ReadSpec(in.Runs, row.ID)
+		doc, readErr = run.ReadDocument(in.Runs, row.ID, st.kind)
 	}
-	d, err := destination(verdict, spec, problem, readErr)
+	d, err := destination(card.Stage, verdict, doc, readErr)
 	if err != nil {
-		return fmt.Errorf("the spec of run %s: %w; it is read again on the next tick", row.ID, err)
+		return fmt.Errorf("the %s of run %s: %w; it is read again on the next tick", st.kind, row.ID, err)
 	}
 
-	at("before-end")
-	if _, err := c.store.EndRun(row.ID, d.ending, d.reason, d.to, d.spec); err != nil {
+	mark("before-end")
+	if _, err := c.store.EndRun(row.ID, d.ending, d.reason, d.to, d.doc); err != nil {
 		return err
 	}
-	at("after-end")
+	mark("after-end")
+	c.activity.Drop(row.ID)
 	fmt.Fprintf(c.out, "card %d: run %s %s: %s\n", id, row.ID, d.ending, d.reason)
 	return run.Remove(ctx, in)
 }
 
+// hold stops a card that waits for a run, before the run is in the store: the
+// card needs the developer, with the reason.
+func (c *core) hold(card store.Card, reason string) error {
+	if _, err := c.store.MoveWithReason(card.ID, store.State{Stage: card.Stage, WaitsFor: store.Developer},
+		store.CauseRule, reason); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "card %d: no %s run is started: %s\n", card.ID, card.Stage, reason)
+	return nil
+}
+
+// startsFrom is the commit a card's next run starts from: the head of main for
+// a spec run; the tip of the card's branch for a review run, and for an
+// implement run when the branch exists, so that a second implement run builds
+// on the first (ADR 0013); and the head of main otherwise. A review run of a
+// card without a branch is held, with the reason.
+func (c *core) startsFrom(ctx context.Context, card store.Card) (commit, held string, err error) {
+	if card.Stage != store.Spec {
+		tip, err := branchTip(ctx, c.Repo, branchOf(card.ID))
+		if err != nil || tip != "" {
+			return tip, "", err
+		}
+		if card.Stage == store.Review {
+			return "", "the card's branch " + branchOf(card.ID) + " does not exist; no change to review", nil
+		}
+	}
+	commit, err = head(ctx, c.Repo)
+	return commit, "", err
+}
+
+// branchOf is the branch of a card's work.
+func branchOf(card int64) string { return fmt.Sprintf("kiln/card-%d", card) }
+
 // end is how a run's end moves its card: the run's ending, the card's new
-// state, the reason on its entry, and the spec that is kept, if any.
+// state, the reason on its entry, and the document that is kept, if any.
 type end struct {
 	ending store.Ending
 	to     store.State
 	reason string
-	spec   *string
+	doc    *store.Doc
 }
 
-// destination is the table of where a card goes at its run's end, from the
-// run's verdict and, for a finished run, what ReadSpec gave. A run that
-// finished without a spec it could read, or without the web, is still
-// finished (ADR 0043): it produced its stage's result, and its card stops
-// under "needs you". A file that could not be read from the disk changes
-// nothing: the error is returned, and the run stays in flight.
-func destination(v run.Verdict, spec []byte, problem string, readErr error) (end, error) {
+// destination is where a card goes at its run's end, from the stage, the run's
+// verdict and, for a finished run, what ReadDocument gave: the spec stage's
+// table, or the table of implement and review. A file that could not be read
+// from the disk changes nothing: the error is returned, and the run stays in
+// flight.
+func destination(s store.Stage, v run.Verdict, doc run.Document, readErr error) (end, error) {
+	if v.Finished && readErr != nil {
+		return end{}, readErr
+	}
+	if s == store.Spec {
+		return specDestination(v, doc), nil
+	}
+	return laterDestination(s, v, doc), nil
+}
+
+// specDestination is the table of where a card goes at its spec run's end. A
+// run that finished without a spec it could read, or without the web, is still
+// finished (ADR 0043): it produced its stage's result, and its card stops under
+// "needs you".
+func specDestination(v run.Verdict, doc run.Document) end {
 	switch {
 	case !v.Finished:
-		return end{store.Failed, failed, v.Reason, nil}, nil
-	case readErr != nil:
-		return end{}, readErr
-	case problem != "":
-		return end{store.Finished, failed, problem + "; " + v.Reason, nil}, nil
+		return end{store.Failed, failed, v.Reason, nil}
+	case doc.Problem != "":
+		return end{store.Finished, failed, doc.Problem + "; " + v.Reason, nil}
 	}
-	text := string(spec)
+	spec := &store.Doc{Kind: store.KindSpec, Text: string(doc.Text)}
 	switch {
 	case len(v.Hosts) == 0:
-		return end{store.Finished, failed, "the spec was written without the web: no list of hosts; " + v.Reason, &text}, nil
+		return end{store.Finished, failed, "the spec was written without the web: no list of hosts; " + v.Reason, spec}
 	case v.WayOutGone:
-		return end{store.Finished, failed, "the spec was written without the web: its way out was gone; " + v.Reason, &text}, nil
+		return end{store.Finished, failed, "the spec was written without the web: its way out was gone; " + v.Reason, spec}
 	}
-	return end{store.Finished, finished, v.Reason, &text}, nil
+	return end{store.Finished, finished, v.Reason, spec}
+}
+
+// The first lines of a review that has a verdict (instructions/review.md).
+const (
+	passes   = "Verdict: passes"
+	goesBack = "Verdict: goes back"
+)
+
+// verdictLine is the first line of a review, without the white space at its
+// end, a carriage return included.
+func verdictLine(review string) string {
+	line, _, _ := strings.Cut(review, "\n")
+	return strings.TrimRight(line, " \t\r")
+}
+
+// laterDestination is the table of where a card goes at the end of its
+// implement run or its review run.
+//
+//	implement  failed                        implement, needs you, the run's reason
+//	implement  finished, nothing changed     implement, needs you: the run changed nothing
+//	implement  finished, a commit saved      review, waits for a run
+//	review     failed, or a problem of       review, needs you, the reason
+//	           review.md
+//	review     finished, Verdict: goes back  review, needs you: the review sends the change back
+//	review     finished, Verdict: passes     review, waits for approval
+//	review     finished, another first line  review, needs you: the review has no verdict
+//
+// A finished implement run's report is kept whenever it can be read; a missing
+// report is no problem, and another problem of it is said in the reason but
+// does not stop the card. A review that can be read is kept.
+func laterDestination(s store.Stage, v run.Verdict, doc run.Document) end {
+	if s == store.Implement {
+		if !v.Finished {
+			return end{store.Failed, implementNeedsYou, v.Reason, nil}
+		}
+		reason := v.Reason
+		var report *store.Doc
+		switch {
+		case doc.Problem == "":
+			report = &store.Doc{Kind: store.KindReport, Text: string(doc.Text)}
+		case !doc.Missing:
+			reason = doc.Problem + "; " + reason
+		}
+		if !v.Changed() {
+			return end{store.Finished, implementNeedsYou, "the run changed nothing; " + reason, report}
+		}
+		return end{store.Finished, reviewWaits, reason, report}
+	}
+	switch {
+	case !v.Finished:
+		return end{store.Failed, reviewNeedsYou, v.Reason, nil}
+	case doc.Problem != "":
+		return end{store.Finished, reviewNeedsYou, doc.Problem + "; " + v.Reason, nil}
+	}
+	review := &store.Doc{Kind: store.KindReview, Text: string(doc.Text)}
+	switch verdictLine(review.Text) {
+	case goesBack:
+		return end{store.Finished, reviewNeedsYou, "the review sends the change back; " + v.Reason, review}
+	case passes:
+		return end{store.Finished, reviewPassed, v.Reason, review}
+	}
+	return end{store.Finished, reviewNeedsYou, "the review has no verdict; " + v.Reason, review}
 }
 
 // inputs are the inputs of a card's run, from its row. A run that starts is
-// told the installed Kiln's instruction for a spec run, then the card's text,
+// told the installed Kiln's instruction for its stage, then what told says,
 // written to its file before AddRun. A run in flight keeps the file it was
 // started with, which is written again only when it is missing: a core rebuilt
 // with another instruction would otherwise write another text, which the run's
-// label kiln.instruction would refuse for ever.
-func (c *core) inputs(row store.RunRow, text string, inFlight bool) (run.Inputs, error) {
+// label kiln.instruction would refuse for ever. A review run whose change is
+// too large is not started: held says why.
+func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, inFlight bool) (in run.Inputs, held string, err error) {
+	st := stages[card.Stage]
 	instruction := filepath.Join(c.Data, "instructions", row.ID+".md")
 	write := !inFlight
 	if inFlight {
 		there, err := exists(instruction)
 		if err != nil {
-			return run.Inputs{}, err
+			return run.Inputs{}, "", err
 		}
 		write = !there
 	}
 	if write {
-		if err := writeAtomically(instruction, []byte(instructions.Spec+"## The card\n\n"+text)); err != nil {
-			return run.Inputs{}, err
+		text, held, err := c.told(ctx, row, card)
+		if err != nil {
+			return run.Inputs{}, "", err
+		}
+		if held != "" {
+			if inFlight {
+				return run.Inputs{}, "", fmt.Errorf("the instruction of run %s cannot be written again: %s", row.ID, held)
+			}
+			return run.Inputs{}, held, nil
+		}
+		if err := writeAtomically(instruction, []byte(st.instruction+text)); err != nil {
+			return run.Inputs{}, "", err
 		}
 	}
-	return run.Inputs{
-		Repo:          c.Repo,
-		Commit:        row.Commit,
-		Branch:        fmt.Sprintf("kiln/card-%d", row.Card),
-		ID:            row.ID,
-		Instruction:   instruction,
-		Runs:          filepath.Join(c.Data, "runs"),
-		Image:         c.Image,
-		Proxy:         c.Proxy,
-		Model:         row.Model,
-		Effort:        row.Effort,
-		Instance:      c.instance,
-		Hosts:         c.Hosts,
-		WayOutImage:   c.WayOutImage,
-		WayOutNetwork: c.WayOutNetwork,
-		SkipSave:      true, // until the stage cards, every run is a spec run
-	}, nil
+	in = run.Inputs{
+		Repo:        c.Repo,
+		Commit:      row.Commit,
+		Branch:      branchOf(row.Card),
+		ID:          row.ID,
+		Instruction: instruction,
+		Runs:        filepath.Join(c.Data, "runs"),
+		Image:       c.Image,
+		Proxy:       c.Proxy,
+		Model:       row.Model,
+		Effort:      row.Effort,
+		Instance:    c.instance,
+		SkipSave:    !st.save,
+	}
+	if card.Stage == store.Spec {
+		in.Hosts, in.WayOutImage, in.WayOutNetwork = c.Hosts, c.WayOutImage, c.WayOutNetwork
+	}
+	return in, "", nil
+}
+
+// told is what a run is told after its stage's instruction, each part under its
+// heading: the card; for an implement run and a review run, the approved spec;
+// for an implement run, the last review if it sent the change back; and for a
+// review run, the change as a diff from where the card's branch left main to
+// the run's commit. A change over maxDiff is held.
+func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (text, held string, err error) {
+	parts := []string{"## The card", card.Text}
+	if card.Stage == store.Spec {
+		return told(parts), "", nil
+	}
+	spec, err := c.store.Spec(card.ID)
+	if err != nil {
+		return "", "", err
+	}
+	parts = append(parts, "## The approved spec", spec.Text)
+	if card.Stage == store.Implement {
+		last, err := c.store.Newest(card.ID, store.KindSpec, store.KindReview)
+		if err != nil {
+			return "", "", err
+		}
+		if last.Kind == store.KindReview && verdictLine(last.Text) == goesBack {
+			parts = append(parts, "## The last review", last.Text)
+		}
+		return told(parts), "", nil
+	}
+	diff, size, err := changeOf(ctx, c.Repo, row.Commit)
+	if err != nil {
+		return "", "", err
+	}
+	if size > maxDiff {
+		return "", fmt.Sprintf("the change is %d bytes as a diff, more than %d; no review run is started", size, maxDiff), nil
+	}
+	return told(append(parts, "## The change", fenced(diff))), "", nil
+}
+
+// told joins headings and their texts: a heading, an empty line and its text,
+// and an empty line before the next heading.
+func told(parts []string) string {
+	var b strings.Builder
+	for i := 0; i < len(parts); i += 2 {
+		if i > 0 {
+			switch s := b.String(); {
+			case strings.HasSuffix(s, "\n\n"):
+			case strings.HasSuffix(s, "\n"):
+				b.WriteString("\n")
+			default:
+				b.WriteString("\n\n")
+			}
+		}
+		b.WriteString(parts[i] + "\n\n" + parts[i+1])
+	}
+	return b.String()
+}
+
+// fenced puts a diff in a code block whose fence is longer than any run of
+// backticks in it, so that nothing in the diff ends the block.
+func fenced(diff string) string {
+	longest, n := 0, 0
+	for _, r := range diff {
+		if r == '`' {
+			n++
+			longest = max(longest, n)
+		} else {
+			n = 0
+		}
+	}
+	fence := strings.Repeat("`", max(3, longest+1))
+	if diff != "" && !strings.HasSuffix(diff, "\n") {
+		diff += "\n"
+	}
+	return fence + "diff\n" + diff + fence + "\n"
 }
 
 // writeAtomically writes a file by a temporary file in its directory and a
@@ -447,21 +748,79 @@ func exists(name string) (bool, error) {
 	return err == nil, err
 }
 
-// head is the commit that HEAD of a bare repo is at. Variables of the
-// caller's that start with GIT_ are left out, so that none of them points git
-// at another repo.
-func head(ctx context.Context, repo string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "--git-dir="+repo, "rev-parse", "--verify", "HEAD^{commit}")
+// gitCommand is git on a bare repo. Variables of the caller's that start with
+// GIT_ are left out, so that none of them points git at another repo.
+func gitCommand(ctx context.Context, repo string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"--git-dir=" + repo}, args...)...)
 	for _, e := range os.Environ() {
 		if !strings.HasPrefix(e, "GIT_") {
 			cmd.Env = append(cmd.Env, e)
 		}
 	}
+	return cmd
+}
+
+// gitLine is the output of git on a bare repo, trimmed.
+func gitLine(ctx context.Context, repo string, args ...string) (string, error) {
+	cmd := gitCommand(ctx, repo, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("HEAD of %s: %w: %s", repo, err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("git %s on %s: %w: %s", args[0], repo, err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// head is the commit that HEAD of a bare repo is at, the head of main.
+func head(ctx context.Context, repo string) (string, error) {
+	return gitLine(ctx, repo, "rev-parse", "--verify", "HEAD^{commit}")
+}
+
+// branchTip is the commit a branch of a bare repo is at, or "" when there is
+// no such branch.
+func branchTip(ctx context.Context, repo, branch string) (string, error) {
+	ref := "refs/heads/" + branch
+	refs, err := gitLine(ctx, repo, "for-each-ref", "--format=%(refname)", ref)
+	if err != nil {
+		return "", err
+	}
+	if !slices.Contains(strings.Split(refs, "\n"), ref) {
+		return "", nil
+	}
+	return gitLine(ctx, repo, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
+}
+
+// changeOf is the change of a card's branch at commit, as a diff from where the
+// branch left main, and its size in bytes. A diff over maxDiff is not kept:
+// only its size is given.
+func changeOf(ctx context.Context, repo, commit string) (string, int64, error) {
+	base, err := gitLine(ctx, repo, "merge-base", "HEAD", commit)
+	if err != nil {
+		return "", 0, err
+	}
+	cmd := gitCommand(ctx, repo, "diff", "--no-color", "--no-ext-diff", "--no-textconv", base, commit)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", 0, err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", 0, err
+	}
+	var kept bytes.Buffer
+	n, copyErr := io.Copy(&kept, io.LimitReader(out, maxDiff+1))
+	if copyErr == nil {
+		var rest int64
+		rest, copyErr = io.Copy(io.Discard, out)
+		n += rest
+	}
+	if err := errors.Join(copyErr, cmd.Wait()); err != nil {
+		return "", 0, fmt.Errorf("git diff on %s: %w: %s", repo, err, strings.TrimSpace(stderr.String()))
+	}
+	if n > maxDiff {
+		return "", n, nil
+	}
+	return kept.String(), n, nil
 }

@@ -183,3 +183,39 @@ func TestReadSpecDisk(t *testing.T) {
 		}
 	})
 }
+
+// TestReadDocument reads a review and a report as a spec is read, with the
+// same limit, and says when the run wrote none.
+func TestReadDocument(t *testing.T) {
+	review := "Verdict: passes\n\nNo findings.\n"
+	both := makeTar(t, outDir, entry{"out/report.md", tar.TypeReg, "the report"}, entry{"out/review.md", tar.TypeReg, review})
+	for _, tc := range []struct {
+		what      string
+		documents []byte
+		kind      string
+		want      Document
+	}{
+		{"a review", both, "review", Document{Text: []byte(review)}},
+		{"a report", both, "report", Document{Text: []byte("the report")}},
+		{"no review", makeTar(t, outDir, entry{"out/spec.md", tar.TypeReg, review}), "review",
+			Document{Problem: "the run wrote no review (/kiln/out/review.md)", Missing: true}},
+		{"no report", makeTar(t, outDir), "report",
+			Document{Problem: "the run wrote no report (/kiln/out/report.md)", Missing: true}},
+		{"a review too long", makeTar(t, outDir, entry{"out/review.md", tar.TypeReg, strings.Repeat("x", maxSpec+1)}), "review",
+			Document{Problem: "the review is 262145 bytes, more than 262144"}},
+		{"an empty report", makeTar(t, outDir, entry{"out/report.md", tar.TypeReg, "\n"}), "report",
+			Document{Problem: "the report is empty"}},
+		{"a review that is a symlink", makeTar(t, outDir, entry{"out/review.md", tar.TypeSymlink, "/etc/passwd"}), "review",
+			Document{Problem: "/kiln/out/review.md is not a file"}},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			got, err := ReadDocument(writeRecord(t, tc.documents), "r", tc.kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got.Text) != string(tc.want.Text) || got.Problem != tc.want.Problem || got.Missing != tc.want.Missing {
+				t.Errorf("ReadDocument gave %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
