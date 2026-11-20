@@ -50,10 +50,10 @@ func testWeb(t *testing.T, f *fixture) {
 
 	// The test's networks and the fake hosts.
 	w.public, w.private = name("public"), name("private")
-	t.Cleanup(func() { dockerQuiet("network", "rm", w.public, w.private) })
+	t.Cleanup(func() { dockerQuiet("network", "rm", w.public) })
 	must(t, "network", "create", "--internal", "--ipv4=false", "--ipv6", "--subnet", "3ffe:"+f.id[:4]+"::/64",
 		"--opt", "com.docker.network.bridge.gateway_mode_ipv6=isolated", w.public)
-	must(t, "network", "create", "--ipv6", w.private)
+	testNetwork(t, w.private, "--ipv6")
 	w.publicHost = name("public-host")
 	privateName := name("private-host")
 	t.Cleanup(func() { dockerQuiet("rm", "--force", w.publicHost, privateName) })
@@ -94,6 +94,9 @@ func testWeb(t *testing.T, f *fixture) {
 			"if curl -fsS -L https://" + publicHost + "/redirect; then echo the redirect was followed; else echo the redirect was refused; fi\n",
 	})
 
+	// One after another, while the other cases of TestSteps run beside them:
+	// the first run's way out creates the outward network, which a second
+	// run's could not create at the same time.
 	t.Run("curl and WebFetch read a public page", func(t *testing.T) { w.testRead(t) })
 	t.Run("in the store", func(t *testing.T) { w.testInStore(t) })
 }
@@ -210,9 +213,9 @@ func (w *web) testRead(t *testing.T) {
 // their way out was stopped or removed. Nothing of a run is removed or created
 // again: its container, network and way out keep their IDs.
 func (w *web) testInStore(t *testing.T) {
-	// openGate opens a run's gate whenever it waits there, until the test
-	// ends, once its way out runs or 30 seconds have passed: a run that waits
-	// already must not go on before Carry has started its way out.
+	// openGate opens a run's gate once it waits there, once its way out runs
+	// or 30 seconds have passed: a run that waits already must not go on
+	// before Carry has started its way out.
 	openGate := func(t *testing.T, id string) {
 		ctx, cancel := context.WithCancel(t.Context())
 		t.Cleanup(cancel)
@@ -225,7 +228,9 @@ func (w *web) testInStore(t *testing.T) {
 			}
 			for ctx.Err() == nil {
 				if _, err := docker(ctx, "exec", "kiln-run-"+id, "test", "-e", "/tmp/waiting"); err == nil {
-					docker(ctx, "exec", "kiln-run-"+id, "touch", "/tmp/gate")
+					if _, err := docker(ctx, "exec", "kiln-run-"+id, "touch", "/tmp/gate"); err == nil {
+						return
+					}
 				}
 				time.Sleep(200 * time.Millisecond)
 			}
