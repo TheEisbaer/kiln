@@ -782,6 +782,37 @@ func TestTick(t *testing.T) {
 		}
 	})
 
+	// A card sent back to spec keeps its branch, while its spec run starts
+	// from the head of main: the spec run starts, ends with a spec, and
+	// leaves the branch as it was for the implement run that follows.
+	t.Run("sent back to spec with a branch", func(t *testing.T) {
+		t.Parallel()
+		c := f.newCase(t, f.standIn)
+		f.card(t, c, "Add a line to NOTES.md. kiln-case-tospec "+goesBackWord)
+		f.specAndApprove(t, c)
+		core, done := f.core(t, c, "")
+		f.waitState(t, c, reviewNeedsYou, 3)
+		f.stop(t, core, done)
+		branch := gitIn(t, c.repo, "rev-parse", "refs/heads/kiln/card-1")
+
+		s := f.open(t, c)
+		_, err := s.Decide(1, store.ToSpec, "")
+		s.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		core, done = f.core(t, c, "")
+		f.waitState(t, c, finished, 4)
+		f.stop(t, core, done)
+		f.assertRun(t, c, 4, model, "high", c.commit, store.Finished)
+		if !strings.HasPrefix(f.document(t, c, 4), "# Spec kiln-case-tospec") {
+			t.Errorf("the new spec is %q", f.document(t, c, 4))
+		}
+		if got := gitIn(t, c.repo, "rev-parse", "refs/heads/kiln/card-1"); got != branch {
+			t.Errorf("the branch is at %s, and was at %s", got, branch)
+		}
+	})
+
 	// The rule of card 8 in the later stages: a kill between a run's save and
 	// its record, and one between its review read and EndRun, leave the run
 	// in flight; a later core ends it where the table says, with one commit

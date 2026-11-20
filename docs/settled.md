@@ -35,6 +35,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - A spec run's working tree is not saved. No save container, nothing taken into the instance's copy, no branch; `result.json` says `"saved": "not saved"` (card 11).
 - An implement run's working tree is saved as one commit on `kiln/card-<id>`; a second implement run starts from the branch's tip. A review run starts from the tip as well, and its working tree is not saved (card 14, 2026-11-19).
 - The save of an implement run has as its message the pull request title that the approved spec names on its line `` Pull request title: `…` ``, with `Kiln-Run: <id>` as its body. A spec that names none, or one that cannot be used, keeps `chore: save run <id>`. A repeat that finds the branch at this run's save with the same tree and another message counts it as saved (2026-11-20).
+- Only a run that saves judges where the card's branch is, since only its save moves it. A spec run or a review run starts whatever the branch holds, so that a card sent back to spec, which keeps its branch, gets its spec run from the head of `main`, and the branch stays as it is for the implement run that follows (card 17, 2026-11-20).
 
 ## ADR 0015: Review blocks only on the spec, a concrete failure or a written standard
 
