@@ -8,27 +8,74 @@
 # machine only with --engine: a test built from a card's branch would otherwise
 # run there with the home directory in reach, on the engine that hosts other
 # work (ADR 0048).
+#
+# With --compile-only, on the Git host's runner, it compiles what the check
+# and the engine part compile, runs none of it, and so fills Go's build cache
+# in KILN_GO_CACHE. The workflow cache, on a push to main, saves that cache;
+# it runs no code of the repo but this script, the workflows and the
+# toolchain image's Dockerfile.
 set -eu
 
 engine=
+compile=
 case "${1-}" in
     --engine) engine=1 ;;
+    --compile-only) compile=1 ;;
     "") ;;
-    *) echo "usage: check/in-image [--engine]" >&2; exit 2 ;;
+    *) echo "usage: check/in-image [--engine | --compile-only]" >&2; exit 2 ;;
 esac
-[ "${GITHUB_ACTIONS-}" = true ] && engine=1
+
+# Go's build cache, on the Git host's runner only: there the directory comes
+# from a cache that only a push to main saves, and is thrown away with the
+# machine. On the developer's machine one card's check would write what the
+# next check's engine-test programs are compiled from, and those run on the
+# host (ADR 0048).
+gocache=
+if [ -n "${KILN_GO_CACHE-}" ]; then
+    if [ "${GITHUB_ACTIONS-}" = true ]; then
+        case "$KILN_GO_CACHE" in
+            /*) gocache=$KILN_GO_CACHE ;;
+            *) echo "check/in-image: KILN_GO_CACHE must be an absolute path" >&2; exit 2 ;;
+        esac
+    else
+        echo "check/in-image: KILN_GO_CACHE is used on the Git host's runner only, and ignored here" >&2
+    fi
+fi
+if [ -n "$compile" ] && [ -z "$gocache" ]; then
+    echo "check/in-image: --compile-only needs KILN_GO_CACHE, an absolute path, on the Git host's runner" >&2
+    exit 2
+fi
+[ -n "$gocache" ] && mkdir -p "$gocache"
+[ "${GITHUB_ACTIONS-}" = true ] && [ -z "$compile" ] && engine=1
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 image=kiln-toolchain
 
 # The context is exactly go.mod, go.sum and the Dockerfile: the image downloads
 # the modules of the first two, and nothing else of the repo is sent to the engine.
-tar -C "$root" -cf - go.mod go.sum images/toolchain/Dockerfile |
-    docker build --quiet --tag "$image" --file images/toolchain/Dockerfile - >/dev/null
+# The image carries the SHA-256 of these three files as the label kiln.context,
+# and an image of that name with the same label is taken as it is: on the
+# runner it is the one loaded from the cache. The names are relative, so the
+# digest does not depend on where the repo is.
+digest=$(cd "$root" && shasum -a 256 go.mod go.sum images/toolchain/Dockerfile | shasum -a 256 | cut -c1-64)
+# Without this guard an image with no label would match an empty digest.
+case "$digest" in
+    "" | *[!0-9a-f]*) digest= ;;
+esac
+if [ "${#digest}" -ne 64 ]; then
+    echo "check/in-image: cannot take the digest of the toolchain image's context" >&2
+    exit 2
+fi
+if [ "$(docker image inspect --format '{{ index .Config.Labels "kiln.context" }}' "$image" 2>/dev/null || true)" = "$digest" ]; then
+    echo "== toolchain image: built from this context before, not built again"
+else
+    tar -C "$root" -cf - go.mod go.sum images/toolchain/Dockerfile |
+        docker build --quiet --label "kiln.context=$digest" --tag "$image" --file images/toolchain/Dockerfile - >/dev/null
+fi
 
-# The engine tests run in the background beside the check: see engine below.
-status=0
-if [ -n "$engine" ]; then
+# engine_target sets goos and goarch, the machine the engine tests run on,
+# and packages, the packages with engine tests.
+engine_target() {
     # The test program is built for the machine it runs on, not for the image.
     case "$(uname -s)" in
         Darwin) goos=darwin ;;
@@ -41,11 +88,42 @@ if [ -n "$engine" ]; then
         *) echo "engine tests: unsupported machine $(uname -m)" >&2; exit 2 ;;
     esac
 
-    # The packages with engine tests.
     packages=
     for pkg in internal/seal internal/run internal/tick; do
         if [ -d "$root/$pkg" ]; then packages="$packages ./$pkg"; fi
     done
+}
+
+# --compile-only: one container compiles everything the check and the engine
+# part compile. A command that fails prints its output and the next one runs:
+# a broken main only means less in the cache. Test programs are built with
+# -c and never run, and the check is built, not run.
+if [ -n "$compile" ]; then
+    engine_target
+    docker run --rm --network none \
+        --volume "$root:/src:ro" --workdir /src \
+        ${gocache:+--volume "$gocache:/gocache" --env GOCACHE=/gocache} \
+        "$image" sh -c '
+            goos=$1 goarch=$2
+            shift 2
+            compile() {
+                echo "== compile: $*"
+                "$@" || echo "== compile: failed, going on"
+            }
+            mkdir /tmp/all /tmp/engine
+            compile go vet ./...
+            compile env GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./...
+            compile go test -c -o /tmp/all/ ./...
+            compile env GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go test -c -o /tmp/engine/ "$@"
+            compile go build -o /dev/null ./check
+            exit 0' sh "$goos" "$goarch" $packages
+    exit 0
+fi
+
+# The engine tests run in the background beside the check: see engine below.
+status=0
+if [ -n "$engine" ]; then
+    engine_target
 
     out=$(mktemp -d)
     # Output is printed by whoever holds $out/print: the check, then each
@@ -109,6 +187,7 @@ engine() {
     # compiled once.
     if ! started build docker run --rm --network none \
         --volume "$root:/src:ro" --workdir /src \
+        ${gocache:+--volume "$gocache:/gocache" --env GOCACHE=/gocache} \
         --env GOOS="$goos" --env GOARCH="$goarch" --env CGO_ENABLED=0 \
         "$image" sh -c 'mkdir /tmp/tests && go test -c -o /tmp/tests/ "$@" && tar -C /tmp/tests -cf - .' sh $packages \
         >"$out/tests.tar" 2>"$out/build.log" || ! tar -xf "$out/tests.tar" -C "$out" 2>>"$out/build.log"; then
@@ -176,6 +255,7 @@ trap 'stop 129' HUP
 # has ended.
 docker run --rm --network none \
     --volume "$root:/src:ro" --workdir /src \
+    ${gocache:+--volume "$gocache:/gocache" --env GOCACHE=/gocache} \
     "$image" go run ./check &
 check_pid=$!
 wait "$check_pid" || status=$?

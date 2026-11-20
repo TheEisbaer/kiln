@@ -1,0 +1,61 @@
+# Fills the caches that the check on pull requests restores. It is the only
+# job that can save (cache-mode: write), so it runs none of the repo's code
+# but this file, check/in-image and the toolchain image's Dockerfile, all
+# protected places: check/in-image --compile-only compiles the rest and runs
+# none of it. What is saved is therefore a function of main's sources.
+name: cache
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    cache-mode: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/toolchain.tar
+          key: toolchain-${{ hashFiles('go.mod', 'go.sum', 'images/toolchain/Dockerfile') }}
+      - if: steps.toolchain.outputs.cache-hit == 'true'
+        run: |
+          docker load --quiet --input "$RUNNER_TEMP/toolchain.tar" ||
+              echo "::warning::the cached toolchain image did not load; check/in-image builds it"
+          rm -f "$RUNNER_TEMP/toolchain.tar"
+      # The newest cache of an earlier merge, so that only what changed is
+      # compiled again.
+      - id: go-build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: go-build-${{ hashFiles('images/toolchain/Dockerfile') }}-${{ github.sha }}
+          restore-keys: go-build-${{ hashFiles('images/toolchain/Dockerfile') }}-
+      - run: check/in-image --compile-only
+        env:
+          KILN_GO_CACHE: ${{ runner.temp }}/go-build
+      # A re-run for the same commit hit both keys and saves nothing.
+      - if: steps.go-build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: ${{ steps.go-build.outputs.cache-primary-key }}
+      # The image is written to a part file and renamed only when whole, so
+      # that a failed docker save leaves nothing to save.
+      - if: steps.toolchain.outputs.cache-hit != 'true'
+        run: |
+          docker save --output "$RUNNER_TEMP/toolchain.tar.part" kiln-toolchain &&
+              mv "$RUNNER_TEMP/toolchain.tar.part" "$RUNNER_TEMP/toolchain.tar" ||
+              { rm -f "$RUNNER_TEMP/toolchain.tar.part"; echo "::warning::the toolchain image was not saved"; }
+      - if: steps.toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/toolchain.tar
+          key: ${{ steps.toolchain.outputs.cache-primary-key }}

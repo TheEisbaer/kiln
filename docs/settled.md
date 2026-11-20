@@ -114,6 +114,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - Where tests run that need the container engine, which the runner does not have (ADR 0048).
 - Kiln cannot act as an app on a personal repo on this Git host, so the fallback this decision names was taken: a public repo on github.com under the developer's personal account, with checks on the Git host's own runners (ADR 0049). GitHub as the first Git host, Kiln building no checker, and Kiln acting under its own identity all stand.
 - Of this decision's cost rules, two stand: Kiln's repo causes no billable usage, and there are no hosted background jobs. The rules about the developer's own runner and its caches ended with that runner (ADR 0049). What may be stored on the Git host, and how CPU time per check run is recorded there (ADR 0031), is settled by the card that needs it.
+- What may be stored on the Git host: Actions caches of Kiln's repo, within the default limit of 10 GB, which costs nothing. The limit is not raised, and over it the Git host evicts the entries accessed longest ago. Only the workflow `cache`, on a push to `main`, saves; it runs none of the repo's code but the protected script, workflows and Dockerfile, and compiles the rest without running it. The check on pull requests restores and has a read-only cache token (`cache-mode: read`) (2026-11-20).
 
 ## ADR 0030: Opus for spec and review, a model proposed per card for implement, Fable only as an advisor
 
@@ -221,6 +222,8 @@ A line says what was settled and, where it matters, when and by which card. The 
 
 - "The same everywhere" holds for what the check command can run inside the toolchain image. Tests that need the container engine run in the checks on the Git host only (ADR 0049); how they are started there is settled by the first card that has such a test.
 - The toolchain image carries the Go modules of `go.mod` and `go.sum`, downloaded when it is built, so that the check finds them with the network off (ADR 0057).
+- On the Git host's runner, `check/in-image` mounts Go's build cache, `KILN_GO_CACHE`, writable into the check's container and into the container that compiles the engine-test programs, still with the network off and the repo read-only. On the developer's machine the variable is ignored. `check/in-image --compile-only` compiles what the check compiles, runs none of it, and fills that cache (2026-11-20).
+- The toolchain image carries the label `kiln.context`, the SHA-256 of its context's three files, and an image of that name with the same label is not built again (2026-11-20).
 
 ## ADR 0047: One repo with one Go module, divided by Kiln's parts, with guardrail files in a few named places
 
@@ -242,6 +245,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 > Since ADR 0060 Kiln's app may change workflow files, and such a change is published only after the developer's yes. The lines below still hold.
 
 - The engine tests are started by `check/in-image`: always on the Git host's runner, and on the developer's machine only with `--engine`, so that a test built from a card's branch does not run there unasked (ADR 0048). They are compiled in the toolchain image with the network off and run on the machine that runs the check, since the image has no engine.
+- Besides the check on pull requests, a second workflow, `cache`, runs on every push to `main` and only fills the caches. It runs no check and no test (2026-11-20).
 
 ## ADR 0052: Until Kiln builds its own cards, its flow is run by hand
 
