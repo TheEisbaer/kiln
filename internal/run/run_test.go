@@ -37,6 +37,7 @@ func TestMain(m *testing.M) {
 	if inputs := os.Getenv(asKilnVar); inputs != "" {
 		os.Exit(asKiln(inputs, os.Getenv(afterVar)))
 	}
+	notifyStop()
 	os.Exit(m.Run())
 }
 
@@ -122,9 +123,11 @@ func TestSteps(t *testing.T) {
 	build(t, claudeImage, "internal/run/testdata/claude/Dockerfile")
 	build(t, f.runImage, "images/run/Dockerfile")
 
-	// The proxy creates its ordinary network; the upstream joins it.
+	// The proxy and the upstream on the ordinary network, which the test
+	// makes, so that ReplaceProxy finds it; TestRun of internal/seal has
+	// ReplaceProxy make one.
 	ordinary := name("ordinary")
-	t.Cleanup(func() { dockerQuiet("network", "rm", ordinary) })
+	testNetwork(t, ordinary)
 	f.upstream = name("upstream")
 	f.proxy = seal.Proxy{Name: name("proxy"), Image: f.proxyImage, Network: ordinary,
 		Upstream: "http://" + f.upstream + ":" + upstreamPort}
@@ -137,268 +140,305 @@ func TestSteps(t *testing.T) {
 
 	f.makeRepo(t)
 
-	t.Run("happy path", func(t *testing.T) {
-		c := f.newCase(t, "happy")
-		code, out, errOut := f.kiln(t, c, "", true)
-		if code != 0 {
-			t.Fatalf("exit status %d\n%s\n%s", code, out, errOut)
-		}
-		for _, want := range []string{
-			"model " + model + ", Claude Code 2.1.326",
-			"tool Bash: Run the script",
-			"text: Done.",
-			"result success, 2 turns, $",
-		} {
-			if !strings.Contains(out, want) {
-				t.Errorf("following printed no line with %q:\n%s", want, out)
+	// Every case has a run ID, a branch and an instruction of its own, and
+	// the cases run side by side. The one that replaces a proxy has one of its
+	// own.
+	t.Run("cases", func(t *testing.T) {
+		t.Run("happy path", func(t *testing.T) {
+			t.Parallel()
+			c := f.newCase(t, "happy")
+			code, out, errOut := f.kiln(t, c, "", true)
+			if code != 0 {
+				t.Fatalf("exit status %d\n%s\n%s", code, out, errOut)
 			}
-		}
-		f.assertDone(t, c)
-
-		// The run's escape sequences reach the record, and not the terminal.
-		if strings.ContainsAny(out+errOut, "\x1b\x07") {
-			t.Errorf("the command printed a control character:\n%q\n%q", out, errOut)
-		}
-		if !strings.Contains(out, "text: Done.\uFFFD[2K") || !strings.Contains(errOut, "run stderr \uFFFD]0;kiln-title\uFFFD") {
-			t.Errorf("the command printed\n%q\n%q", out, errOut)
-		}
-		dir := filepath.Join(f.runs, c.id)
-		if got := readAll(t, filepath.Join(dir, "output.jsonl")); !strings.Contains(got, `Done.\u001b[2K`) {
-			t.Error("output.jsonl does not hold the text's escape sequence")
-		}
-		if got := readAll(t, filepath.Join(dir, "stderr.txt")); !strings.Contains(got, "run stderr \x1b]0;kiln-title\x07") {
-			t.Errorf("stderr.txt does not hold the escape sequence: %q", got)
-		}
-
-		// Started again after it is done: a repeat, not a retry.
-		if code, out, errOut := f.kiln(t, c, "", false); code != 0 || !strings.Contains(out, "recorded already") {
-			t.Errorf("started again: exit status %d\n%s\n%s", code, out, errOut)
-		}
-		f.assertDone(t, c)
-
-		t.Run("another commit, model or instruction under the same ID", func(t *testing.T) {
-			record := readAll(t, filepath.Join(f.runs, c.id, "result.json"))
-			other := filepath.Join(f.dir, "other-instruction.md")
-			writeIn(t, f.dir, "other-instruction.md", "Something else. kiln-case-happy\n", 0o644)
-			for what, edit := range map[string]func(*Inputs){
-				"commit":      func(in *Inputs) { in.Commit = f.other },
-				"model":       func(in *Inputs) { in.Model = "claude-sonnet-5-5" },
-				"instruction": func(in *Inputs) { in.Instruction = other },
+			for _, want := range []string{
+				"model " + model + ", Claude Code 2.1.326",
+				"tool Bash: Run the script",
+				"text: Done.",
+				"result success, 2 turns, $",
 			} {
-				d := c
-				edit(&d.in)
-				if code, _, errOut := f.kiln(t, d, "", false); code == 0 || !strings.Contains(errOut, "recorded with the "+what) {
-					t.Errorf("with another %s: exit status %d\n%s", what, code, errOut)
+				if !strings.Contains(out, want) {
+					t.Errorf("following printed no line with %q:\n%s", want, out)
 				}
 			}
-			if got := readAll(t, filepath.Join(f.runs, c.id, "result.json")); got != record {
-				t.Errorf("the record changed:\n%s", got)
+			f.assertDone(t, c)
+
+			// The run's escape sequences reach the record, and not the terminal.
+			if strings.ContainsAny(out+errOut, "\x1b\x07") {
+				t.Errorf("the command printed a control character:\n%q\n%q", out, errOut)
+			}
+			if !strings.Contains(out, "text: Done.\uFFFD[2K") || !strings.Contains(errOut, "run stderr \uFFFD]0;kiln-title\uFFFD") {
+				t.Errorf("the command printed\n%q\n%q", out, errOut)
+			}
+			dir := filepath.Join(f.runs, c.id)
+			if got := readAll(t, filepath.Join(dir, "output.jsonl")); !strings.Contains(got, `Done.\u001b[2K`) {
+				t.Error("output.jsonl does not hold the text's escape sequence")
+			}
+			if got := readAll(t, filepath.Join(dir, "stderr.txt")); !strings.Contains(got, "run stderr \x1b]0;kiln-title\x07") {
+				t.Errorf("stderr.txt does not hold the escape sequence: %q", got)
+			}
+			// run.sh ran to its end, with the run image's toolchain.
+			if got := toolResultsIn(t, filepath.Join(dir, "output.jsonl"))["toolu_kiln_1"]; !strings.Contains(got, "go version go1.") ||
+				!strings.Contains(got, "checked") {
+				t.Errorf("the Bash result is %q, want go's version and checked", got)
+			}
+
+			// Started again after it is done: a repeat, not a retry.
+			if code, out, errOut := f.kiln(t, c, "", false); code != 0 || !strings.Contains(out, "recorded already") {
+				t.Errorf("started again: exit status %d\n%s\n%s", code, out, errOut)
 			}
 			f.assertDone(t, c)
-		})
-	})
 
-	t.Run("killed, then started again", func(t *testing.T) {
-		for _, step := range steps {
-			t.Run("after "+step, func(t *testing.T) {
-				c := f.newCase(t, "kill-"+step)
-				if step == "follow" {
-					// While the run waits at its gate, with the proxy replaced
-					// before it is started again: the new proxy is on no earlier
-					// run's network until it is attached.
-					cmd, done := f.start(t, c, "", false)
-					f.waitAtGate(t, c)
-					cmd.Process.Kill()
-					<-done
-					if err := seal.ReplaceProxy(t.Context(), f.proxy, "echo "+f.credential); err != nil {
-						t.Fatal(err)
+			t.Run("another commit, model or instruction under the same ID", func(t *testing.T) {
+				record := readAll(t, filepath.Join(f.runs, c.id, "result.json"))
+				other := filepath.Join(f.dir, "other-instruction.md")
+				writeIn(t, f.dir, "other-instruction.md", "Something else. kiln-case-happy\n", 0o644)
+				for what, edit := range map[string]func(*Inputs){
+					"commit":      func(in *Inputs) { in.Commit = f.other },
+					"model":       func(in *Inputs) { in.Model = "claude-sonnet-5-5" },
+					"instruction": func(in *Inputs) { in.Instruction = other },
+				} {
+					d := c
+					edit(&d.in)
+					if code, _, errOut := f.kiln(t, d, "", false); code == 0 || !strings.Contains(errOut, "recorded with the "+what) {
+						t.Errorf("with another %s: exit status %d\n%s", what, code, errOut)
 					}
-				} else if code, out, errOut := f.kiln(t, c, step+":exit", true); code != exitAfterStep {
-					t.Fatalf("exit status %d, want %d\n%s\n%s", code, exitAfterStep, out, errOut)
 				}
-				if code, out, errOut := f.kiln(t, c, "", true); code != 0 {
-					t.Fatalf("started again: exit status %d\n%s\n%s", code, out, errOut)
+				if got := readAll(t, filepath.Join(f.runs, c.id, "result.json")); got != record {
+					t.Errorf("the record changed:\n%s", got)
 				}
 				f.assertDone(t, c)
 			})
-		}
-	})
-
-	t.Run("failed, then started again", func(t *testing.T) {
-		for i, step := range steps {
-			t.Run("after "+step, func(t *testing.T) {
-				c := f.newCase(t, "fail-"+step)
-				code, out, errOut := f.kiln(t, c, step+":fail", true)
-				if code == 0 || !strings.Contains(errOut, "failed by the test") {
-					t.Fatalf("exit status %d, and no failure reported\n%s\n%s", code, out, errOut)
-				}
-				// Before the start, nothing is left; from the start to the record,
-				// the container and network stay; after the removal, nothing is.
-				kept := i >= 2 && i <= 6
-				assertLeft(t, c.id, kept, kept)
-				if code, out, errOut := f.kiln(t, c, "", true); code != 0 {
-					t.Fatalf("started again: exit status %d\n%s\n%s", code, out, errOut)
-				}
-				f.assertDone(t, c)
-			})
-		}
-	})
-
-	t.Run("Ctrl-C ends the following only", func(t *testing.T) {
-		c := f.newCase(t, "interrupt")
-		cmd, done := f.start(t, c, "", false)
-		f.waitAtGate(t, c)
-		cmd.Process.Signal(os.Interrupt)
-		code := <-done
-		if code != exitInterrupted || !strings.Contains(cmd.Stdout.(*bytes.Buffer).String(), "the run goes on") {
-			t.Errorf("exit status %d, want %d, and the note that the run goes on\n%s", code, exitInterrupted, cmd.Stdout)
-		}
-		if got := must(t, "inspect", "--format", "{{.State.Status}}", "kiln-run-"+c.id); got != "running" {
-			t.Errorf("the run is %s, want running", got)
-		}
-		if code, out, errOut := f.kiln(t, c, "", true); code != 0 {
-			t.Fatalf("started again: exit status %d\n%s\n%s", code, out, errOut)
-		}
-		f.assertDone(t, c)
-	})
-
-	t.Run("with no proxy", func(t *testing.T) {
-		c := f.newCase(t, "no-proxy")
-		c.in.Proxy = name("no-such-proxy")
-		if code, _, errOut := f.kiln(t, c, "", false); code == 0 {
-			t.Errorf("exit status 0\n%s", errOut)
-		}
-		assertLeft(t, c.id, false, false)
-	})
-
-	t.Run("with no run image", func(t *testing.T) {
-		c := f.newCase(t, "no-image")
-		c.in.Image = name("no-such-image")
-		code, _, errOut := f.kiln(t, c, "", false)
-		if code == 0 || !strings.Contains(errOut, "No such image") {
-			t.Errorf("want the image missing locally: exit status %d\n%s", code, errOut)
-		}
-		assertLeft(t, c.id, false, false)
-		if _, err := docker(t.Context(), "image", "inspect", c.in.Image); err == nil {
-			dockerQuiet("rmi", c.in.Image)
-			t.Error("the image was pulled")
-		}
-	})
-
-	t.Run("a branch at another commit", func(t *testing.T) {
-		c := f.newCase(t, "other-branch")
-		gitIn(t, f.repo, "update-ref", "refs/heads/"+c.in.Branch, f.other)
-		if code, _, errOut := f.kiln(t, c, "", false); code == 0 || !strings.Contains(errOut, "neither absent nor at the commit") {
-			t.Errorf("exit status %d\n%s", code, errOut)
-		}
-		assertLeft(t, c.id, false, false)
-		f.assertNoRecord(t, c)
-		if at := gitIn(t, f.repo, "rev-parse", "refs/heads/"+c.in.Branch); at != f.other {
-			t.Errorf("the branch is at %s, was %s", at, f.other)
-		}
-	})
-
-	t.Run("a branch moved while the run waits", func(t *testing.T) {
-		c := f.newCase(t, "moved")
-		cmd, done := f.start(t, c, "", false)
-		f.waitAtGate(t, c)
-		ref := "refs/heads/" + c.in.Branch
-		gitIn(t, f.repo, "update-ref", ref, f.other, "")
-		must(t, "exec", "kiln-run-"+c.id, "touch", "/tmp/gate")
-		if code := <-done; code == 0 || !strings.Contains(cmd.Stderr.(*bytes.Buffer).String(), "has moved") {
-			t.Fatalf("exit status %d\n%s", code, cmd.Stderr)
-		}
-		assertLeft(t, c.id, true, true)
-		if got := must(t, "inspect", "--format", "{{.State.Status}}", "kiln-run-"+c.id); got != "exited" {
-			t.Errorf("the run's container is %s, want exited", got)
-		}
-		assertNoSave(t, c.id)
-		if at := gitIn(t, f.repo, "rev-parse", ref); at != f.other {
-			t.Errorf("the branch is at %s, was moved to %s", at, f.other)
-		}
-
-		// The container's labels name the inputs: another model is refused.
-		d := c
-		d.in.Model = "claude-sonnet-5-5"
-		gitIn(t, f.repo, "update-ref", "-d", ref)
-		if code, _, errOut := f.kiln(t, d, "", false); code == 0 || !strings.Contains(errOut, "other inputs") {
-			t.Errorf("with another model: exit status %d\n%s", code, errOut)
-		}
-		assertLeft(t, c.id, true, true)
-
-		if code, out, errOut := f.kiln(t, c, "", true); code != 0 {
-			t.Fatalf("after the reset: exit status %d\n%s\n%s", code, out, errOut)
-		}
-		f.assertDone(t, c)
-	})
-
-	t.Run("what Kiln did not make", func(t *testing.T) {
-		t.Run("a container without kiln.run", func(t *testing.T) {
-			c := f.newCase(t, "foreign-run")
-			must(t, "create", "--name", "kiln-run-"+c.id, "--network", "none", f.proxyImage)
-			before := must(t, "inspect", "--format", "{{.Id}} {{.State.Status}}", "kiln-run-"+c.id)
-			if code, _, errOut := f.kiln(t, c, "", false); code == 0 || !strings.Contains(errOut, "no label kiln.run") {
-				t.Errorf("exit status %d\n%s", code, errOut)
-			}
-			if got := must(t, "inspect", "--format", "{{.Id}} {{.State.Status}}", "kiln-run-"+c.id); got != before {
-				t.Errorf("the container was touched: %s, was %s", got, before)
-			}
-			assertLeft(t, c.id, true, false)
-			f.assertNoRecord(t, c)
 		})
 
-		t.Run("a network without kiln.run", func(t *testing.T) {
-			c := f.newCase(t, "foreign-net")
-			must(t, "network", "create", "--internal", "kiln-run-"+c.id)
-			before := must(t, "network", "inspect", "--format", "{{.Id}}", "kiln-run-"+c.id)
-			if code, _, errOut := f.kiln(t, c, "", false); code == 0 || !strings.Contains(errOut, "no label kiln.run") {
-				t.Errorf("exit status %d\n%s", code, errOut)
+		t.Run("killed, then started again", func(t *testing.T) {
+			t.Parallel()
+			for _, step := range steps {
+				t.Run("after "+step, func(t *testing.T) {
+					t.Parallel()
+					c := f.newCase(t, "kill-"+step)
+					if step == "follow" {
+						// While the run waits at its gate, with the proxy replaced
+						// before it is started again: the new proxy is on no earlier
+						// run's network until it is attached. The proxy is the
+						// case's own, so that the other cases' runs keep theirs.
+						proxy := f.proxy
+						proxy.Name = name("proxy-" + c.name)
+						t.Cleanup(func() { dockerQuiet("rm", "--force", proxy.Name) })
+						if err := seal.ReplaceProxy(t.Context(), proxy, "echo "+f.credential); err != nil {
+							t.Fatal(err)
+						}
+						c.in.Proxy = proxy.Name
+						cmd, done := f.start(t, c, "", false)
+						f.waitAtGate(t, c)
+						cmd.Process.Kill()
+						<-done
+						if err := seal.ReplaceProxy(t.Context(), proxy, "echo "+f.credential); err != nil {
+							t.Fatal(err)
+						}
+					} else if code, out, errOut := f.kiln(t, c, step+":exit", true); code != exitAfterStep {
+						t.Fatalf("exit status %d, want %d\n%s\n%s", code, exitAfterStep, out, errOut)
+					}
+					if code, out, errOut := f.kiln(t, c, "", true); code != 0 {
+						t.Fatalf("started again: exit status %d\n%s\n%s", code, out, errOut)
+					}
+					f.assertDone(t, c)
+				})
 			}
-			if got := must(t, "network", "inspect", "--format", "{{.Id}}", "kiln-run-"+c.id); got != before {
-				t.Errorf("the network was touched: %s, was %s", got, before)
-			}
-			assertLeft(t, c.id, false, true)
-			f.assertNoRecord(t, c)
 		})
 
-		t.Run("a save container without kiln.run", func(t *testing.T) {
-			c := f.newCase(t, "foreign-save")
-			save := "kiln-save-" + c.id
-			must(t, "create", "--name", save, "--network", "none", f.proxyImage)
-			before := must(t, "inspect", "--format", "{{.Id}} {{.State.Status}}", save)
-			if code, _, errOut := f.kiln(t, c, "", true); code == 0 || !strings.Contains(errOut, "no label kiln.run") {
-				t.Errorf("exit status %d\n%s", code, errOut)
+		t.Run("failed, then started again", func(t *testing.T) {
+			t.Parallel()
+			for i, step := range steps {
+				t.Run("after "+step, func(t *testing.T) {
+					t.Parallel()
+					c := f.newCase(t, "fail-"+step)
+					code, out, errOut := f.kiln(t, c, step+":fail", true)
+					if code == 0 || !strings.Contains(errOut, "failed by the test") {
+						t.Fatalf("exit status %d, and no failure reported\n%s\n%s", code, out, errOut)
+					}
+					// Before the start, nothing is left; from the start to the record,
+					// the container and network stay; after the removal, nothing is.
+					kept := i >= 2 && i <= 6
+					assertLeft(t, c.id, kept, kept)
+					if code, out, errOut := f.kiln(t, c, "", true); code != 0 {
+						t.Fatalf("started again: exit status %d\n%s\n%s", code, out, errOut)
+					}
+					f.assertDone(t, c)
+				})
 			}
-			if got := must(t, "inspect", "--format", "{{.Id}} {{.State.Status}}", save); got != before {
-				t.Errorf("the save container was touched: %s, was %s", got, before)
+		})
+
+		t.Run("Ctrl-C ends the following only", func(t *testing.T) {
+			t.Parallel()
+			c := f.newCase(t, "interrupt")
+			cmd, done := f.start(t, c, "", false)
+			f.waitAtGate(t, c)
+			cmd.Process.Signal(os.Interrupt)
+			code := <-done
+			if code != exitInterrupted || !strings.Contains(cmd.Stdout.(*bytes.Buffer).String(), "the run goes on") {
+				t.Errorf("exit status %d, want %d, and the note that the run goes on\n%s", code, exitInterrupted, cmd.Stdout)
 			}
-			// Refused at the save, so the run and its .partial are kept.
-			assertLeft(t, c.id, true, true)
-			if _, err := os.Stat(filepath.Join(f.runs, c.id)); err == nil {
-				t.Errorf("there is a record of %s", c.id)
+			if got := must(t, "inspect", "--format", "{{.State.Status}}", "kiln-run-"+c.id); got != "running" {
+				t.Errorf("the run is %s, want running", got)
 			}
-			must(t, "rm", save)
 			if code, out, errOut := f.kiln(t, c, "", true); code != 0 {
-				t.Fatalf("without it: exit status %d\n%s\n%s", code, out, errOut)
+				t.Fatalf("started again: exit status %d\n%s\n%s", code, out, errOut)
 			}
 			f.assertDone(t, c)
 		})
 
-		t.Run("a record without a readable result.json", func(t *testing.T) {
-			c := f.newCase(t, "foreign-record")
-			writeIn(t, filepath.Join(f.runs, c.id), "result.json", "not json", 0o644)
-			if code, _, errOut := f.kiln(t, c, "", false); code == 0 || !strings.Contains(errOut, "no readable result.json") {
-				t.Errorf("exit status %d\n%s", code, errOut)
-			}
-			if got := readAll(t, filepath.Join(f.runs, c.id, "result.json")); got != "not json" {
-				t.Errorf("the record was touched: %q", got)
+		t.Run("with no proxy", func(t *testing.T) {
+			t.Parallel()
+			c := f.newCase(t, "no-proxy")
+			c.in.Proxy = name("no-such-proxy")
+			if code, _, errOut := f.kiln(t, c, "", false); code == 0 {
+				t.Errorf("exit status 0\n%s", errOut)
 			}
 			assertLeft(t, c.id, false, false)
 		})
+
+		t.Run("with no run image", func(t *testing.T) {
+			t.Parallel()
+			c := f.newCase(t, "no-image")
+			c.in.Image = name("no-such-image")
+			code, _, errOut := f.kiln(t, c, "", false)
+			if code == 0 || !strings.Contains(errOut, "No such image") {
+				t.Errorf("want the image missing locally: exit status %d\n%s", code, errOut)
+			}
+			assertLeft(t, c.id, false, false)
+			if _, err := docker(t.Context(), "image", "inspect", c.in.Image); err == nil {
+				dockerQuiet("rmi", c.in.Image)
+				t.Error("the image was pulled")
+			}
+		})
+
+		t.Run("a branch at another commit", func(t *testing.T) {
+			t.Parallel()
+			c := f.newCase(t, "other-branch")
+			gitIn(t, f.repo, "update-ref", "refs/heads/"+c.in.Branch, f.other)
+			if code, _, errOut := f.kiln(t, c, "", false); code == 0 || !strings.Contains(errOut, "neither absent nor at the commit") {
+				t.Errorf("exit status %d\n%s", code, errOut)
+			}
+			assertLeft(t, c.id, false, false)
+			f.assertNoRecord(t, c)
+			if at := gitIn(t, f.repo, "rev-parse", "refs/heads/"+c.in.Branch); at != f.other {
+				t.Errorf("the branch is at %s, was %s", at, f.other)
+			}
+		})
+
+		t.Run("a branch moved while the run waits", func(t *testing.T) {
+			t.Parallel()
+			c := f.newCase(t, "moved")
+			cmd, done := f.start(t, c, "", false)
+			f.waitAtGate(t, c)
+			ref := "refs/heads/" + c.in.Branch
+			gitIn(t, f.repo, "update-ref", ref, f.other, "")
+			must(t, "exec", "kiln-run-"+c.id, "touch", "/tmp/gate")
+			if code := <-done; code == 0 || !strings.Contains(cmd.Stderr.(*bytes.Buffer).String(), "has moved") {
+				t.Fatalf("exit status %d\n%s", code, cmd.Stderr)
+			}
+			assertLeft(t, c.id, true, true)
+			if got := must(t, "inspect", "--format", "{{.State.Status}}", "kiln-run-"+c.id); got != "exited" {
+				t.Errorf("the run's container is %s, want exited", got)
+			}
+			assertNoSave(t, c.id)
+			if at := gitIn(t, f.repo, "rev-parse", ref); at != f.other {
+				t.Errorf("the branch is at %s, was moved to %s", at, f.other)
+			}
+
+			// The container's labels name the inputs: another model is refused.
+			d := c
+			d.in.Model = "claude-sonnet-5-5"
+			gitIn(t, f.repo, "update-ref", "-d", ref)
+			if code, _, errOut := f.kiln(t, d, "", false); code == 0 || !strings.Contains(errOut, "other inputs") {
+				t.Errorf("with another model: exit status %d\n%s", code, errOut)
+			}
+			assertLeft(t, c.id, true, true)
+
+			if code, out, errOut := f.kiln(t, c, "", true); code != 0 {
+				t.Fatalf("after the reset: exit status %d\n%s\n%s", code, out, errOut)
+			}
+			f.assertDone(t, c)
+		})
+
+		t.Run("what Kiln did not make", func(t *testing.T) {
+			t.Parallel()
+			t.Run("a container without kiln.run", func(t *testing.T) {
+				t.Parallel()
+				c := f.newCase(t, "foreign-run")
+				must(t, "create", "--name", "kiln-run-"+c.id, "--network", "none", f.proxyImage)
+				before := must(t, "inspect", "--format", "{{.Id}} {{.State.Status}}", "kiln-run-"+c.id)
+				if code, _, errOut := f.kiln(t, c, "", false); code == 0 || !strings.Contains(errOut, "no label kiln.run") {
+					t.Errorf("exit status %d\n%s", code, errOut)
+				}
+				if got := must(t, "inspect", "--format", "{{.Id}} {{.State.Status}}", "kiln-run-"+c.id); got != before {
+					t.Errorf("the container was touched: %s, was %s", got, before)
+				}
+				assertLeft(t, c.id, true, false)
+				f.assertNoRecord(t, c)
+			})
+
+			t.Run("a network without kiln.run", func(t *testing.T) {
+				t.Parallel()
+				c := f.newCase(t, "foreign-net")
+				testNetwork(t, "kiln-run-"+c.id, "--internal")
+				before := must(t, "network", "inspect", "--format", "{{.Id}}", "kiln-run-"+c.id)
+				if code, _, errOut := f.kiln(t, c, "", false); code == 0 || !strings.Contains(errOut, "no label kiln.run") {
+					t.Errorf("exit status %d\n%s", code, errOut)
+				}
+				if got := must(t, "network", "inspect", "--format", "{{.Id}}", "kiln-run-"+c.id); got != before {
+					t.Errorf("the network was touched: %s, was %s", got, before)
+				}
+				assertLeft(t, c.id, false, true)
+				f.assertNoRecord(t, c)
+			})
+
+			t.Run("a save container without kiln.run", func(t *testing.T) {
+				t.Parallel()
+				c := f.newCase(t, "foreign-save")
+				save := "kiln-save-" + c.id
+				must(t, "create", "--name", save, "--network", "none", f.proxyImage)
+				before := must(t, "inspect", "--format", "{{.Id}} {{.State.Status}}", save)
+				if code, _, errOut := f.kiln(t, c, "", true); code == 0 || !strings.Contains(errOut, "no label kiln.run") {
+					t.Errorf("exit status %d\n%s", code, errOut)
+				}
+				if got := must(t, "inspect", "--format", "{{.Id}} {{.State.Status}}", save); got != before {
+					t.Errorf("the save container was touched: %s, was %s", got, before)
+				}
+				// Refused at the save, so the run and its .partial are kept.
+				assertLeft(t, c.id, true, true)
+				if _, err := os.Stat(filepath.Join(f.runs, c.id)); err == nil {
+					t.Errorf("there is a record of %s", c.id)
+				}
+				must(t, "rm", save)
+				if code, out, errOut := f.kiln(t, c, "", true); code != 0 {
+					t.Fatalf("without it: exit status %d\n%s\n%s", code, out, errOut)
+				}
+				f.assertDone(t, c)
+			})
+
+			t.Run("a record without a readable result.json", func(t *testing.T) {
+				t.Parallel()
+				c := f.newCase(t, "foreign-record")
+				writeIn(t, filepath.Join(f.runs, c.id), "result.json", "not json", 0o644)
+				if code, _, errOut := f.kiln(t, c, "", false); code == 0 || !strings.Contains(errOut, "no readable result.json") {
+					t.Errorf("exit status %d\n%s", code, errOut)
+				}
+				if got := readAll(t, filepath.Join(f.runs, c.id, "result.json")); got != "not json" {
+					t.Errorf("the record was touched: %q", got)
+				}
+				assertLeft(t, c.id, false, false)
+			})
+		})
+
+		t.Run("a run with a list", func(t *testing.T) {
+			t.Parallel()
+			testWeb(t, f)
+		})
 	})
 
-	t.Run("a run with a list", func(t *testing.T) { testWeb(t, f) })
-
+	// After every case, whose runs attached the proxy to their networks.
 	t.Run("the proxy is on no run network", func(t *testing.T) {
 		got := must(t, "inspect", "--format", "{{json .NetworkSettings.Networks}}", f.proxy.Name)
 		var networks map[string]json.RawMessage
@@ -432,7 +472,9 @@ func (f *fixture) makeRepo(t *testing.T) {
 			"printf 'run stderr \\033]0;kiln-title\\007\\n' > /proc/1/fd/2\n" +
 			"touch /tmp/waiting\n" +
 			"while [ ! -e /tmp/gate ]; do sleep 0.1; done\n" +
-			"go vet ./...\n" +
+			// The run image's toolchain, which the happy path asserts. Not go
+			// vet, whose cold cache costs five seconds of CPU in every run.
+			"go version\n" +
 			"echo checked\n",
 	})
 	tree := gitIn(t, f.repo, "rev-parse", f.commit+"^{tree}")
@@ -450,6 +492,7 @@ type testCase struct {
 // engine afterwards.
 func (f *fixture) newCase(t *testing.T, name string) testCase {
 	t.Helper()
+	failIfStopped(t)
 	id := "steptest-" + f.id + "-" + name
 	if len(id) > 40 {
 		t.Fatalf("the run ID %s is too long", id)
@@ -469,7 +512,7 @@ func (f *fixture) newCase(t *testing.T, name string) testCase {
 
 // start starts the test binary as `kiln run` for a case, with afterStep set by
 // after, and returns the command and a channel that gets its exit status. With
-// gate, it opens the run's gate whenever the run waits at it.
+// gate, it opens the run's gate once the run waits at it.
 func (f *fixture) start(t *testing.T, c testCase, after string, gate bool) (*exec.Cmd, <-chan int) {
 	t.Helper()
 	inputs, err := json.Marshal(c.in)
@@ -493,8 +536,11 @@ func (f *fixture) start(t *testing.T, c testCase, after string, gate bool) (*exe
 					return
 				case <-time.After(200 * time.Millisecond):
 				}
+				// The run waits at its gate once; an open gate stays open.
 				if _, err := docker(ctx, "exec", "kiln-run-"+c.id, "test", "-e", "/tmp/waiting"); err == nil {
-					docker(ctx, "exec", "kiln-run-"+c.id, "touch", "/tmp/gate")
+					if _, err := docker(ctx, "exec", "kiln-run-"+c.id, "touch", "/tmp/gate"); err == nil {
+						return
+					}
 				}
 			}
 		}()
@@ -731,7 +777,7 @@ func (f *fixture) explain(t *testing.T, c testCase, lines []string) {
 		fmt.Fprintf(&b, "stderr.txt: %q\n", stderr)
 	}
 	// The proxy logs to its standard error.
-	if proxy, err := exec.Command("docker", "logs", "--tail", "50", f.proxy.Name).CombinedOutput(); err != nil {
+	if proxy, err := exec.Command("docker", "logs", "--tail", "50", c.in.Proxy).CombinedOutput(); err != nil {
 		fmt.Fprintf(&b, "the proxy's log: %v\n", err)
 	} else {
 		fmt.Fprintf(&b, "the proxy's log, its last 50 lines:\n%s\n", proxy)
@@ -829,6 +875,30 @@ func readAll(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// testNetwork creates a network of the test's own, which it removes
+// afterwards, with an IPv4 subnet out of 10.231.0.0/16 chosen at random,
+// tried again when another network has it. The engine's own pools have about
+// thirty subnets for every network on it, and every run takes one of them
+// (see check/in-image); the test's networks take none.
+func testNetwork(t *testing.T, name string, args ...string) {
+	t.Helper()
+	t.Cleanup(func() { dockerQuiet("network", "rm", name) })
+	for try := 0; ; try++ {
+		b := make([]byte, 1)
+		if _, err := rand.Read(b); err != nil {
+			t.Fatal(err)
+		}
+		subnet := fmt.Sprintf("10.231.%d.0/24", b[0])
+		_, err := docker(t.Context(), append(append([]string{"network", "create", "--subnet", subnet}, args...), name)...)
+		if err == nil {
+			return
+		}
+		if !strings.Contains(err.Error(), "overlaps") || try == 20 {
+			t.Fatal(err)
+		}
+	}
 }
 
 func randomID(t *testing.T) string {

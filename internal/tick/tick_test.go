@@ -52,6 +52,7 @@ func TestMain(m *testing.M) {
 	if spec := os.Getenv(asKilnVar); spec != "" {
 		os.Exit(asKiln(spec))
 	}
+	notifyStop()
 	os.Exit(m.Run())
 }
 

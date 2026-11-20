@@ -26,54 +26,176 @@ image=kiln-toolchain
 tar -C "$root" -cf - go.mod go.sum images/toolchain/Dockerfile |
     docker build --quiet --tag "$image" --file images/toolchain/Dockerfile - >/dev/null
 
+# The engine tests run in the background beside the check: see engine below.
 status=0
+if [ -n "$engine" ]; then
+    # The test program is built for the machine it runs on, not for the image.
+    case "$(uname -s)" in
+        Darwin) goos=darwin ;;
+        Linux) goos=linux ;;
+        *) echo "engine tests: unsupported system $(uname -s)" >&2; exit 2 ;;
+    esac
+    case "$(uname -m)" in
+        arm64 | aarch64) goarch=arm64 ;;
+        x86_64) goarch=amd64 ;;
+        *) echo "engine tests: unsupported machine $(uname -m)" >&2; exit 2 ;;
+    esac
+
+    # The packages with engine tests.
+    packages=
+    for pkg in internal/seal internal/run internal/tick; do
+        if [ -d "$root/$pkg" ]; then packages="$packages ./$pkg"; fi
+    done
+
+    out=$(mktemp -d)
+    # Output is printed by whoever holds $out/print: the check, then each
+    # package as it ends, so that nothing mixes.
+    mkdir "$out/print"
+fi
+
+# One check on this machine at a time runs its engine tests. Every run takes a
+# network of its own, and the engine has about thirty IPv4 subnets for all of
+# them, the developer's instance's runs included: two checks side by side,
+# each with three packages side by side, would run out of them. The lock is
+# flock(2) on $engine_lock, taken in one step by perl on file descriptor 9,
+# which the engine part opens and the test programs inherit: the system lets
+# go of it once the last of them has ended, however they end.
+engine_lock=${KILN_ENGINE_LOCK:-/tmp/kiln-engine-tests.flock}
+take_engine_lock() {
+    flock='use Fcntl ":flock"; open(my $f, ">&=", 9) or die "$!\n"; flock($f, LOCK_EX | ($ARGV[0] ? LOCK_NB : 0)) or exit 1'
+    if ! perl -e "$flock" 1; then
+        take
+        echo "== engine tests wait for those of another check"
+        give
+        perl -e "$flock" 0
+    fi
+}
+
+# take and give hand the output on (see out above). Once the script itself is
+# gone, as after kill -9, nobody holds it, and the packages print as they end.
+take() {
+    until mkdir "$out/print" 2>/dev/null; do
+        [ -d "$out" ] && kill -0 $$ 2>/dev/null || return 0
+        sleep 0.1
+    done
+}
+give() { rmdir "$out/print" 2>/dev/null || true; }
+
+# started runs a command in the background, writes its process ID to
+# $out/<name>.pid, where stop finds it, and waits for it.
+started() {
+    name=$1
+    shift
+    "$@" &
+    echo $! >"$out/$name.pid"
+    # Told to stop while it started.
+    [ -e "$out/stop" ] && kill -TERM $! 2>/dev/null
+    wait $!
+}
+
+# engine builds the test programs and runs the packages side by side, beside
+# the check, each with its output kept apart and printed whole, under its
+# heading, when the package ends and the check's output is out. Inside a
+# package only a few tests run at a time (-test.parallel): three in
+# internal/seal, whose cases depend on each other most, and six in the
+# others. That keeps the networks of one check to about twenty. A test
+# program ends after ten minutes at the latest (-test.timeout).
+engine() {
+    # A hang-up of the terminal must not end this part before its tests.
+    trap '' HUP
+    # The programs come out on standard output, as a tar: a directory of the
+    # host's, such as the one mktemp makes on macOS, is not always visible to
+    # the engine. One container builds them all, so the standard library is
+    # compiled once.
+    if ! started build docker run --rm --network none \
+        --volume "$root:/src:ro" --workdir /src \
+        --env GOOS="$goos" --env GOARCH="$goarch" --env CGO_ENABLED=0 \
+        "$image" sh -c 'mkdir /tmp/tests && go test -c -o /tmp/tests/ "$@" && tar -C /tmp/tests -cf - .' sh $packages \
+        >"$out/tests.tar" 2>"$out/build.log" || ! tar -xf "$out/tests.tar" -C "$out" 2>>"$out/build.log"; then
+        take
+        echo "== engine tests: building them failed"
+        cat "$out/build.log"
+        give
+        echo 1 >"$out/build.status"
+        return
+    fi
+    exec 9>>"$engine_lock"
+    take_engine_lock
+    for pkg in $packages; do
+        [ -e "$out/stop" ] && break
+        name=$(basename "$pkg")
+        parallel=6
+        [ "$name" = seal ] && parallel=3
+        (
+            # From the package's directory, as go test would.
+            code=0
+            started "$name" sh -c 'cd "$1" && shift && exec "$@"' sh "$root/$pkg" \
+                env KILN_ENGINE_TESTS=1 "$out/$name.test" -test.v -test.parallel=$parallel -test.timeout=10m \
+                >"$out/$name.log" 2>&1 || code=$?
+            echo "$code" >"$out/$name.status"
+            take
+            echo "== engine tests of ${pkg#./}"
+            cat "$out/$name.log"
+            give
+        ) &
+    done
+    wait
+}
+
+# stop ends the script on a signal: it tells the check, the build of the
+# tests and the test programs to stop, and waits for the engine part, whose
+# test programs end the cases they run and clean up first (see stop_test.go
+# in each package). The lock goes with the last of them.
+stop() {
+    trap '' INT TERM HUP
+    set +e # a program that has ended already is fine
+    echo "check/in-image: stopped; the engine tests end the cases they run and clean up" >&2
+    [ -n "${check_pid-}" ] && kill -TERM "$check_pid" 2>/dev/null
+    if [ -n "$engine" ]; then
+        : >"$out/stop"
+        for f in "$out"/*.pid; do
+            [ -e "$f" ] && kill -TERM "$(cat "$f")" 2>/dev/null
+        done
+        # The packages print what they did as they end.
+        [ -n "${check_pid-}" ] && give
+        wait "$engine_pid" 2>/dev/null
+        rm -rf "$out"
+    fi
+    exit "$1"
+}
+
+if [ -n "$engine" ]; then
+    engine &
+    engine_pid=$!
+fi
+trap 'stop 130' INT
+trap 'stop 143' TERM
+trap 'stop 129' HUP
+
+# In the background, so that a signal is handled at once, not once the check
+# has ended.
 docker run --rm --network none \
     --volume "$root:/src:ro" --workdir /src \
-    "$image" go run ./check || status=$?
+    "$image" go run ./check &
+check_pid=$!
+wait "$check_pid" || status=$?
+check_pid=
 
 if [ -z "$engine" ]; then
     echo "engine tests not run; check/in-image --engine runs them"
     exit "$status"
 fi
 
-# The test program is built for the machine it runs on, not for the image.
-case "$(uname -s)" in
-    Darwin) goos=darwin ;;
-    Linux) goos=linux ;;
-    *) echo "engine tests: unsupported system $(uname -s)" >&2; exit 2 ;;
-esac
-case "$(uname -m)" in
-    arm64 | aarch64) goarch=arm64 ;;
-    x86_64) goarch=amd64 ;;
-    *) echo "engine tests: unsupported machine $(uname -m)" >&2; exit 2 ;;
-esac
-
-# The packages with engine tests. internal/tick comes after the other two, so
-# that the run image it builds comes from the cache.
-packages=
-for pkg in internal/seal internal/run internal/tick; do
-    if [ -d "$root/$pkg" ]; then packages="$packages ./$pkg"; fi
+give
+wait "$engine_pid"
+for f in "$out"/*.status; do
+    [ -e "$f" ] || continue
+    code=$(cat "$f")
+    [ "$code" = 0 ] || status=$code
 done
-
-out=$(mktemp -d)
-trap 'rm -rf "$out"' EXIT
-
-# The programs come out on standard output, as a tar: a directory of the
-# host's, such as the one mktemp makes on macOS, is not always visible to the
-# engine. One container builds them all, so the standard library is compiled
-# once.
-if docker run --rm --network none \
-    --volume "$root:/src:ro" --workdir /src \
-    --env GOOS="$goos" --env GOARCH="$goarch" --env CGO_ENABLED=0 \
-    "$image" sh -c 'mkdir /tmp/tests && go test -c -o /tmp/tests/ "$@" && tar -C /tmp/tests -cf - .' sh $packages \
-    >"$out/tests.tar" && tar -xf "$out/tests.tar" -C "$out"; then
-    for pkg in $packages; do
-        test="$out/$(basename "$pkg").test"
-        echo "== engine tests of ${pkg#./}"
-        # From the package's directory, as go test would.
-        (cd "$root/$pkg" && KILN_ENGINE_TESTS=1 "$test" -test.v) || status=$?
-    done
-else
-    status=1
-fi
+for pkg in $packages; do
+    # A package whose program did not run has no status.
+    if [ ! -e "$out/build.status" ] && [ ! -e "$out/$(basename "$pkg").status" ]; then status=1; fi
+done
+rm -rf "$out"
 exit "$status"

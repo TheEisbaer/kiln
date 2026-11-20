@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -45,9 +46,8 @@ func TestSeal(t *testing.T) {
 	credential := "fake-credential-" + id
 
 	// Images. The repo's root is the build context.
-	proxyImage, upstreamImage := name("proxy"), name("upstream")
-	build(t, proxyImage, "images/proxy/Dockerfile")
-	build(t, upstreamImage, "internal/seal/testdata/upstream/Dockerfile")
+	proxyImage := build(t, "proxy", "images/proxy/Dockerfile")
+	upstreamImage := build(t, "upstream", "internal/seal/testdata/upstream/Dockerfile")
 
 	// The ordinary network, with the fake upstream and a container that publishes
 	// a port on every host address.
@@ -330,11 +330,45 @@ func cleanup(t *testing.T, args ...string) {
 	})
 }
 
-// build builds an image from the repo's root and removes it afterwards.
-func build(t *testing.T, tag, dockerfile string) {
+// images are the images the package's tests build, by Dockerfile. Each is
+// built once per run of the tests, and TestMain removes them at the end.
+var images struct {
+	sync.Mutex
+	id   string            // random; names the images
+	tags map[string]string // by Dockerfile
+}
+
+func TestMain(m *testing.M) {
+	notifyStop()
+	code := m.Run()
+	for _, tag := range images.tags {
+		if _, err := docker(context.Background(), nil, "rmi", tag); err != nil {
+			fmt.Fprintf(os.Stderr, "removing the image %s: %v\n", tag, err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
+}
+
+// build returns the image of a Dockerfile, which it builds with the repo's
+// root as the context the first time it is asked for it. Its name is
+// kiln-sealtest-<random id>-<what>.
+func build(t *testing.T, what, dockerfile string) string {
 	t.Helper()
+	images.Lock()
+	defer images.Unlock()
+	if tag, ok := images.tags[dockerfile]; ok {
+		return tag
+	}
+	if images.tags == nil {
+		images.id, images.tags = randomID(t), map[string]string{}
+	}
+	tag := "kiln-sealtest-" + images.id + "-" + what
+	images.tags[dockerfile] = tag // removed by TestMain even if the build fails halfway
 	must(t, "build", "--quiet", "--tag", tag, "--file", "../../"+dockerfile, "../..")
-	cleanup(t, "rmi", tag)
+	return tag
 }
 
 // start starts a detached container on a network, with extra options for docker
@@ -342,6 +376,7 @@ func build(t *testing.T, tag, dockerfile string) {
 // leaves nothing behind (runDetached).
 func start(t *testing.T, name, network, image string, more ...string) {
 	t.Helper()
+	failIfStopped(t)
 	// Options go before the image; whatever follows "--" goes after it.
 	var options, command []string
 	for i, m := range more {
