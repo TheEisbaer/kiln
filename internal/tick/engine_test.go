@@ -63,6 +63,18 @@ var hosts = []string{"public.kiln-test.example"}
 // caseWord is a card's word kiln-case-<name>.
 var caseWord = regexp.MustCompile(`kiln-case-[a-z0-9-]+`)
 
+// assertSaveNamed asserts that a save's subject is the approved spec's title
+// and its trailer Kiln-Run the implement run's ID.
+func assertSaveNamed(t *testing.T, repo, commit, title, id string) {
+	t.Helper()
+	if got := gitIn(t, repo, "log", "-1", "--format=%s", commit); got != title {
+		t.Errorf("the save %s has the subject %q, want %q", commit, got, title)
+	}
+	if got := gitIn(t, repo, "log", "-1", "--format=%(trailers:key=Kiln-Run,valueonly)", commit); strings.TrimSpace(got) != id {
+		t.Errorf("the save %s has the trailer Kiln-Run %q, want %q", commit, got, id)
+	}
+}
+
 // standInSpec is the spec the stand-in writes for a card's text, or nil for
 // none.
 func standInSpec(text string) *string {
@@ -75,7 +87,8 @@ func standInSpec(text string) *string {
 	case strings.Contains(text, escapeWord):
 		spec = escapeSpec
 	default:
-		spec = "# Spec " + caseWord.FindString(text) + "\n\n## 1. What will be built\n\n## 2. How to tell it works\n\n" +
+		word := caseWord.FindString(text)
+		spec = "# Spec " + word + "\n\nPull request title: `feat: " + word + "`\n\n## 1. What will be built\n\n## 2. How to tell it works\n\n" +
 			"## 3. What was found\n\n## 4. Left out\n\n## 5. Questions\n"
 	}
 	return &spec
@@ -671,6 +684,7 @@ func TestTick(t *testing.T) {
 		if parent := gitIn(t, c.repo, "rev-parse", tip+"^"); parent != c.commit {
 			t.Errorf("the save's parent is %s, want main's %s", parent, c.commit)
 		}
+		assertSaveNamed(t, c.repo, tip, "feat: kiln-case-loop", c.runOf(2))
 		// The implement run's change is saved, the spec run's and the review
 		// run's are not.
 		if got := gitIn(t, c.repo, "show", tip+":NOTES.md"); got != "# Notes\nA line from the implement run." {
@@ -725,6 +739,9 @@ func TestTick(t *testing.T) {
 		if parent := gitIn(t, c.repo, "rev-parse", tip+"^"); parent != first {
 			t.Errorf("the second save's parent is %s, want the first save %s", parent, first)
 		}
+		// Every save of a card carries the approved spec's title.
+		assertSaveNamed(t, c.repo, first, "feat: kiln-case-back", c.runOf(2))
+		assertSaveNamed(t, c.repo, tip, "feat: kiln-case-back", c.runOf(4))
 		if got := gitIn(t, c.repo, "show", tip+":NOTES.md"); got != "# Notes\nA line from the implement run.\nA fix after the review." {
 			t.Errorf("NOTES.md on the branch is %q", got)
 		}

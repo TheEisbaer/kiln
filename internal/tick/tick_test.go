@@ -493,6 +493,48 @@ func TestStageInputs(t *testing.T) {
 		if in.SkipSave || in.Hosts != nil || in.WayOutImage != "" || in.Model != "claude-sonnet-5-5" || in.Effort != "medium" || in.Commit != main {
 			t.Errorf("the implement run's inputs are %+v", in)
 		}
+		// The spec names no title: the save keeps today's message.
+		if in.Title != "" {
+			t.Errorf("the implement run's title is %q, want none", in.Title)
+		}
+	})
+
+	t.Run("implement, the spec's title", func(t *testing.T) {
+		c, main := stagedCore(t)
+		endRun(t, c, store.Spec, finished, &store.Doc{Kind: store.KindSpec,
+			Text: "# Spec: the card\n\nPull request title: `feat: the card`\n\n## 1. What will be built\n"})
+		if _, err := c.store.Move(1, store.State{Stage: store.Implement, WaitsFor: store.Run}, store.CauseDeveloper); err != nil {
+			t.Fatal(err)
+		}
+		row := newRow(c, main)
+		in, _, err := c.inputs(ctx, row, card(c), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if in.Title != "feat: the card" {
+			t.Errorf("the implement run's title is %q", in.Title)
+		}
+		// A run in flight, whose instruction file is there, gets the same.
+		in, _, err = c.inputs(ctx, row, card(c), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if in.Title != "feat: the card" {
+			t.Errorf("the title of the implement run in flight is %q", in.Title)
+		}
+		// Neither a review run nor a spec run is saved, and neither has a title.
+		for _, st := range []store.State{reviewWaits, {Stage: store.Spec, WaitsFor: store.Run}} {
+			if _, err := c.store.Move(1, st, store.CauseDeveloper); err != nil {
+				t.Fatal(err)
+			}
+			in, _, err := c.inputs(ctx, newRow(c, main), card(c), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if in.Title != "" {
+				t.Errorf("the %s run's title is %q, want none", st.Stage, in.Title)
+			}
+		}
 	})
 
 	t.Run("implement, after a review", func(t *testing.T) {

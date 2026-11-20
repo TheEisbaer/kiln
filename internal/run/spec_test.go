@@ -219,3 +219,40 @@ func TestReadDocument(t *testing.T) {
 		})
 	}
 }
+
+func TestTitleOf(t *testing.T) {
+	const head = "# Spec: a card\n\nModel for implement: claude-sonnet-5-5.\n\n"
+	for _, c := range []struct {
+		what, spec, want string
+	}{
+		{"a plain head line", head + "Pull request title: `feat(run): x`\n\n## 1. What\n", "feat(run): x"},
+		{"a list item", head + "- Pull request title: `feat: x`\n## 1. What\n", "feat: x"},
+		{"a list item with *", head + "  * Pull request title: `feat: x`\n", "feat: x"},
+		{"CRLF", "# Spec\r\n\r\nPull request title: `feat: x`\r\n\r\n## 1. What\r\n", "feat: x"},
+		{"trailing spaces", head + "Pull request title: `feat: x` \t \n", "feat: x"},
+		{"spaces inside the backticks", head + "Pull request title: `  feat: x  `\n", "feat: x"},
+		{"no ## heading", head + "Pull request title: `feat: x`\n\nMore text.\n", "feat: x"},
+		{"a non-ASCII title", head + "Pull request title: `feat: é`\n", "feat: é"},
+
+		{"no such line", head + "## 1. What\n", ""},
+		{"only after the first ##", head + "## 1. What\n\nPull request title: `feat: x`\n", ""},
+		{"empty backticks", head + "Pull request title: ``\n", ""},
+		{"spaces in the backticks", head + "Pull request title: `   `\n", ""},
+		{"a backtick inside", head + "Pull request title: `feat: `x``\n", ""},
+		{"a control character", head + "Pull request title: `feat: \x1b[2Kx`\n", ""},
+		{"a tab", head + "Pull request title: `feat:\tx`\n", ""},
+		{"U+202E", head + "Pull request title: `feat: ‮x`\n", ""},
+		{"257 bytes", head + "Pull request title: `" + strings.Repeat("a", 257) + "`\n", ""},
+		{"invalid UTF-8", head + "Pull request title: `feat: \xff`\n", ""},
+		{"no backticks", head + "Pull request title: feat: x\n", ""},
+		{"an invalid first line before a valid one", head + "Pull request title: ``\nPull request title: `feat: x`\n", ""},
+		{"two list markers", head + "- - Pull request title: `feat: x`\n", ""},
+	} {
+		if got := TitleOf(c.spec); got != c.want {
+			t.Errorf("%s: TitleOf = %q, want %q", c.what, got, c.want)
+		}
+	}
+	if got := TitleOf(head + "Pull request title: `" + strings.Repeat("a", 256) + "`\n"); len(got) != 256 {
+		t.Errorf("a title of 256 bytes gave %d bytes", len(got))
+	}
+}

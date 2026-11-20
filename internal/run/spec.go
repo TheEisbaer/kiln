@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 // maxSpec is the largest document that is read: 256 KiB, 7.6 times the
@@ -102,4 +103,69 @@ func (f *firstError) Read(p []byte) (int, error) {
 		f.err = err
 	}
 	return n, err
+}
+
+// maxTitle is the longest pull request title a spec may name, in bytes: a
+// bound chosen here, not a limit the Git host documents.
+const maxTitle = 256
+
+// titleLine is how the line that names the title starts.
+const titleLine = "Pull request title: `"
+
+// TitleOf returns the pull request title a spec names on its line
+// "Pull request title: `<title>`", or "" when it names none that can be used.
+// Only the head is read, the lines before the first that starts with "## ", or
+// the whole document when it has no such line, so that an example of the line
+// in the body is never taken. The line may be a list item and may have white
+// space around it. The first such line decides: when its title fails
+// validTitle, the result is "" and later lines are not tried.
+func TitleOf(spec string) string {
+	for _, line := range strings.Split(spec, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			return ""
+		}
+		line = strings.TrimRight(line, "\r \t")
+		line = strings.TrimLeft(line, " ")
+		if rest, ok := strings.CutPrefix(line, "- "); ok {
+			line = rest
+		} else if rest, ok := strings.CutPrefix(line, "* "); ok {
+			line = rest
+		}
+		inner, ok := strings.CutPrefix(line, titleLine)
+		if !ok || !strings.HasSuffix(inner, "`") {
+			continue
+		}
+		title := strings.TrimSpace(strings.TrimSuffix(inner, "`"))
+		if validTitle(title) != nil {
+			return ""
+		}
+		return title
+	}
+	return ""
+}
+
+// validTitle checks a title for a save's commit message: not empty, at most
+// maxTitle bytes, valid UTF-8, and without a backtick, a control character or
+// a bidirectional control character.
+func validTitle(title string) error {
+	switch {
+	case title == "":
+		return errors.New("the title is empty")
+	case len(title) > maxTitle:
+		return fmt.Errorf("the title is %d bytes, more than %d", len(title), maxTitle)
+	case !utf8.ValidString(title):
+		return errors.New("the title is not valid UTF-8")
+	case strings.Contains(title, "`"):
+		return errors.New("the title contains a backtick")
+	}
+	for _, r := range title {
+		// isControl lets newline and tab through, which a title must not have.
+		if isControl(r) || r == '\n' || r == '\t' {
+			return fmt.Errorf("the title contains the control character %U", r)
+		}
+		if (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			return fmt.Errorf("the title contains the bidirectional control character %U", r)
+		}
+	}
+	return nil
 }
