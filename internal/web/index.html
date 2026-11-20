@@ -276,6 +276,7 @@ button:disabled { opacity: .55; cursor: default; }
 .badge.needs { color: var(--amber-ink); border-color: var(--amber-line); background: var(--amber-soft); }
 .badge.live { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); }
 .badge.ready { color: var(--dot-review); }
+.badge.merged { color: var(--dot-done); border-color: color-mix(in srgb, var(--dot-done) 40%, transparent); }
 .badge.done { color: var(--dot-done); }
 .badge.idle { color: var(--muted); }
 .badge.dropped { color: var(--muted); border-style: dashed; background: transparent; }
@@ -342,6 +343,15 @@ button:disabled { opacity: .55; cursor: default; }
   color: var(--muted); background: transparent; border-color: transparent;
 }
 .moves .drop:hover { color: var(--del); background: var(--del-soft); border-color: transparent; }
+.moves .quiet { color: var(--muted); background: transparent; border-color: transparent; }
+.moves .quiet:hover { color: var(--text); background: var(--surface); border-color: var(--line); }
+.reason.pull { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.reason.pull a { color: var(--accent); font-family: var(--mono); font-size: 12.5px; text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); text-underline-offset: 2px; overflow-wrap: anywhere; }
+.reason.pull .fact { font-size: 12px; }
+.workflows { background: var(--amber-soft); border: 1px solid var(--amber-line); color: var(--amber-ink); border-radius: 10px; padding: 10px 14px; font-size: 13px; margin: 0 0 12px; }
+.workflows code, dialog .names code { font-family: var(--mono); font-size: 12.5px; }
+.workflows ul, dialog .names { margin: 6px 0 0; padding-left: 1.3em; }
+dialog .names { margin: 0 0 14px; color: var(--text); font-size: 13px; }
 .yournote {
   border-radius: 10px; padding: 10px 14px; margin: 0 0 16px;
   background: var(--surface); border: 1px solid var(--line-soft); border-left: 3px solid var(--accent);
@@ -415,6 +425,7 @@ button:disabled { opacity: .55; cursor: default; }
 .file .fhead { display: flex; gap: 10px; align-items: baseline; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); background: var(--bg-2); }
 .file .path { font-family: var(--mono); font-size: 12.5px; color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
 .file .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
+.file .tag.workflow { color: var(--amber-ink); border-color: var(--amber-line); background: var(--amber-soft); }
 .file .counts { margin-left: auto; font-family: var(--mono); font-size: 11.5px; white-space: nowrap; }
 .file .counts .a { color: var(--add); }
 .file .counts .d { color: var(--del); margin-left: 6px; }
@@ -545,6 +556,18 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
     </div>
   </div>
 </dialog>
+<dialog id="ask" class="small" aria-labelledby="a-title">
+  <div class="in">
+    <h2 id="a-title"></h2>
+    <p id="a-what">This change touches workflow files. The Git host runs them as soon as the change is published.</p>
+    <ul class="names" id="a-names"></ul>
+    <div class="act">
+      <span class="hint" id="a-hint"></span>
+      <button type="button" id="a-cancel">Cancel</button>
+      <button type="button" id="a-go" class="primary">Publish</button>
+    </div>
+  </div>
+</dialog>
 <script>
 "use strict";
 // Every text of a card, a run or a document is put in with textContent or as
@@ -558,6 +581,7 @@ const STAGE_NAME = Object.fromEntries(STAGES);
 // that waits for approval back.
 const MOVES = {
   approve: "Approve",
+  publish: "Publish",
   "send-back": "Send back to implement",
   done: "Done",
   "to-spec": "Send back to spec",
@@ -566,12 +590,17 @@ const MOVES = {
 const AGAIN = { spec: "Run the spec again", implement: "Run implement again", review: "Run the review again" };
 function moveLabel(c, action) {
   if (action === "again") return c.stage === "spec" && c.waits_for === "approval" ? "Send back with a note" : AGAIN[c.stage] || "Run again";
+  // Done closes a card: without publishing it from a review that passed, when
+  // the core can publish it, and as it is from the Git host.
+  if (action === "done" && c.waits_for === "host") return "Close";
+  if (action === "done" && canPublish(c)) return "Close without publishing";
   return MOVES[action] || action;
 }
-const KIND_NAME = { spec: "The spec", report: "The report", review: "The review" };
+function canPublish(c) { return c.moves.some((m) => m.action === "publish"); }
+const KIND_NAME = { spec: "The spec", report: "The report", "pull-request": "The pull request's text", review: "The review" };
 const WAITS = {
   run: "waits for a run", approval: "waits for your approval", developer: "needs you",
-  room: "queued", host: "ready to merge", nothing: "done",
+  room: "queued", host: "waits for the Git host", nothing: "done",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -652,8 +681,9 @@ function badgeOf(c) {
   if (c.waits_for === "approval") return ["approval", "your approval"];
   if (c.waits_for === "developer") return c.stage === "backlog" ? ["idle", "not started"] : ["needs", "needs you"];
   if (c.waits_for === "room") return ["idle", "queued"];
-  if (c.waits_for === "host") return ["ready", "ready to merge"];
+  if (c.waits_for === "host") return ["ready", "at the Git host"];
   if (c.dropped) return ["dropped", "dropped"];
+  if (c.merged) return ["merged", "merged"];
   return ["done", "done"];
 }
 
@@ -730,8 +760,9 @@ function tileOf(c) {
   t.dataset.id = c.id;
   t.append(el("span", "id", "#" + c.id), el("div", "t", c.title || "(no title)"));
   const foot = el("div", "foot");
-  // In the column done, a finished card shows no badge, and a dropped one says so.
-  if (c.stage !== "done" || c.dropped) foot.append(badge(c));
+  // In the column done, a finished card shows no badge, and a dropped or a
+  // merged one says so.
+  if (c.stage !== "done" || c.dropped || c.merged) foot.append(badge(c));
   if (c.documents.length) foot.append(el("span", "docs", c.documents.join(" · ")));
   t.append(foot);
   t.addEventListener("click", () => openCard(c.id));
@@ -1060,9 +1091,13 @@ function renderCard(c) {
     $("p-title").textContent = c.title || "(no title)";
   });
   const last = c.history[c.history.length - 1];
-  part("reason", [c.stage, c.waits_for, c.reason, !!c.run, c.dropped, c.note], () => {
+  part("reason", [c.stage, c.waits_for, c.reason, !!c.run, c.dropped, c.note, c.publishing, c.pull_request, c.merged], () => {
     const box = $("p-reason");
     box.replaceChildren();
+    if (c.publishing || c.pull_request) {
+      box.append(pullOf(c));
+      return;
+    }
     if (c.dropped) {
       const r = el("div", "reason");
       r.append(el("b", null, "Dropped by you."));
@@ -1114,6 +1149,21 @@ function renderCard(c) {
   tickClocks();
 }
 
+// pullOf says where a card's publishing is: "Publishing…" while the core
+// publishes it, then its pull request, as a link only to http or https, and
+// whether it waits for the Git host or was merged.
+function pullOf(c) {
+  const r = el("div", "reason pull");
+  if (c.publishing) {
+    r.append(el("span", "pulse"), el("b", null, "Publishing…"),
+      el("span", "fact", "the publish command puts the change on the Git host"));
+    return r;
+  }
+  r.append(el("b", null, c.merged ? "Merged." : "The pull request:"), link(c.pull_request.address, c.pull_request.address));
+  if (!c.merged) r.append(el("span", "fact", "waits for the Git host"));
+  return r;
+}
+
 // sentBack says whether the card's newest document is a review that sends the
 // change back.
 function sentBack(c) {
@@ -1125,9 +1175,15 @@ function sentBack(c) {
 // a passed review done, sending back a change a review sent back, and running
 // the stage again otherwise.
 function first(c) {
+  if (canPublish(c)) return "publish";
+  if (c.waits_for === "host") return null;
   if (c.waits_for === "approval") return c.stage === "review" ? "done" : "approve";
   return sentBack(c) ? "send-back" : "again";
 }
+
+// quiet says whether a move is shown quiet: closing a card without publishing
+// it, or from the Git host.
+function quiet(c, m) { return m.action === "done" && (canPublish(c) || c.waits_for === "host"); }
 
 // renderMoves shows the moves the card's state allows: the one that matters
 // first and filled, the others quiet, sending back to spec last, and dropping
@@ -1135,16 +1191,17 @@ function first(c) {
 function renderMoves(c) {
   const box = $("p-moves");
   box.replaceChildren();
-  const rank = (m) => m.action === first(c) ? 0 : m.action === "to-spec" ? 2 : 1;
+  const rank = (m) => m.action === first(c) ? 0 : quiet(c, m) ? 3 : m.action === "to-spec" ? 2 : 1;
   const moves = c.moves.filter((m) => m.action !== "drop").sort((a, b) => rank(a) - rank(b));
   moves.forEach((m, i) => {
-    const b = el("button", i === 0 && rank(m) === 0 ? "primary" : "", moveLabel(c, m.action));
+    const b = el("button", i === 0 && rank(m) === 0 ? "primary" : quiet(c, m) ? "quiet" : "", moveLabel(c, m.action));
     b.type = "button";
-    b.addEventListener("click", () => m.note === "none" ? decide(c.id, m.action, "", box) : openNote(m));
+    b.addEventListener("click", () => m.action === "publish" ? publish(c, box) : m.note === "none" ? decide(c.id, m.action, "", box) : openNote(m));
     box.append(b);
   });
   if (!moves.length) {
     const note = c.waits_for === "run" ? "Kiln works on it; nothing to do." :
+      c.publishing ? "Kiln publishes it; nothing to do." :
       c.waits_for === "nothing" ? "Nothing left to do." : "No move for this state.";
     box.append(el("span", "note", note));
   }
@@ -1160,10 +1217,16 @@ function renderMoves(c) {
 // decide sends a move, with a note, and shows the card as it is after it. It
 // answers what the dialog of a note needs to know: done, "moved" when the card
 // had moved meanwhile, or the sentence of a note that does not fit.
-async function decide(id, action, note, box) {
+async function decide(id, action, note, box, more) {
   for (const b of box.querySelectorAll("button")) b.disabled = true;
   try {
-    const r = await api("POST", "/api/cards/" + id + "/decide", { action, note });
+    const r = await api("POST", "/api/cards/" + id + "/decide", Object.assign({ action, note }, more || {}));
+    // A change the page did not know touches workflow files: it asks first.
+    if (r.status === 409 && action === "publish" && r.data && r.data.workflows && !(more && more.workflow_yes)) {
+      for (const b of box.querySelectorAll("button")) b.disabled = false;
+      askPublish(id, r.data.workflows);
+      return { asked: true };
+    }
     if (r.status === 409) {
       cardKeys.moves = null;
       await refreshCard();
@@ -1184,6 +1247,43 @@ async function decide(id, action, note, box) {
     for (const b of box.querySelectorAll("button")) b.disabled = false;
     return { refused: "The core does not answer; nothing was moved." };
   }
+}
+
+// Publishing: a change that touches workflow files is published only after
+// the developer has seen their names and said yes (ADR 0060).
+
+let askFor = null; // the card the question is open for
+
+function publish(c, box) {
+  const files = (c.change && c.change.workflows) || [];
+  if (files.length) askPublish(c.id, files);
+  else decide(c.id, "publish", "", box);
+}
+
+function askPublish(id, files) {
+  askFor = id;
+  $("a-title").textContent = "Publish #" + id + "?";
+  const names = $("a-names");
+  names.replaceChildren();
+  for (const f of files) { const li = el("li"); li.append(el("code", null, f)); names.append(li); }
+  $("a-hint").className = "hint";
+  $("a-hint").textContent = "";
+  $("a-go").disabled = false;
+  $("ask").showModal();
+  $("a-cancel").focus();
+}
+
+async function sendPublish() {
+  if (askFor === null) return;
+  $("a-go").disabled = true;
+  const r = await decide(askFor, "publish", "", $("p-moves"), { workflow_yes: true });
+  if (r.refused) {
+    $("a-hint").className = "err";
+    $("a-hint").textContent = r.refused;
+    $("a-go").disabled = false;
+    return;
+  }
+  $("ask").close();
 }
 
 // The dialog of a note
@@ -1207,6 +1307,9 @@ function noteText(c, m) {
       return { title: "Send back to spec", what: "The card waits for a new spec run. It is told the spec it replaces and the last report or review." + optional,
         label: "What should change?", go: "Send back to spec" };
     case "send-back":
+      if (c.waits_for === "host") return { title: "Send back to implement",
+        what: "The card goes back to implement and waits for a run, which is told your note; the note wins where it differs from the spec. The pull request is left as it is on the Git host.",
+        label: "What should change?", go: "Send back" };
       return { title: "Send back to implement", what: c.waits_for === "approval" ?
         "The review passed. The card goes back to implement; the run is told the review and your note, which wins where it differs from the spec." :
         "The card goes back to implement and waits for a run." + optional,
@@ -1352,6 +1455,15 @@ function renderChange(ch) {
   where.append(document.createTextNode("On the branch "), el("code", null, ch.branch),
     document.createTextNode(" in "), el("code", null, ch.repo));
   sec.append(where);
+  if (ch.workflows && ch.workflows.length) {
+    const w = el("div", "workflows");
+    w.append(el("b", null, "This change touches workflow files."),
+      document.createTextNode(" The Git host runs them as soon as the change is published, so publishing asks you first."));
+    const ul = el("ul");
+    for (const f of ch.workflows) { const li = el("li"); li.append(el("code", null, f)); ul.append(li); }
+    w.append(ul);
+    sec.append(w);
+  }
   if (ch.commits.length) {
     const ul = el("ul", "commits");
     for (const c of ch.commits) {
@@ -1368,14 +1480,14 @@ function renderChange(ch) {
   } else if (!ch.diff) {
     sec.append(el("div", "change-note", "The branch changes no file."));
   } else {
-    sec.append(diffView(ch.diff));
+    sec.append(diffView(ch.diff, ch.workflows || []));
   }
   return sec;
 }
 
 // diffView renders a diff as git writes it: a heading per file, then its
 // lines, added ones green and removed ones red.
-function diffView(diff) {
+function diffView(diff, workflows) {
   const all = el("div", "diff");
   let file = null;
   const finish = () => {
@@ -1397,13 +1509,14 @@ function diffView(diff) {
     file = { head, name, counts, lines, add: 0, del: 0, inHunk: false };
   };
   const line = (cls, text) => file.lines.append(el("span", "l" + (cls ? " " + cls : ""), text));
-  const tag = (text) => file.head.insertBefore(el("span", "tag", text), file.counts);
+  const tag = (text, cls) => file.head.insertBefore(el("span", "tag" + (cls ? " " + cls : ""), text), file.counts);
   for (const l of diff.replace(/\n$/, "").split("\n")) {
     if (l.startsWith("diff --git ")) {
       const rest = l.slice(11);
       const n = (rest.length - 5) / 2;
       const p = Number.isInteger(n) && rest.startsWith("a/") && rest.slice(n + 2, n + 5) === " b/" ? rest.slice(n + 5) : rest;
       start(p);
+      if (workflows.includes(p) || /^\.github\/workflows\//.test(p)) tag("workflow", "workflow");
       continue;
     }
     if (!file) start("");
@@ -1436,7 +1549,7 @@ function renderHistory(history) {
     const l1 = el("div", "line1");
     const to = e.dropped ? "dropped" : e.stage === "backlog" && e.waits_for === "developer" ? "not started" : WAITS[e.waits_for] || e.waits_for;
     l1.append(el("span", "to", STAGE_NAME[e.stage] + ", " + to));
-    l1.append(el("span", "by", "by " + (e.cause === "developer" ? "you" : e.cause === "run" ? "its run" : "the " + e.cause)));
+    l1.append(el("span", "by", "by " + (e.cause === "developer" ? "you" : e.cause === "run" ? "its run" : e.cause === "host" ? "the Git host" : "the " + e.cause)));
     l1.append(el("span", "when", when(e.at)));
     li.append(mark, l1);
     // The developer's note is their words, as they wrote them.
@@ -1503,7 +1616,7 @@ function reloadFor(build) {
     $("stale").hidden = true;
     return false;
   }
-  if ($("dialog").open || $("note").open) return false;
+  if ($("dialog").open || $("note").open || $("ask").open) return false;
   try {
     if (sessionStorage.getItem("kiln-reloaded-for") !== build) {
       sessionStorage.setItem("kiln-reloaded-for", build);
@@ -1548,11 +1661,15 @@ $("n-text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.met
 // A click outside the dialog, on its backdrop, closes it without a move.
 $("note").addEventListener("click", (e) => { if (e.target === $("note")) $("note").close(); });
 $("note").addEventListener("close", () => { noteMove = null; if (document.activeElement) document.activeElement.blur(); });
+$("a-cancel").addEventListener("click", () => $("ask").close());
+$("a-go").addEventListener("click", sendPublish);
+$("ask").addEventListener("click", (e) => { if (e.target === $("ask")) $("ask").close(); });
+$("ask").addEventListener("close", () => { askFor = null; if (document.activeElement) document.activeElement.blur(); });
 $("p-close").addEventListener("click", closeCard);
 $("scrim").addEventListener("click", closeCard);
 window.addEventListener("hashchange", fromHash);
 document.addEventListener("keydown", (e) => {
-  if ($("dialog").open || $("note").open) return;
+  if ($("dialog").open || $("note").open || $("ask").open) return;
   if (e.key === "Escape" && openId !== null) closeCard();
   const typing = /INPUT|TEXTAREA/.test(document.activeElement.tagName);
   if (e.key === "n" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); openDialog(); }
