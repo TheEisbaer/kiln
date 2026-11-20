@@ -37,6 +37,7 @@ func TestMain(m *testing.M) {
 	if inputs := os.Getenv(asKilnVar); inputs != "" {
 		os.Exit(asKiln(inputs, os.Getenv(afterVar)))
 	}
+	notifyStop()
 	os.Exit(m.Run())
 }
 
@@ -491,6 +492,7 @@ type testCase struct {
 // engine afterwards.
 func (f *fixture) newCase(t *testing.T, name string) testCase {
 	t.Helper()
+	failIfStopped(t)
 	id := "steptest-" + f.id + "-" + name
 	if len(id) > 40 {
 		t.Fatalf("the run ID %s is too long", id)

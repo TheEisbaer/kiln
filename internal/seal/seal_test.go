@@ -339,6 +339,7 @@ var images struct {
 }
 
 func TestMain(m *testing.M) {
+	notifyStop()
 	code := m.Run()
 	for _, tag := range images.tags {
 		if _, err := docker(context.Background(), nil, "rmi", tag); err != nil {
@@ -375,6 +376,7 @@ func build(t *testing.T, what, dockerfile string) string {
 // leaves nothing behind (runDetached).
 func start(t *testing.T, name, network, image string, more ...string) {
 	t.Helper()
+	failIfStopped(t)
 	// Options go before the image; whatever follows "--" goes after it.
 	var options, command []string
 	for i, m := range more {

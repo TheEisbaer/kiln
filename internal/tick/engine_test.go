@@ -1123,6 +1123,7 @@ func readTarEntry(t *testing.T, name, entry string) string {
 // removes whatever of its instance is left on the engine afterwards.
 func (f *fixture) newCase(t *testing.T, image string) *testCase {
 	t.Helper()
+	failIfStopped(t)
 	c := &testCase{data: filepath.Join(t.TempDir(), "data"), image: image}
 	s := f.open(t, c)
 	var err error

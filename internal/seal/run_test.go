@@ -578,6 +578,7 @@ func buildProbe(t *testing.T) []byte {
 // afterwards.
 func createRun(t *testing.T, r Run) {
 	t.Helper()
+	failIfStopped(t)
 	cleanupRun(t, r)
 	if err := CreateRun(t.Context(), r); err != nil {
 		t.Fatal(err)
@@ -588,6 +589,7 @@ func createRun(t *testing.T, r Run) {
 // test is over, whatever happened.
 func cleanupRun(t *testing.T, r Run) {
 	t.Helper()
+	failIfStopped(t)
 	t.Cleanup(func() {
 		ctx := context.Background()
 		name := runName(r.ID)
