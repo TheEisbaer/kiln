@@ -89,6 +89,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 ## ADR 0022: The UI shows what needs the developer first; the board is second
 
 - The first screen shows everything that waits for the developer: specs to approve, drops to confirm, and cards in the state "needs you". The term itself keeps its narrower meaning from CONTEXT.md, a card that has stopped outside the planned approval.
+- The strip shows of each card its headline: the first sentence of its first line, cut to at most 90 characters with an ellipsis, on one line. The board's JSON carries it as `headline`, beside `title`. The tiles, the card's page and the drop dialog keep the whole first line (2026-11-20).
 
 ## ADR 0023: Kiln's core is written in Go, its UI in Svelte
 

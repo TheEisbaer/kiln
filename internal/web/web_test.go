@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/store"
@@ -126,6 +127,7 @@ func TestBoard(t *testing.T) {
 		t.Fatal(err)
 	}
 	running := f.card(t, "Runs", store.State{Stage: store.Spec, WaitsFor: store.Run})
+	long := f.card(t, longTitle+"\n\nMore text.", store.State{Stage: store.Spec, WaitsFor: store.Approval})
 	if err := f.store.AddRun(store.RunRow{ID: "r2", Card: running, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
 	}
@@ -135,16 +137,59 @@ func TestBoard(t *testing.T) {
 		t.Fatalf("GET /api/board: %d %s", w.Code, w.Header())
 	}
 	b := decode[boardJSON](t, w)
-	if len(b.Cards) != 2 {
+	if len(b.Cards) != 3 {
 		t.Fatalf("the cards: %+v", b.Cards)
 	}
-	if c := b.Cards[0]; c.ID != spec || c.Title != "Write the screen" || c.Stage != "spec" || c.WaitsFor != "approval" ||
+	if c := b.Cards[0]; c.ID != spec || c.Title != "Write the screen" || c.Headline != "Write the screen" || c.Stage != "spec" || c.WaitsFor != "approval" ||
 		c.Reason != "exit 0, not saved" || c.Run != nil || !reflect.DeepEqual(c.Documents, []string{"spec"}) {
 		t.Errorf("the card with a spec: %+v", c)
 	}
 	if c := b.Cards[1]; c.Run == nil || c.Run.ID != "r2" || c.Run.Model != "claude-opus-5-5" || c.Run.Since == nil ||
 		time.Since(*c.Run.Since) > time.Minute || len(c.Documents) != 0 || c.Documents == nil {
 		t.Errorf("the card with a run in flight: %+v, run %+v", c, c.Run)
+	}
+	if c := b.Cards[2]; c.ID != long || c.Title != longTitle || c.Headline != longHeadline || c.WaitsFor != "approval" {
+		t.Errorf("the card with a long first line: %+v", c)
+	}
+}
+
+// longTitle is a first line written as one long paragraph, and longHeadline
+// what the strip shows of it.
+const (
+	longTitle    = "On the board, the strip at the top that lists the cards that need the developer or wait for their approval shows a card's whole first line as its title."
+	longHeadline = "On the board, the strip at the top that lists the cards that need the developer or wait…"
+)
+
+func TestHeadline(t *testing.T) {
+	// comma is a sentence whose 88th and 89th characters are ", ".
+	comma := strings.Repeat("word ", 16) + "and too" + ", then more words that go past the end"
+	url := "https://example.com/" + strings.Repeat("a", 100)
+	for _, c := range []struct{ in, want string }{
+		{"Write the screen", "Write the screen"},
+		{longTitle, longHeadline},
+		{"Fix index.html and go 1.27.4 builds. Then more.", "Fix index.html and go 1.27.4 builds."},
+		{"Use e.g. the proxy. Then more.", "Use e.g. the proxy."},
+		{`Say "done." Then more.`, `Say "done."`},
+		{"Why? Because.", "Why?"},
+		{url, string([]rune(url)[:89]) + "…"},
+		{strings.Repeat("ä", 90), strings.Repeat("ä", 90)},
+		{strings.Repeat("ä", 91), strings.Repeat("ä", 89) + "…"},
+		{comma, strings.Repeat("word ", 16) + "and too…"},
+		{"", ""},
+	} {
+		got := headline(c.in)
+		if got != c.want {
+			t.Errorf("headline(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if n := utf8.RuneCountInString(got); n > 90 || !utf8.ValidString(got) {
+			t.Errorf("headline(%q) = %q: %d runes, valid UTF-8 %v", c.in, got, n, utf8.ValidString(got))
+		}
+	}
+	if n := utf8.RuneCountInString(longHeadline); n != 88 {
+		t.Errorf("the long headline has %d runes, want 88", n)
+	}
+	if r := []rune(comma); string(r[87:89]) != ", " {
+		t.Errorf("the comma case has %q at 88 and 89", string(r[87:89]))
 	}
 }
 
