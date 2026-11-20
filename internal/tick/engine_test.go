@@ -702,7 +702,7 @@ func TestTick(t *testing.T) {
 		f.stop(t, core, done)
 
 		tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/approval by run"},
-			[]string{"spec 1", "report 2", "review 3"})
+			[]string{"spec 1", "report 2", "pull-request 2", "review 3"})
 		f.assertRun(t, c, 2, implementModel, "medium", c.commit, store.Finished)
 		f.assertRun(t, c, 3, reviewModel, "high", tip, store.Finished)
 		if n := gitIn(t, c.repo, "rev-list", "--count", c.commit+".."+tip); n != "1" {
@@ -735,6 +735,73 @@ func TestTick(t *testing.T) {
 		}
 	})
 
+	// Spec, approval, implement, review, and then the developer's publish: the
+	// stand-in for the publish command "merges" by moving origin's main to the
+	// commit it is given, and after the next fetch the card is done, merged
+	// (card 19). No key, no token and no Git host: origin is a bare repo here.
+	t.Run("published and merged", func(t *testing.T) {
+		t.Parallel()
+		c := f.newCase(t, f.standIn)
+		origin := filepath.Join(t.TempDir(), "origin.git")
+		gitIn(t, filepath.Dir(origin), "clone", "--quiet", "--bare", c.repo, origin)
+		gitIn(t, c.repo, "remote", "set-url", "origin", origin)
+		dir := t.TempDir()
+		f.card(t, c, "Add a line to NOTES.md. kiln-case-publish")
+		f.specAndApprove(t, c)
+		core, done := f.core(t, c, "")
+		f.waitState(t, c, reviewPassed, 3)
+		f.stop(t, core, done)
+		s := f.open(t, c)
+		_, err := s.DecideWith(1, store.Publish, "", store.Options{Publishing: true})
+		s.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := f.config(c)
+		cfg.PublishCommand = `set -eu
+env > ` + shellWord(dir) + `/env
+cp "$KILN_TEXT_FILE" ` + shellWord(dir) + `/text
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git --git-dir="$KILN_REPO" push --quiet origin "$KILN_COMMIT:refs/heads/main"
+echo "https://git.example/pull/$KILN_CARD"`
+		core, done = f.start(t, child{Command: "core", Config: cfg})
+		f.waitState(t, c, store.State{Stage: store.Done, WaitsFor: store.Nothing}, 3)
+		f.stop(t, core, done)
+
+		tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/approval by run",
+			"review/host by developer", "review/host by rule", "done/nothing by host"},
+			[]string{"spec 1", "report 2", "pull-request 2", "review 3"})
+		e := f.lastEntry(t, c)
+		if e.Reason != "merged" {
+			t.Errorf("the last entry is %+v, want merged", e)
+		}
+		commit := gitIn(t, c.repo, "rev-parse", "refs/kiln/publish/card-1")
+		if main := gitIn(t, origin, "rev-parse", "refs/heads/main"); main != commit {
+			t.Errorf("origin's main is %s, want the published %s", main, commit)
+		}
+		if got := gitIn(t, c.repo, "rev-parse", "refs/heads/main"); got != commit {
+			t.Errorf("the copy's main is %s after the fetch, want %s", got, commit)
+		}
+		if got := gitIn(t, c.repo, "rev-parse", commit+"^{tree}"); got != gitIn(t, c.repo, "rev-parse", tip+"^{tree}") {
+			t.Errorf("the published tree is not the branch's")
+		}
+		env := string(readFile(t, filepath.Join(dir, "env")))
+		for _, want := range []string{"KILN_CARD=1\n", "KILN_TITLE=feat: kiln-case-publish\n", "KILN_BRANCH=card/1-kiln-case-publish\n",
+			"KILN_COMMIT=" + commit + "\n", "KILN_REPO=" + c.repo + "\n"} {
+			if !strings.Contains(env, want) {
+				t.Errorf("the command was not told %q:\n%s", want, env)
+			}
+		}
+		if text := string(readFile(t, filepath.Join(dir, "text"))); text != "Adds a line to NOTES.md (kiln-case-publish).\n\nChecked by reading NOTES.md.\n" {
+			t.Errorf("the pull request's text is %q", text)
+		}
+		s = f.open(t, c)
+		defer s.Close()
+		if pub, err := s.Publication(1); err != nil || pub.Address != "https://git.example/pull/1" || pub.Commit != commit {
+			t.Errorf("the publication is %+v (%v)", pub, err)
+		}
+	})
+
 	// A review that sends the change back stops the card; after the
 	// developer's move "send back" a second implement run is told the review,
 	// starts from the branch's tip and saves a second commit.
@@ -759,7 +826,7 @@ func TestTick(t *testing.T) {
 
 		tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/developer by run",
 			"implement/run by developer", "review/run by run", "review/approval by run"},
-			[]string{"spec 1", "report 2", "review 3", "report 4", "review 5"})
+			[]string{"spec 1", "report 2", "pull-request 2", "review 3", "report 4", "pull-request 4", "review 5"})
 		f.assertRun(t, c, 4, implementModel, "medium", first, store.Finished)
 		if n := gitIn(t, c.repo, "rev-list", "--count", c.commit+".."+tip); n != "2" {
 			t.Errorf("%s commits on the branch, want 2", n)
@@ -821,12 +888,13 @@ func TestTick(t *testing.T) {
 		name   string
 		killed child  // the core that is killed, without its Config
 		run    int    // the number of the run in flight after the kill
+		docs   int    // the documents kept after the kill
 		saved  bool   // the branch is there after the kill
 		record bool   // the run's result.json is there after the kill
 		kind   string // the run's document
 	}{
-		{"killed in an implement run, after its save", child{Hook: "run:save:exit"}, 2, true, false, "report"},
-		{"killed in a review run, before its end", child{ExitAt: "review/before-end"}, 3, true, true, "review"},
+		{"killed in an implement run, after its save", child{Hook: "run:save:exit"}, 2, 1, true, false, "report"},
+		{"killed in a review run, before its end", child{ExitAt: "review/before-end"}, 3, 3, true, true, "review"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -851,8 +919,8 @@ func TestTick(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(c.data, "runs", c.runOf(tc.run), "result.json")); (err == nil) != tc.record {
 				t.Errorf("result.json after the kill: %v, want it there: %v", err, tc.record)
 			}
-			if n := countSpecs(t, c); n != tc.run-1 {
-				t.Errorf("%d documents after the kill, want %d", n, tc.run-1)
+			if n := countSpecs(t, c); n != tc.docs {
+				t.Errorf("%d documents after the kill, want %d", n, tc.docs)
 			}
 			saved := gitIn(t, c.repo, "for-each-ref", "--format=%(objectname)", "refs/heads/kiln/card-1")
 			if (saved != "") != tc.saved {
@@ -863,7 +931,7 @@ func TestTick(t *testing.T) {
 			f.waitState(t, c, reviewPassed, 3)
 			f.stop(t, core, done)
 			tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/approval by run"},
-				[]string{"spec 1", "report 2", "review 3"})
+				[]string{"spec 1", "report 2", "pull-request 2", "review 3"})
 			if tip != saved {
 				t.Errorf("the branch is at %s, and was at %s after the kill", tip, saved)
 			}
@@ -984,16 +1052,20 @@ func TestTick(t *testing.T) {
 				t.Fatalf("card %d has the runs %+v (%v), want 3", card, runs, err)
 			}
 			docs, err := s.Documents(card)
-			if err != nil || len(docs) != 3 {
-				t.Fatalf("card %d has the documents %+v (%v), want 3", card, docs, err)
+			if err != nil || len(docs) != 4 {
+				t.Fatalf("card %d has the documents %+v (%v), want 4", card, docs, err)
 			}
-			for i, kind := range []string{store.KindSpec, store.KindReport, store.KindReview} {
+			for i, kind := range []string{store.KindSpec, store.KindReport, store.KindPullRequest, store.KindReview} {
+				n := map[int]int{0: 1, 1: 2, 2: 2, 3: 3}[i]
+				id := runOf(card, n)
+				if d := docs[i]; d.Kind != kind || d.Run != id || d.Text != readTarEntry(t, filepath.Join(c.data, "runs", id, "documents.tar"), "out/"+kind+".md") {
+					t.Errorf("document %d of card %d is %+v, want the %s of %s as written", i+1, card, d, kind, id)
+				}
+			}
+			for i := range 3 {
 				id := runOf(card, i+1)
 				if r := runs[i]; r.ID != id || r.Ending != store.Finished {
 					t.Errorf("run %d of card %d is %+v, want %s finished", i+1, card, r.RunRow, id)
-				}
-				if d := docs[i]; d.Kind != kind || d.Run != id || d.Text != readTarEntry(t, filepath.Join(c.data, "runs", id, "documents.tar"), "out/"+kind+".md") {
-					t.Errorf("document %d of card %d is %+v, want the %s of %s as written", i+1, card, d, kind, id)
 				}
 				// Each run's container started once.
 				if n := c.starts.count("kiln-run-" + id); n != 1 {
@@ -1167,7 +1239,8 @@ func (f *fixture) assertRun(t *testing.T, c *testCase, n int, model, effort, com
 	}
 }
 
-// document is the text of the document the nth run of card 1 wrote.
+// document is the text of the document the nth run of card 1 wrote, the first
+// of an implement run's two: its report.
 func (f *fixture) document(t *testing.T, c *testCase, n int) string {
 	t.Helper()
 	db, err := sql.Open("sqlite3", filepath.Join(c.data, "store.db"))
@@ -1176,7 +1249,7 @@ func (f *fixture) document(t *testing.T, c *testCase, n int) string {
 	}
 	defer db.Close()
 	var text string
-	if err := db.QueryRow("SELECT text FROM specs WHERE run = ?", c.runOf(n)).Scan(&text); err != nil {
+	if err := db.QueryRow("SELECT text FROM specs WHERE run = ? ORDER BY rowid LIMIT 1", c.runOf(n)).Scan(&text); err != nil {
 		t.Fatalf("the document of run %d: %v", n, err)
 	}
 	return text

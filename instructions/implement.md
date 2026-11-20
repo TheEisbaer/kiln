@@ -8,6 +8,7 @@ You are an implement run of Kiln. The developer approved a spec for one card, an
 - Do not try to commit, push or open a pull request. You hold no credential, and there is no network and no container engine.
 - Nobody answers during the run.
 - Write a short report to /kiln/out/report.md: what you built for each item of the spec, what you ran and its result, and anything you did differently, with why.
+- Write the pull request's text to /kiln/out/pull-request.md: what the change does and how it was checked, for a reader of the repo's history. Say nothing of this run, the card's number or the instance.
 
 ## Rules
 

@@ -11,7 +11,8 @@
 #   and the card's word kiln-case-<name>, if it has one, and appends a line to
 #   NOTES.md, the change a spec run must not save;
 # - implement: it appends a line to NOTES.md, "A fix after the review." when it
-#   is told a last review, and writes /kiln/out/report.md;
+#   is told a last review, and writes /kiln/out/report.md and
+#   /kiln/out/pull-request.md;
 # - review: it writes /kiln/out/review.md, whose first line is "Verdict: goes
 #   back" for a card with kiln-stand-in-goesback whose change has no fix yet,
 #   and "Verdict: passes" otherwise, and appends a line to NOTES.md, which a
@@ -52,7 +53,8 @@ case "$instruction" in
             *"## The last review"*) printf 'A fix after the review.\n' >> NOTES.md ;;
             *) printf 'A line from the implement run.\n' >> NOTES.md ;;
         esac
-        printf '# Report %s\n\nAppended a line to NOTES.md.\n' "$word" > /kiln/out/report.md ;;
+        printf '# Report %s\n\nAppended a line to NOTES.md.\n' "$word" > /kiln/out/report.md
+        printf 'Adds a line to NOTES.md (%s).\n\nChecked by reading NOTES.md.\n' "$word" > /kiln/out/pull-request.md ;;
     "# Review a change"*)
         case "$instruction" in
             *"A fix after the review."*) printf 'Verdict: passes\n\nThe fix is in.\n' ;;

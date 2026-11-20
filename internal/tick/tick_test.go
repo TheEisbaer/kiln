@@ -17,6 +17,7 @@ import (
 
 	"github.com/TheEisbaer/kiln/instructions"
 	"github.com/TheEisbaer/kiln/internal/run"
+	"github.com/TheEisbaer/kiln/internal/seal"
 	"github.com/TheEisbaer/kiln/internal/store"
 )
 
@@ -39,6 +40,23 @@ type child struct {
 	// GoneDir starts core in a working directory of its own, removed before
 	// the core starts, as one started in a directory removed later is.
 	GoneDir bool
+	// NoEngine starts core on an engine that holds no runs and starts none,
+	// for a test of publishing without the container engine.
+	NoEngine bool
+}
+
+// noEngine is an engine with no runs, which starts none.
+type noEngine struct{}
+
+func (noEngine) ListRuns(context.Context, string) ([]string, error)         { return nil, nil }
+func (noEngine) RemoveRun(context.Context, string, string) error            { return nil }
+func (noEngine) InspectRun(context.Context, string) (*seal.RunState, error) { return nil, nil }
+func (noEngine) Remove(context.Context, run.Inputs) error                   { return nil }
+func (noEngine) ReadDocument(string, string, string) (run.Document, error) {
+	return run.Document{}, errors.New("no engine in this test")
+}
+func (noEngine) Carry(context.Context, run.Inputs, func() error, io.Writer) (run.Verdict, error) {
+	return run.Verdict{}, errors.New("no engine in this test")
 }
 
 // exitAtPoint is the status with which the binary exits at a point, as a kill
@@ -75,6 +93,7 @@ func asKiln(spec string) int {
 		return 0
 	case "core":
 		interval = testInterval
+		fetchEvery = 4 * testInterval
 		if c.GoneDir {
 			dir, err := os.MkdirTemp("", "kiln-ticktest-gone-")
 			if err == nil {
@@ -119,7 +138,11 @@ func asKiln(spec string) int {
 				return nil
 			})
 		}
-		if err := Core(ctx, c.Config, os.Stdout, os.Stderr); err != nil {
+		var eng engine = sealed{}
+		if c.NoEngine {
+			eng = noEngine{}
+		}
+		if err := runCore(ctx, c.Config, os.Stdout, os.Stderr, eng, interval); err != nil {
 			fmt.Fprintln(os.Stderr, "kiln core:", err)
 			return 1
 		}
