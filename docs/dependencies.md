@@ -34,6 +34,13 @@ not read by the check command.
 - **Why this one:** It is the Git host's own action and the common way to do this; it is pinned by commit (`actions/checkout` v7.0.1, `3d3c42e5aac5ba805825da76410c181273ba90b1`) because a tag can move.
 - **Licence:** MIT.
 
+### The cache actions
+
+- **For:** Restoring and saving the two caches in `.github/workflows/`, the toolchain image and Go's build cache: `actions/cache/restore` in both workflows, `actions/cache/save` in `cache.yml` only.
+- **Looked at:** `docker/build-push-action` with BuildKit's `gha` backend, which needs a second builder or the containerd image store, the cache token in the build's step, and changes to every image build in the tests; calling the cache service by hand.
+- **Why this one:** It is the Git host's own action, it has restore and save as separate actions, and it honours `cache-mode`. Pinned by commit (`actions/cache` v6.1.0, `55cc8345863c7cc4c66a329aec7e433d2d1c52a9`) because a tag can move.
+- **Licence:** MIT.
+
 ### Claude Code
 
 - **For:** The agent in every run (ADR 0002), installed by Kiln's layer of the run image (`images/run/`) at a pinned version.
