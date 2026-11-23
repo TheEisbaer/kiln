@@ -4,7 +4,7 @@ status: accepted
 
 # The core pushes the Claude credential to the proxy; the renewable secret never enters a container
 
-The proxy is a container (ADR 0034), while whatever yields the developer's Claude credential runs on their machine. The instance therefore names one command that prints a credential. The core runs it and hands the result to the proxy through the container engine, into the proxy's container, regularly and whenever the proxy reports that the credential was refused. A command that fails means the credential is unavailable, and the instance pauses (ADR 0016).
+The proxy is a container (ADR 0034), while whatever yields the developer's Claude credential runs on their machine. The instance therefore names one command that prints a credential. The core runs it and hands the result to the proxy through the container engine, into the proxy's container, regularly and whenever a run's output shows that the credential was refused. A command that fails means the credential is unavailable, and the instance pauses (ADR 0016).
 
 This is all Kiln knows about a setup's sign-in (ADR 0017, ADR 0024): a command that prints a credential, the same contract Claude Code has for its own key helper. In the developer's setup the existing helper already is such a command; it renews silently and fails without a terminal when a browser sign-in would be needed.
 
