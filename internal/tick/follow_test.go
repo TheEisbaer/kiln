@@ -39,7 +39,9 @@ type fakeEngine struct {
 	carried    map[int64]int     // the calls of Carry so far, by card
 	twice      []int64           // the cards that had two calls of Carry at once
 	removed    []string          // the runs RemoveRun removed
-	lists      int               // the calls of ListRuns, one per tick
+	lists      int               // the calls of ListRuns, one per tick and one per comparison
+	listFails  int               // the calls of ListRuns still to fail
+	inspects   int               // the calls of InspectRun
 	gates      map[string]chan struct{}
 	held       map[string]bool      // the points that hold a card's run, as <card>/<point>
 	fail       map[int64]bool       // the cards whose runs fail
@@ -145,10 +147,16 @@ func (e *fakeEngine) wait(ctx context.Context, card int64, point string) error {
 func (e *fakeEngine) ListRuns(_ context.Context, instance string) ([]string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.lists == 0 {
+	// The comparison before the report lists the runs as well, before the
+	// proxy is kept; the first tick is the first list after it.
+	if e.firstTick < 0 && len(e.keeps) > 0 {
 		e.firstTick = len(e.pushes)
 	}
 	e.lists++
+	if e.listFails > 0 {
+		e.listFails--
+		return nil, errors.New("the engine does not answer, as the test has it")
+	}
 	var ids []string
 	for id := range e.containers {
 		if strings.HasPrefix(id, instance+"-") {
@@ -170,6 +178,7 @@ func (e *fakeEngine) RemoveRun(_ context.Context, id, _ string) error {
 func (e *fakeEngine) InspectRun(_ context.Context, id string) (*seal.RunState, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.inspects++
 	if status, ok := e.containers[id]; ok {
 		return &seal.RunState{Status: status}, nil
 	}
@@ -464,7 +473,7 @@ func (b *bench) start(t *testing.T, e *fakeEngine, runs int) *running {
 	r := &running{cancel: cancel, done: make(chan error, 1), out: &bytes.Buffer{}}
 	cfg := b.cfg
 	cfg.Runs = runs
-	go func() { r.done <- runCore(ctx, cfg, r.out, r.out, e, 5*time.Millisecond, b.clock) }()
+	go func() { r.done <- runCore(ctx, cfg, r.out, r.out, e, 5*time.Millisecond, b.clock, nil) }()
 	e.waitTicks(t, 1) // a core that cannot start says so here, not in a wait for its runs
 	t.Cleanup(func() {
 		cancel()
@@ -807,7 +816,7 @@ func TestFollowersRefusedStart(t *testing.T) {
 func TestRunsRefused(t *testing.T) {
 	for _, n := range []int{0, -1, MaxRuns + 1} {
 		data := filepath.Join(t.TempDir(), "data")
-		err := runCore(t.Context(), Config{Data: data, Repo: "/repo.git", Model: "m", Runs: n}, io.Discard, io.Discard, newFakeEngine(), time.Millisecond, realClock{})
+		err := runCore(t.Context(), Config{Data: data, Repo: "/repo.git", Model: "m", Runs: n}, io.Discard, io.Discard, newFakeEngine(), time.Millisecond, realClock{}, nil)
 		if err == nil || !strings.Contains(err.Error(), "--runs") {
 			t.Errorf("--runs %d: %v", n, err)
 		}

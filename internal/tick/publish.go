@@ -159,26 +159,14 @@ func hasOrigin(ctx context.Context, repo string) (bool, error) {
 	return err == nil, err
 }
 
-// fetchMain fetches origin's main into the repo's main, replacing it. Nothing
-// it starts can ask anything: it runs in a session of its own, with no
-// terminal, git never prompts, ssh runs in batch mode and never asks for a
-// passphrase by a program either, and when the context ends the whole session
-// is killed, ssh included, and its pipes are let go after a moment. The ssh
-// command is the developer's GIT_SSH_COMMAND, or the repo's core.sshCommand,
-// or ssh, with -o BatchMode=yes after it.
+// fetchMain fetches origin's main into the repo's main, replacing it, with
+// the protections of hostGit.
 func fetchMain(ctx context.Context, repo string) error {
-	ssh := os.Getenv("GIT_SSH_COMMAND")
-	if ssh == "" {
-		configured, err := gitLine(ctx, repo, "config", "--default", "", "--get", "core.sshCommand")
-		if err != nil {
-			return err
-		}
-		ssh = cmp.Or(configured, "ssh")
-	}
-	cmd := gitCommand(ctx, repo, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+	cmd, err := hostGit(ctx, repo, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
 		"origin", "+refs/heads/main:refs/heads/main")
-	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND="+ssh+" -o BatchMode=yes", "SSH_ASKPASS_REQUIRE=never")
-	detach(cmd)
+	if err != nil {
+		return err
+	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -188,6 +176,29 @@ func fetchMain(ctx context.Context, repo string) error {
 		return fmt.Errorf("git fetch: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// hostGit is a git command in the repo that reaches the Git host, by
+// fetchMain and by the comparison before the report (compare.go). Nothing it
+// starts can ask anything: it runs in a session of its own, with no
+// terminal, git never prompts, ssh runs in batch mode and never asks for a
+// passphrase by a program either, and when the context ends the whole
+// session is killed, ssh included, and its pipes are let go after a moment.
+// The ssh command is the developer's GIT_SSH_COMMAND, or the repo's
+// core.sshCommand, or ssh, with -o BatchMode=yes after it.
+func hostGit(ctx context.Context, repo string, args ...string) (*exec.Cmd, error) {
+	ssh := os.Getenv("GIT_SSH_COMMAND")
+	if ssh == "" {
+		configured, err := gitLine(ctx, repo, "config", "--default", "", "--get", "core.sshCommand")
+		if err != nil {
+			return nil, err
+		}
+		ssh = cmp.Or(configured, "ssh")
+	}
+	cmd := gitCommand(ctx, repo, args...)
+	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND="+ssh+" -o BatchMode=yes", "SSH_ASKPASS_REQUIRE=never")
+	detach(cmd)
+	return cmd, nil
 }
 
 // detach runs a command in a session of its own, with no terminal to read or

@@ -34,10 +34,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/TheEisbaer/kiln/instructions"
+	"github.com/TheEisbaer/kiln/internal/launcher"
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/seal"
 	"github.com/TheEisbaer/kiln/internal/store"
@@ -82,6 +84,9 @@ type Config struct {
 	// The developer's publish command, run with sh -c to publish a card
 	// (card 19, see runPublish); empty, no card is published.
 	PublishCommand string
+	// Version is the commit the program was built from, 40 lowercase hex
+	// digits; anything else counts as none, a program built by hand.
+	Version string
 }
 
 // The limit of runs in flight: DefaultRuns unless `kiln core --runs` says
@@ -235,22 +240,46 @@ func AddCard(dir, text string) (int64, error) {
 	return c.ID, nil
 }
 
-// Core is `kiln core`: under the lock, it opens the store, keeps the proxy and
-// gives it a credential (credential.go), serves the screen on cfg.Listen, if
-// it is set, and ticks every interval until the context is cancelled, with a
-// follower beside the tick for every run in flight and the renewal of the
-// credential beside it as well. A step
-// that fails prints its error, changes nothing, and is tried again on the
-// next tick. The screen's handlers and the followers share the store with the
-// tick (see store.Store). Once the context is cancelled, Core returns when
-// every follower has returned; the runs go on in their containers.
+// Core is `kiln core`. Under the lock it opens the store, serves the screen
+// on cfg.Listen, if it is set, without accepting moves, and compares the
+// store, the container engine and the Git host once (ADR 0035, ADR 0036). It
+// then reports healthy to its launcher, if it has one, and only then acts: it
+// accepts moves, keeps the proxy and gives it a credential (credential.go),
+// and ticks every interval until the context is cancelled, with a follower
+// beside the tick for every run in flight and the renewal of the credential
+// beside it as well. A step that fails prints its error, changes nothing, and
+// is tried again on the next tick. The screen's handlers and the followers
+// share the store with the tick (see store.Store). Once the context is
+// cancelled, or the launcher is gone, Core returns when every follower has
+// returned; the runs go on in their containers.
 func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
-	return runCore(ctx, cfg, out, errOut, sealed{}, interval, realClock{})
+	return startCore(ctx, cfg, out, errOut, sealed{}, interval, realClock{})
 }
 
-// runCore is Core on an engine, with a tick every interval, and the renewal
-// of the credential on a clock.
-func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine, every time.Duration, clk clock) error {
+// startCore is Core on an engine: it takes the core's end of the socket to
+// its launcher first, before anything is started, so that no child of the
+// core holds it or sees its variable (launcher.FromEnv), and runs the core.
+func startCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine, every time.Duration, clk clock) error {
+	l, err := launcher.FromEnv()
+	if err != nil {
+		return err
+	}
+	if l == nil {
+		return runCore(ctx, cfg, out, errOut, eng, every, clk, nil)
+	}
+	return runCore(ctx, cfg, out, errOut, eng, every, clk, l)
+}
+
+// reporter is the core's launcher, a *launcher.Client. Only the test gives a
+// core another.
+type reporter interface {
+	Report() error
+	Gone() <-chan struct{}
+}
+
+// runCore is Core on an engine, with a tick every interval, the renewal of
+// the credential on a clock, and the launcher it reports to, nil for none.
+func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine, every time.Duration, clk clock, l reporter) error {
 	// Nothing the core does depends on the directory it was started in, which
 	// may be removed while it runs: its paths are made absolute while that
 	// directory is there, and every command it runs, through the seal, runs in
@@ -300,6 +329,21 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	// of two runs do not mix.
 	var mu sync.Mutex
 	out, errOut = lockedWriter{&mu, out}, lockedWriter{&mu, errOut}
+	// A core whose launcher is gone ends as on SIGTERM, so that it never runs
+	// without the launcher that would start it again.
+	if l != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-l.Gone():
+				fmt.Fprintln(out, "kiln core: the launcher is gone; the core ends, and the runs go on")
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
 	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity(),
 		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}, publishing: map[int64]bool{},
 		clock: clk, renewNow: make(chan struct{}, 1)}
@@ -307,16 +351,31 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	if cfg.PublishCommand != "" {
 		fmt.Fprintln(out, "kiln core: a card is published with the publish command")
 	}
-	// The proxy, with a credential before the first tick.
-	if err := c.keepProxy(ctx); err != nil {
-		return err
-	}
+	// The screen, which refuses moves until the report.
 	if cfg.Listen != "" {
 		stop, err := c.serve()
 		if err != nil {
 			return err
 		}
 		defer stop()
+	}
+	// One full comparison, then the report; until then the core changes
+	// nothing outside the store (ADR 0036, rule 3).
+	if !c.compareUntilPassed(ctx, every) {
+		return nil
+	}
+	at("before-report")
+	if l != nil {
+		if err := l.Report(); err != nil {
+			fmt.Fprintln(out, "kiln core: the report did not reach the launcher, which is gone; the core ends:", err)
+			return nil
+		}
+	}
+	fmt.Fprintln(out, "kiln core: compared the store, the container engine and the Git host; healthy")
+	c.acting.Store(true)
+	// The proxy, with a credential before the first tick.
+	if err := c.keepProxy(ctx); err != nil {
+		return err
 	}
 	// The followers end with the context, and the store is closed after them.
 	defer c.followers.Wait()
@@ -356,8 +415,14 @@ func (l lockedWriter) Write(p []byte) (int, error) {
 // core is one running core.
 type core struct {
 	Config
-	store       *store.Store
-	instance    string
+	store    *store.Store
+	instance string
+	// acting is set once the core has reported: the screen then accepts
+	// moves (ADR 0036, rule 3).
+	acting atomic.Bool
+	// screen is the address the screen listens on, with its port; empty
+	// without one.
+	screen      string
 	out, errOut io.Writer
 	activity    *web.Activity // of the runs the followers follow, for the screen
 	changes     changes       // the last change the screen asked for, per card
@@ -469,7 +534,8 @@ func (c *core) serve() (func(), error) {
 		return nil, fmt.Errorf("the screen: %w", err)
 	}
 	info := web.Info{Instance: c.instance, Repo: c.Repo, Model: c.model(store.Spec), ImplementModel: c.model(store.Implement),
-		ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change, Page: c.Page, Publishing: c.PublishCommand != ""}
+		ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change, Page: c.Page, Publishing: c.PublishCommand != "",
+		Version: versionOf(c.Version), Accepting: c.acting.Load}
 	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()
@@ -477,6 +543,7 @@ func (c *core) serve() (func(), error) {
 	}
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, ErrorLog: log.New(c.errOut, "kiln core: the screen: ", 0)}
 	go srv.Serve(ln)
+	c.screen = ln.Addr().String()
 	fmt.Fprintf(c.out, "kiln core: the screen is at http://%s/\n", ln.Addr())
 	if c.Page != "" {
 		fmt.Fprintf(c.out, "kiln core: the page is read from %s on every request\n", c.Page)

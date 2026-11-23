@@ -145,7 +145,16 @@ type Info struct {
 	// Publishing is set when the core has a publish command: the table of
 	// moves then has publish (card 19).
 	Publishing bool
+	// Version is the commit the core's program was built from, or empty for
+	// a program built by hand; the board's header shows it.
+	Version string
+	// Accepting says whether the core accepts moves: until its report, every
+	// POST is refused (ADR 0036, rule 3). Nil accepts.
+	Accepting func() bool
 }
+
+// starting is the sentence of a move refused before the core's report.
+const starting = "Kiln is starting, and accepts moves once it has compared the store, the container engine and the Git host"
 
 // Change is where a card's change is and what it is: its branch in the
 // instance's copy of the repo and the commit it is at, the branch's commits
@@ -223,6 +232,10 @@ func Handler(s *store.Store, info Info, act *Activity, addr string) (http.Handle
 				fail(w, http.StatusForbidden, "the request's Origin is not the page's")
 				return
 			}
+			if info.Accepting != nil && !info.Accepting() {
+				fail(w, http.StatusServiceUnavailable, starting)
+				return
+			}
 			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -274,12 +287,15 @@ func (h *handler) buildNow() string {
 // The API's JSON.
 type (
 	boardJSON struct {
-		Instance string     `json:"instance"`
-		Build    string     `json:"build"`
-		Repo     string     `json:"repo"`
-		Models   modelsJSON `json:"models"`
-		Runs     int        `json:"runs"`
-		Now      time.Time  `json:"now"`
+		Instance string `json:"instance"`
+		Build    string `json:"build"`
+		// Version is the commit the core was built from, empty for a
+		// program built by hand.
+		Version string     `json:"version"`
+		Repo    string     `json:"repo"`
+		Models  modelsJSON `json:"models"`
+		Runs    int        `json:"runs"`
+		Now     time.Time  `json:"now"`
 		// Paused is why the instance is paused, empty when it is not: then
 		// no run starts (ADR 0016, ADR 0055).
 		Paused string     `json:"paused"`
@@ -477,7 +493,7 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Repo: h.info.Repo, Models: h.models(), Runs: h.info.Runs, Now: time.Now().UTC(),
+	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Version: h.info.Version, Repo: h.info.Repo, Models: h.models(), Runs: h.info.Runs, Now: time.Now().UTC(),
 		Paused: paused, Cards: []tileJSON{}}
 	for _, c := range cards {
 		b.Cards = append(b.Cards, tile(c))
