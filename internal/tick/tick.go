@@ -769,14 +769,58 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 		d, kept = d.withText(text)
 	}
 
+	var rule *store.Rule
+	if f.card.Stage == store.Review && d.to == reviewPassed && c.PublishCommand != "" {
+		if rule, err = c.passedRule(ctx, id); err != nil {
+			return fmt.Errorf("the branch of run %s: %w; it is read again on the next tick", row.ID, err)
+		}
+	}
+
 	f.mark("before-end")
-	if _, err := c.store.EndRun(row.ID, d.ending, d.reason, d.to, d.doc, kept); err != nil {
+	if rule != nil {
+		_, err = c.store.EndRunByRule(row.ID, d.ending, d.reason, d.to, *rule, d.doc, kept)
+	} else {
+		_, err = c.store.EndRun(row.ID, d.ending, d.reason, d.to, d.doc, kept)
+	}
+	if err != nil {
 		return err
 	}
 	f.mark("after-end")
 	c.activity.Drop(row.ID)
 	fmt.Fprintf(c.out, "card %d: run %s %s: %s\n", id, row.ID, d.ending, d.reason)
+	if rule != nil {
+		if rule.Publish {
+			fmt.Fprintf(c.out, "card %d: the review passed; published by the rule\n", id)
+		} else {
+			fmt.Fprintf(c.out, "card %d: %s\n", id, rule.Reason)
+		}
+	}
 	return c.engine.Remove(ctx, in)
+}
+
+// passedRule is the rule's step for a card whose review passed, with a publish
+// command: the card goes to the Git host to be published, unless the change on
+// its branch touches the workflow files, which wait for the developer's yes
+// (ADR 0060), or the branch is gone. It reads the branch and changes nothing.
+func (c *core) passedRule(ctx context.Context, id int64) (*store.Rule, error) {
+	branch := branchOf(id)
+	tip, err := branchTip(ctx, c.Repo, branch)
+	if err != nil {
+		return nil, err
+	}
+	if tip == "" {
+		return &store.Rule{To: reviewPassed, Reason: run.Printable(
+			"the review passed; the card's branch " + branch + " does not exist, so the rule does not publish it")}, nil
+	}
+	files, err := workflowFiles(ctx, c.Repo, tip)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) > 0 {
+		return &store.Rule{To: reviewPassed, Reason: run.Printable(
+			"the review passed; the change touches workflow files and waits for your yes before it is published: " + fileNames(files))}, nil
+	}
+	return &store.Rule{To: atHost, Reason: "the review passed; the core publishes the change by the rule", Publish: true}, nil
 }
 
 // hold stops a card that waits for a run, before the run is in the store: the

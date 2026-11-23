@@ -735,10 +735,10 @@ func TestTick(t *testing.T) {
 		}
 	})
 
-	// Spec, approval, implement, review, and then the developer's publish: the
-	// stand-in for the publish command "merges" by moving origin's main to the
-	// commit it is given, and after the next fetch the card is done, merged
-	// (card 19). No key, no token and no Git host: origin is a bare repo here.
+	// Spec, approval, implement and review, which the core publishes by itself
+	// once the review passes: the stand-in for the publish command "merges" by
+	// moving origin's main to the commit it is given, and after the next fetch
+	// the card is done, merged. No key, no token and no Git host: origin is a bare repo here.
 	t.Run("published and merged", func(t *testing.T) {
 		t.Parallel()
 		c := f.newCase(t, f.standIn)
@@ -748,28 +748,18 @@ func TestTick(t *testing.T) {
 		dir := t.TempDir()
 		f.card(t, c, "Add a line to NOTES.md. kiln-case-publish")
 		f.specAndApprove(t, c)
-		core, done := f.core(t, c, "")
-		f.waitState(t, c, reviewPassed, 3)
-		f.stop(t, core, done)
-		s := f.open(t, c)
-		_, err := s.DecideWith(1, store.Publish, "", store.Options{Publishing: true})
-		s.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-
 		cfg := f.config(c)
 		cfg.PublishCommand = `set -eu
 env > ` + shellWord(dir) + `/env
 cp "$KILN_TEXT_FILE" ` + shellWord(dir) + `/text
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git --git-dir="$KILN_REPO" push --quiet origin "$KILN_COMMIT:refs/heads/main"
 echo "https://git.example/pull/$KILN_CARD"`
-		core, done = f.start(t, child{Command: "core", Config: cfg})
+		core, done := f.start(t, child{Command: "core", Config: cfg})
 		f.waitState(t, c, store.State{Stage: store.Done, WaitsFor: store.Nothing}, 3)
 		f.stop(t, core, done)
 
 		tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/approval by run",
-			"review/host by developer", "review/host by rule", "done/nothing by host"},
+			"review/host by rule", "review/host by rule", "done/nothing by host"},
 			[]string{"spec 1", "report 2", "pull-request 2", "review 3"})
 		e := f.lastEntry(t, c)
 		if e.Reason != "merged" {
@@ -795,7 +785,7 @@ echo "https://git.example/pull/$KILN_CARD"`
 		if text := string(readFile(t, filepath.Join(dir, "text"))); text != "Adds a line to NOTES.md (kiln-case-publish).\n\nChecked by reading NOTES.md.\n" {
 			t.Errorf("the pull request's text is %q", text)
 		}
-		s = f.open(t, c)
+		s := f.open(t, c)
 		defer s.Close()
 		if pub, err := s.Publication(1); err != nil || pub.Address != "https://git.example/pull/1" || pub.Commit != commit {
 			t.Errorf("the publication is %+v (%v)", pub, err)
