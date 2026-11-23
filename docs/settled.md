@@ -121,6 +121,9 @@ A line says what was settled and ends with the date in brackets, for example (20
 - That a send-back happened is read from the number of send-backs on the card (ADR 0054). A session that is resumed after a send-back continues on the stronger model (ADR 0053).
 - The core compares the model that a run's first event, `system/init`, names with the one it gave. A run on another model is stopped, saved and recorded with the model seen, and the command exits non-zero. Claude Code 2.1.326's output does not show the effort, so the effort recorded is the one given.
 - The model of each stage is a flag of the core, `--model` for spec and `--implement-model` and `--review-model`, which default to `--model`, and the effort is fixed per stage: spec `high`, implement `medium`, review `high`. `kiln core --effort` is gone; `kiln run` by hand keeps its `--effort` (card 14, 2026-11-19).
+- An implement run starts on the model the approved spec names on its line `Model for implement: <identifier>`, with or without backticks, when the identifier is one of `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`, the three `instructions/spec.md` allows. The line is read like the title's line: in the head before the first `## `, a list item allowed, the first such line deciding. Otherwise the run uses `--implement-model`, which is now only that fallback. The model is chosen when the run's row is built and kept in it, so a run in flight keeps its model across a restarted core. Spec and review runs keep their flags (2026-11-23).
+- Until a card carries its number of send-backs (ADR 0054), the spec's model holds for every implement run of a card, after a send-back and after main moved as well; rule 3 is not built yet (2026-11-23).
+- The board's header says `implement on the model its spec names, else <--implement-model>` (2026-11-23).
 
 ## ADR 0031: Checks on Kiln's own repo stay fast by structure, not by a stopwatch
 

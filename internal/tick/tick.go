@@ -111,6 +111,22 @@ func (c Config) model(s store.Stage) string {
 	return c.Model
 }
 
+// modelOf is the model of the run that starts for the card: for an implement
+// card the model its approved spec names, if it names one of run.ImplementModels,
+// else the stage's flag. It is kept in the run's row, so a run in flight keeps it.
+func (c *core) modelOf(card store.Card) (string, error) {
+	if card.Stage == store.Implement {
+		spec, err := c.store.Spec(card.ID)
+		if err != nil {
+			return "", err
+		}
+		if m := run.ModelOf(spec.Text); m != "" {
+			return m, nil
+		}
+	}
+	return c.model(card.Stage), nil
+}
+
 // maxDiff is the largest change a review run is told: 1 MiB of diff.
 const maxDiff = 1 << 20
 
@@ -635,8 +651,12 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 		if held != "" {
 			return nil, c.hold(card, held)
 		}
+		model, err := c.modelOf(card)
+		if err != nil {
+			return nil, err
+		}
 		row = &store.RunRow{ID: fmt.Sprintf("%s-%d-%d", c.instance, id, n+1), Card: id,
-			Commit: commit, Model: c.model(card.Stage), Effort: st.effort}
+			Commit: commit, Model: model, Effort: st.effort}
 	}
 	in, held, err := c.inputs(ctx, *row, card, inFlight)
 	if err != nil {

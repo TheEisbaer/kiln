@@ -6,8 +6,11 @@ import (
 	"crypto/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/TheEisbaer/kiln/instructions"
 )
 
 // entry is one entry of a tar the test makes.
@@ -254,5 +257,57 @@ func TestTitleOf(t *testing.T) {
 	}
 	if got := TitleOf(head + "Pull request title: `" + strings.Repeat("a", 256) + "`\n"); len(got) != 256 {
 		t.Errorf("a title of 256 bytes gave %d bytes", len(got))
+	}
+}
+
+func TestModelOf(t *testing.T) {
+	for _, c := range []struct {
+		what, spec, want string
+	}{
+		{"plain", "# Spec\n\nModel for implement: claude-sonnet-5-5\n", "claude-sonnet-5-5"},
+		{"trailing period", "Model for implement: claude-haiku-5-5.\n", "claude-haiku-5-5"},
+		{"comma and why", "Model for implement: claude-haiku-5-5, as the change is small.\n", "claude-haiku-5-5"},
+		{"dash and why", "Model for implement: claude-opus-5-5 — the tick is subtle.\n", "claude-opus-5-5"},
+		{"parenthesis", "Model for implement: claude-opus-5-5 (subtle)\n", "claude-opus-5-5"},
+		{"backticks", "Model for implement: `claude-sonnet-5-5`, because it is small.\n", "claude-sonnet-5-5"},
+		{"list item", "- Model for implement: claude-opus-5-5\n\n## 1. What\n", "claude-opus-5-5"},
+		{"CRLF", "# Spec\r\n\r\nModel for implement: claude-opus-5-5\r\n\r\n## 1.\r\n", "claude-opus-5-5"},
+		{"not allowed", "Model for implement: claude-opus-5-6\n", ""},
+		{"an alias", "Model for implement: sonnet\n", ""},
+		{"a version suffix", "Model for implement: claude-opus-5-5.1\n", ""},
+		{"a letter after", "Model for implement: claude-opus-5-5x\n", ""},
+		{"case", "Model for implement: Claude-Opus-5-5\n", ""},
+		{"no line", "# Spec\n\nText.\n", ""},
+		{"after the first ##", "# Spec\n\n## 1. What\n\nModel for implement: claude-opus-5-5\n", ""},
+		{"unclosed backtick", "Model for implement: `claude-opus-5-5\n", ""},
+		{"invalid first line", "Model for implement: gpt\nModel for implement: claude-opus-5-5\n", ""},
+		{"bold label", "**Model for implement:** claude-haiku-5-5\n", ""},
+		{"empty", "Model for implement:\n", ""},
+	} {
+		if got := ModelOf(c.spec); got != c.want {
+			t.Errorf("%s: ModelOf = %q, want %q", c.what, got, c.want)
+		}
+	}
+}
+
+func TestImplementModelsAreTheInstructions(t *testing.T) {
+	var line string
+	for _, l := range strings.Split(instructions.Spec, "\n") {
+		if strings.HasPrefix(l, "- one line `Model for implement:") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatal("instructions/spec.md has no line that starts with - one line `Model for implement:")
+	}
+	var got []string
+	for _, part := range strings.Split(line, "`")[1:] {
+		if strings.HasPrefix(part, "claude-") {
+			got = append(got, part)
+		}
+	}
+	if !slices.Equal(got, ImplementModels) {
+		t.Errorf("the line names %q, ImplementModels is %q", got, ImplementModels)
 	}
 }
