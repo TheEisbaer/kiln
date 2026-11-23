@@ -354,6 +354,15 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 		return err
 	}
 	defer s.Close()
+	// After a failed update automatic merging is off until the developer
+	// turns it on again (ADR 0019, rule 3), and the core does not update to
+	// the failed commit while it is off (update.go).
+	if failed.reason != "" {
+		if err := turnMergingOff(s, failed, cfg.Version); err != nil {
+			return fmt.Errorf("automatic merging is not turned off: %w", err)
+		}
+		fmt.Fprintln(out, "kiln core: automatic merging is off until you turn it on from the screen")
+	}
 	instance, err := s.Instance()
 	if err != nil {
 		return err
@@ -380,7 +389,7 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity(),
 		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}, publishing: map[int64]bool{},
 		clock: clk, renewNow: make(chan struct{}, 1)}
-	c.update.launched, c.update.failed, c.update.built = l != nil, failed.commit(), make(chan string, 1)
+	c.update.launched, c.update.built = l != nil, make(chan string, 1)
 	fmt.Fprintf(out, "kiln core: instance %s, data %s, up to %d runs at once\n", instance, cfg.Data, cfg.Runs)
 	if cfg.PublishCommand != "" {
 		fmt.Fprintln(out, "kiln core: a card is published with the publish command")
@@ -1005,8 +1014,18 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 // passedRule is the rule's step for a card whose review passed, with a publish
 // command: the card goes to the Git host to be published, unless the change on
 // its branch touches the workflow files, which wait for the developer's yes
-// (ADR 0060), or the branch is gone. It reads the branch and changes nothing.
+// (ADR 0060), or the branch is gone, or automatic merging is off after a
+// failed update (ADR 0019, rule 3). It reads the store and the branch and
+// changes nothing.
 func (c *core) passedRule(ctx context.Context, id int64) (*store.Rule, error) {
+	merging, err := c.store.Merging()
+	if err != nil {
+		return nil, err
+	}
+	if merging.Off != "" {
+		return &store.Rule{To: reviewPassed, Reason: "the review passed; automatic merging is off after a failed update, " +
+			"so the rule does not publish it, and it waits for you"}, nil
+	}
 	branch := branchOf(id)
 	tip, err := branchTip(ctx, c.Repo, branch)
 	if err != nil {

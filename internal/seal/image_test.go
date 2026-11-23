@@ -14,7 +14,8 @@ import (
 // engine and the toolchain image. It builds an image on the toolchain from a
 // tar on standard input under a version's tag, with no network for its RUN,
 // which sees the loopback interface only; then it tags the image to its plain
-// name and removes the tag, as the new core's promotion does.
+// name and removes the tag, as the new core's promotion does. Its cleanup
+// leaves no image of its name on the engine.
 //
 // It runs only with KILN_ENGINE_TESTS=1, and then fails, not skips, when the
 // engine cannot be reached.
@@ -29,23 +30,7 @@ func TestImage(t *testing.T) {
 	name := "kiln-sealtest-" + randomID(t) + "-image"
 	tag := "0123456789ab"
 	tagged := name + ":" + tag
-	t.Cleanup(func() {
-		// The plain name is looked up as itself, since ImageID refuses the
-		// tag latest; the engine's reference to remove is name:latest.
-		for _, ref := range [][2]string{{tagged, tagged}, {name, name + ":latest"}} {
-			id, err := ImageID(context.Background(), ref[0])
-			if err != nil {
-				t.Errorf("cleanup: %v", err)
-				continue
-			}
-			if id == "" {
-				continue
-			}
-			if _, err := docker(context.Background(), nil, "image", "rm", ref[1]); err != nil {
-				t.Errorf("cleanup: %v", err)
-			}
-		}
-	})
+	t.Cleanup(func() { removeImagesOf(t, name) })
 	src := imageTar(t, map[string]string{
 		"Dockerfile": "ARG TOOLCHAIN\nFROM ${TOOLCHAIN}\nRUN [ \"$(grep -c : /proc/net/dev)\" = 1 ]\n",
 	})
@@ -130,6 +115,34 @@ func TestImageNames(t *testing.T) {
 	}
 	if _, err := ImageTags(ctx, "kiln-proxy:latest"); err == nil {
 		t.Error("ImageTags of a reference was accepted")
+	}
+}
+
+// removeImagesOf removes every tagged reference of a test's image name, by
+// reference, never by ID and never with --force, and fails the test with what
+// is left of the name afterwards.
+func removeImagesOf(t *testing.T, name string) {
+	t.Helper()
+	ctx := context.Background()
+	refs, err := docker(ctx, nil, "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", name)
+	if err != nil {
+		t.Errorf("cleanup: %v", err)
+		return
+	}
+	for _, ref := range strings.Fields(refs) {
+		if strings.HasSuffix(ref, ":<none>") {
+			continue
+		}
+		if _, err := docker(ctx, nil, "image", "rm", ref); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	}
+	left, err := docker(ctx, nil, "image", "ls", "--quiet", name)
+	if err != nil {
+		t.Errorf("cleanup: %v", err)
+	} else if left != "" {
+		refs, _ := docker(ctx, nil, "image", "ls", "--format", "{{.Repository}}:{{.Tag}} {{.ID}}", name)
+		t.Errorf("cleanup: the engine still has images of %s:\n%s", name, refs)
 	}
 }
 

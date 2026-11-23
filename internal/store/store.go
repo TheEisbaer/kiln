@@ -22,7 +22,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 10
+const version = 11
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -275,6 +275,20 @@ CREATE TABLE instance_entries (
 		// The card's number of send-backs since its spec was approved (ADR
 		// 0054); every card that was there starts at 0.
 		_, err := tx.Exec(`ALTER TABLE cards ADD COLUMN send_backs INTEGER NOT NULL DEFAULT 0`)
+		return err
+	},
+	func(tx *sql.Tx) error {
+		// Automatic merging off after a failed update (ADR 0019, rule 3): why,
+		// and the commit of the failed update, NULL while merging is on. An
+		// entry of the instance holds its whole state after the change and
+		// its cause; the pauses written before were by the rule, with
+		// merging on.
+		_, err := tx.Exec(`
+ALTER TABLE instance ADD COLUMN merging_off TEXT;
+ALTER TABLE instance ADD COLUMN failed_update TEXT;
+ALTER TABLE instance_entries ADD COLUMN cause TEXT NOT NULL DEFAULT 'rule';
+ALTER TABLE instance_entries ADD COLUMN merging_off TEXT;
+ALTER TABLE instance_entries ADD COLUMN failed_update TEXT;`)
 		return err
 	},
 }

@@ -1323,3 +1323,44 @@ func TestPublishByRuleAfterConflict(t *testing.T) {
 		t.Errorf("the history is %q", lines)
 	}
 }
+
+// TestMergingOffHoldsPublish has a review pass while automatic merging is off
+// after a failed update: the rule does not publish the card, which waits for
+// the developer, and the command never runs; "Publish" works as before.
+func TestMergingOffHoldsPublish(t *testing.T) {
+	p := newPublishing(t)
+	var card int64
+	p.with(t, func(s *store.Store) {
+		card = p.reviewing(t, s, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+		if _, err := s.TurnMergingOff("the update to b failed: it exited; the core went back to a", "b"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e := newFakeEngine()
+	core := p.start(t, e, 3)
+	e.open(card, "exit")
+	want := "the review passed; automatic merging is off after a failed update, so the rule does not publish it, and it waits for you"
+	got := p.waitFor(t, card, reviewPassed, want)
+	if got.Reason != want || got.Cause != store.CauseRule {
+		t.Errorf("the entry is %+v", got)
+	}
+	e.waitTicks(t, 10)
+	if n := p.calls(t); n != 0 {
+		t.Errorf("the command ran %d times", n)
+	}
+	p.look(t, func(s *store.Store) {
+		if c, _ := s.Card(card); c.State != reviewPassed {
+			t.Errorf("the card is in %+v", c.State)
+		}
+		p.publish(t, s, card, false)
+	})
+	p.waitFor(t, card, atHost, "published as ")
+	core.stop(t)
+	if n := p.calls(t); n != 1 {
+		t.Errorf("the command ran %d times", n)
+	}
+	lines, _ := p.states(t, card)
+	if want := []string{"review/run by run", "review/approval by run", "review/approval by rule"}; len(lines) < 3 || !slices.Equal(lines[:3], want) {
+		t.Errorf("the history is %q, want it to begin %q", lines, want)
+	}
+}

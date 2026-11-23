@@ -981,3 +981,89 @@ func TestVersion(t *testing.T) {
 		}
 	}
 }
+
+// mergingReason is why automatic merging is off in the tests of the move.
+const mergingReason = "the update to 0123456789abcdef0123456789abcdef01234567 failed: it exited; the core went back to fedcba9876543210fedcba9876543210fedcba98"
+
+// TestBoardMerging shows automatic merging off on the board, with the failed
+// commit and the move, and null while it is on; the page has its strip.
+func TestBoardMerging(t *testing.T) {
+	f := newFixture(t)
+	raw := func() map[string]json.RawMessage {
+		return decode[map[string]json.RawMessage](t, f.do(t, "GET", "/api/board", ""))
+	}
+	if got := string(raw()["merging_off"]); got != "null" {
+		t.Errorf("a new instance has merging_off %s, want null", got)
+	}
+	const failed = "0123456789abcdef0123456789abcdef01234567"
+	if _, err := f.store.TurnMergingOff(mergingReason, failed); err != nil {
+		t.Fatal(err)
+	}
+	want := mergingJSON{Reason: mergingReason, Failed: failed, Moves: []moveJSON{{Action: "merging-on", Note: store.NoNote}}}
+	if b := decode[boardJSON](t, f.do(t, "GET", "/api/board", "")); b.MergingOff == nil || !reflect.DeepEqual(*b.MergingOff, want) {
+		t.Errorf("the board says merging_off %+v, want %+v", b.MergingOff, want)
+	}
+	if err := f.store.TurnMergingOn(); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(raw()["merging_off"]); got != "null" {
+		t.Errorf("after turning merging on the board says merging_off %s, want null", got)
+	}
+	body := f.do(t, "GET", "/", "").Body.String()
+	for _, want := range []string{`<div id="merging" class="offline" role="status" hidden>`, "Turn automatic merging on", "tries that update again"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the page lacks %s", want)
+		}
+	}
+}
+
+// TestMergingOn turns automatic merging on from the screen: once, with an
+// entry by the developer; a second time it is refused, as is another action,
+// a foreign Origin, and any move before the core's report.
+func TestMergingOn(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.store.TurnMergingOff(mergingReason, "0123456789abcdef0123456789abcdef01234567"); err != nil {
+		t.Fatal(err)
+	}
+	const path, move = "/api/instance/decide", `{"action":"merging-on"}`
+
+	// Refused before the core's report, and with a foreign Origin.
+	accepting := false
+	h, err := Handler(f.store, Info{Accepting: func() bool { return accepting }}, f.act, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h = h
+	if w := f.do(t, "POST", path, move); w.Code != 503 || decode[map[string]string](t, w)["error"] != starting {
+		t.Errorf("the move while starting: %d %s", w.Code, w.Body)
+	}
+	accepting = true
+	if w := f.do(t, "POST", path, move, func(r *http.Request) { r.Header.Set("Origin", "https://evil.example") }); w.Code != 403 {
+		t.Errorf("the move with a foreign Origin: %d %s", w.Code, w.Body)
+	}
+	if w := f.do(t, "POST", path, `{"action":"x"}`); w.Code != 400 {
+		t.Errorf("the action x: %d %s", w.Code, w.Body)
+	}
+	if m, _ := f.store.Merging(); m.Off != mergingReason {
+		t.Fatalf("a refused move changed the store: %+v", m)
+	}
+	if h, _ := f.store.InstanceHistory(); len(h) != 1 {
+		t.Fatalf("a refused move wrote an entry: %+v", h)
+	}
+
+	w := f.do(t, "POST", path, move)
+	if got := decode[map[string]json.RawMessage](t, w); w.Code != 200 || string(got["merging_off"]) != "null" {
+		t.Errorf("the move: %d %s", w.Code, w.Body)
+	}
+	if h, _ := f.store.InstanceHistory(); len(h) != 2 || h[1].Cause != store.CauseDeveloper || h[1].MergingOff != "" {
+		t.Errorf("the history after the move is %+v, want an entry by the developer at the end", h)
+	}
+	w = f.do(t, "POST", path, move)
+	if got := decode[map[string]json.RawMessage](t, w); w.Code != 409 || string(got["error"]) != `"automatic merging is on"` ||
+		string(got["merging_off"]) != "null" {
+		t.Errorf("the move again: %d %s", w.Code, w.Body)
+	}
+	if h, _ := f.store.InstanceHistory(); len(h) != 2 {
+		t.Errorf("the refused move wrote an entry: %+v", h)
+	}
+}
