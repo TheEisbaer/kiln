@@ -57,6 +57,21 @@ type fakeEngine struct {
 	reviewed   map[string]string    // the review each review run was given, by the run's ID
 	saves      map[int64]bool       // the cards whose implement runs save a commit
 	models     map[string]string    // the model in the inputs of each run's Carry, by the run's ID
+	builds     []seal.Program       // the calls of Build
+	buildFails bool                 // whether a build fails
+}
+
+// Build is standInBuild, counted.
+func (e *fakeEngine) Build(_ context.Context, p seal.Program, src io.Reader, out io.Writer) error {
+	e.mu.Lock()
+	e.builds = append(e.builds, p)
+	fails := e.buildFails
+	e.mu.Unlock()
+	if fails {
+		io.Copy(io.Discard, src)
+		return errors.New("the build failed, as the test has it")
+	}
+	return standInBuild(p, src, out)
 }
 
 func newFakeEngine() *fakeEngine {

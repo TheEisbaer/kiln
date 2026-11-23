@@ -71,6 +71,11 @@ func (s *socketLauncher) Report() error {
 	return err
 }
 
+func (s *socketLauncher) AskReplace(path string) error {
+	_, err := s.f.Write([]byte("replace " + path + "\n"))
+	return err
+}
+
 func (s *socketLauncher) Gone() <-chan struct{} { return s.gone }
 
 // syncBuffer is a core's output, read while it runs.

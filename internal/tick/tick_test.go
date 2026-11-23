@@ -1,6 +1,7 @@
 package tick
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"errors"
@@ -43,13 +44,55 @@ type child struct {
 	// NoEngine starts core on an engine that holds no runs and starts none,
 	// for a test of publishing without the container engine.
 	NoEngine bool
+	// Builds is the file the engine's builds are counted in, a line each,
+	// with NoEngine.
+	Builds string
 	// Reviews starts core on the fake engine, with every run's exit open,
 	// and these first lines of the reviews of each card.
 	Reviews map[int64][]string
 }
 
-// noEngine is an engine with no runs, which starts none.
-type noEngine struct{}
+// noEngine is an engine with no runs, which starts none. Its Build is
+// standInBuild, and appends a line to the file builds, if it is set.
+type noEngine struct{ builds string }
+
+func (e noEngine) Build(_ context.Context, p seal.Program, src io.Reader, out io.Writer) error {
+	if e.builds != "" {
+		f, err := os.OpenFile(e.builds, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(f, p.Version)
+		f.Close()
+	}
+	return standInBuild(p, src, out)
+}
+
+// standInBuild stands in for the seal's build: it reads the source to its
+// end, wants a tar that holds go.mod, and writes a stand-in program that
+// prints the version.
+func standInBuild(p seal.Program, src io.Reader, out io.Writer) error {
+	tr := tar.NewReader(src)
+	found := false
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("the source is not a tar: %w", err)
+		}
+		found = found || h.Name == "go.mod"
+	}
+	if _, err := io.Copy(io.Discard, src); err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("the source has no go.mod")
+	}
+	_, err := fmt.Fprintf(out, "#!/bin/sh\necho %s\n", p.Version)
+	return err
+}
 
 func (noEngine) ListRuns(context.Context, string) ([]string, error)         { return nil, nil }
 func (noEngine) RemoveRun(context.Context, string, string) error            { return nil }
@@ -145,7 +188,7 @@ func asKiln(spec string) int {
 		}
 		var eng engine = sealed{}
 		if c.NoEngine {
-			eng = noEngine{}
+			eng = noEngine{builds: c.Builds}
 		}
 		if c.Reviews != nil {
 			e := newFakeEngine()
