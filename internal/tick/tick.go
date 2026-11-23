@@ -87,6 +87,9 @@ type Config struct {
 	// Version is the commit the program was built from, 40 lowercase hex
 	// digits; anything else counts as none, a program built by hand.
 	Version string
+	// The toolchain image the core's update builds the new program in
+	// (update.go).
+	ToolchainImage string
 }
 
 // The limit of runs in flight: DefaultRuns unless `kiln core --runs` says
@@ -259,27 +262,43 @@ func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
 // startCore is Core on an engine: it takes the core's end of the socket to
 // its launcher first, before anything is started, so that no child of the
 // core holds it or sees its variable (launcher.FromEnv), and runs the core.
+//
+// It takes the launcher's variables of a failed update as well, and unsets
+// them (update.go).
 func startCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine, every time.Duration, clk clock) error {
 	l, err := launcher.FromEnv()
 	if err != nil {
 		return err
 	}
-	if l == nil {
-		return runCore(ctx, cfg, out, errOut, eng, every, clk, nil)
+	failed, err := takeFailedUpdate()
+	if err != nil {
+		return err
 	}
-	return runCore(ctx, cfg, out, errOut, eng, every, clk, l)
+	if l == nil {
+		return runUpdatedCore(ctx, cfg, out, errOut, eng, every, clk, nil, failed)
+	}
+	return runUpdatedCore(ctx, cfg, out, errOut, eng, every, clk, l, failed)
 }
 
 // reporter is the core's launcher, a *launcher.Client. Only the test gives a
 // core another.
 type reporter interface {
 	Report() error
+	AskReplace(path string) error
 	Gone() <-chan struct{}
 }
 
 // runCore is Core on an engine, with a tick every interval, the renewal of
 // the credential on a clock, and the launcher it reports to, nil for none.
 func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine, every time.Duration, clk clock, l reporter) error {
+	return runUpdatedCore(ctx, cfg, out, errOut, eng, every, clk, l, failedUpdate{})
+}
+
+// runUpdatedCore is runCore for a core that the launcher may have started
+// after a failed update: such a core puts the store's copy back before it
+// opens the store (update.go).
+func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine, every time.Duration, clk clock, l reporter,
+	failed failedUpdate) error {
 	// Nothing the core does depends on the directory it was started in, which
 	// may be removed while it runs: its paths are made absolute while that
 	// directory is there, and every command it runs, through the seal, runs in
@@ -315,11 +334,23 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	if err := checkCredential(cfg); err != nil {
 		return err
 	}
-	s, lock, err := openStore(cfg.Data)
+	lock, err := Lock(cfg.Data)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
+	// After a failed update the store's copy is put back first, also over a
+	// store that the newer core moved forward (update.go).
+	if failed.reason != "" {
+		fmt.Fprintln(out, "kiln core: the update failed:", run.Printable(failed.reason))
+		if err := restore(out, cfg.Data, versionName(cfg.Version)); err != nil {
+			return fmt.Errorf("the store is not put back: %w", err)
+		}
+	}
+	s, err := store.Open(filepath.Join(cfg.Data, "store.db"))
+	if err != nil {
+		return err
+	}
 	defer s.Close()
 	instance, err := s.Instance()
 	if err != nil {
@@ -347,17 +378,19 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity(),
 		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}, publishing: map[int64]bool{},
 		clock: clk, renewNow: make(chan struct{}, 1)}
+	c.update.launched, c.update.failed, c.update.built = l != nil, failed.commit(), make(chan string, 1)
 	fmt.Fprintf(out, "kiln core: instance %s, data %s, up to %d runs at once\n", instance, cfg.Data, cfg.Runs)
 	if cfg.PublishCommand != "" {
 		fmt.Fprintln(out, "kiln core: a card is published with the publish command")
 	}
 	// The screen, which refuses moves until the report.
+	var stopScreen func()
 	if cfg.Listen != "" {
-		stop, err := c.serve()
+		stopScreen, err = c.serve()
 		if err != nil {
 			return err
 		}
-		defer stop()
+		defer stopScreen()
 	}
 	// One full comparison, then the report; until then the core changes
 	// nothing outside the store (ADR 0036, rule 3).
@@ -373,8 +406,12 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	}
 	fmt.Fprintln(out, "kiln core: compared the store, the container engine and the Git host; healthy")
 	c.acting.Store(true)
+	// Everything the core does while it acts runs under acting, which the
+	// hand-over to a new core cancels (update.go).
+	acting, stopActing := context.WithCancel(ctx)
+	defer stopActing()
 	// The proxy, with a credential before the first tick.
-	if err := c.keepProxy(ctx); err != nil {
+	if err := c.keepProxy(acting); err != nil {
 		return err
 	}
 	// The followers end with the context, and the store is closed after them.
@@ -382,10 +419,10 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	c.followers.Add(1)
 	go func() {
 		defer c.followers.Done()
-		c.renewal(ctx)
+		c.renewal(acting)
 	}()
 	for {
-		if err := c.tick(ctx); err != nil {
+		if err := c.tick(acting); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -395,6 +432,8 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 		select {
 		case <-ctx.Done():
 			return nil
+		case program := <-c.update.built:
+			return c.handOver(stopActing, stopScreen, l, program)
 		case <-time.After(every):
 		}
 	}
@@ -450,6 +489,9 @@ type core struct {
 	main    mainState
 	checked int
 
+	// update is the core's update to a newer version (update.go).
+	update updateState
+
 	// The renewal of the credential (credential.go): its clock, a renewal
 	// asked for at once, and credMu, which guards cred.
 	clock    clock
@@ -477,6 +519,7 @@ type engine interface {
 	ReadDocument(runs, id, kind string) (run.Document, error)
 	KeepProxy(ctx context.Context, p seal.Proxy) (bool, error)
 	PushCredential(ctx context.Context, proxy, credential string) error
+	Build(ctx context.Context, p seal.Program, src io.Reader, out io.Writer) error
 }
 
 // sealed is the engine of a core: the seal and internal/run.
@@ -488,6 +531,10 @@ func (sealed) KeepProxy(ctx context.Context, p seal.Proxy) (bool, error) {
 
 func (sealed) PushCredential(ctx context.Context, proxy, credential string) error {
 	return seal.PushCredential(ctx, proxy, credential)
+}
+
+func (sealed) Build(ctx context.Context, p seal.Program, src io.Reader, out io.Writer) error {
+	return seal.Build(ctx, p, src, out)
 }
 
 func (sealed) ListRuns(ctx context.Context, instance string) ([]string, error) {
@@ -527,7 +574,7 @@ type cachedChange struct {
 
 // serve serves the screen on the core's Listen address, and prints where. The
 // function it returns stops serving, waiting a moment for the requests that
-// are under way.
+// are under way; a second call does nothing.
 func (c *core) serve() (func(), error) {
 	ln, err := web.Listen(c.Listen)
 	if err != nil {
@@ -548,12 +595,15 @@ func (c *core) serve() (func(), error) {
 	if c.Page != "" {
 		fmt.Fprintf(c.out, "kiln core: the page is read from %s on every request\n", c.Page)
 	}
+	var once sync.Once
 	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if srv.Shutdown(ctx) != nil {
-			srv.Close()
-		}
+		once.Do(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if srv.Shutdown(ctx) != nil {
+				srv.Close()
+			}
+		})
 	}, nil
 }
 

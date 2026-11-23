@@ -1936,3 +1936,82 @@ func TestSendBack(t *testing.T) {
 		}
 	})
 }
+
+// TestCopyAndClose copies the store and closes it: the copy opens and holds
+// the cards, every write afterwards fails as closed, and a write that races
+// with the copy is either in both files or in neither. A target that exists
+// is refused, and the store is closed all the same.
+func TestCopyAndClose(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, s, "the first card")
+	// Writers that keep writing while the copy is made.
+	stop := make(chan struct{})
+	done := make(chan int)
+	for range 3 {
+		go func() {
+			n := 0
+			for {
+				select {
+				case <-stop:
+					done <- n
+					return
+				default:
+				}
+				if _, err := s.Create("a racing card"); err != nil {
+					if !strings.Contains(err.Error(), "sql: database is closed") {
+						t.Errorf("a write beside the copy: %v", err)
+					}
+					done <- n
+					return
+				}
+				n++
+			}
+		}()
+	}
+	time.Sleep(20 * time.Millisecond)
+	target := filepath.Join(dir, "copy.db")
+	if err := s.CopyAndClose(target); err != nil {
+		t.Fatal(err)
+	}
+	close(stop)
+	for range 3 {
+		<-done
+	}
+	if _, err := s.Create("after the copy"); err == nil || !strings.Contains(err.Error(), "sql: database is closed") {
+		t.Errorf("a write after the copy: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Errorf("closing the store again: %v", err)
+	}
+	board := func(path string) int {
+		t.Helper()
+		s, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		b, err := s.Board()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(b)
+	}
+	if got, want := board(target), board(filepath.Join(dir, "store.db")); got != want || got < 1 {
+		t.Errorf("the copy holds %d cards, the store %d", got, want)
+	}
+
+	s, err = Open(filepath.Join(dir, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CopyAndClose(target); err == nil || !strings.Contains(err.Error(), "output file already exists") {
+		t.Errorf("a copy over a file that exists: %v", err)
+	}
+	if _, err := s.Create("after a failed copy"); err == nil {
+		t.Error("the store was not closed after a failed copy")
+	}
+}

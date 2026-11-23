@@ -7,6 +7,7 @@ package store
 
 import (
 	"cmp"
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -333,6 +334,24 @@ func (s *Store) prepare() error {
 
 // Close closes the store.
 func (s *Store) Close() error { return s.db.Close() }
+
+// CopyAndClose writes a consistent copy of the store to a file at path, which
+// must not exist, and closes the store, whether or not the copy succeeded
+// (ADR 0036, rule 5). The copy is VACUUM INTO on the store's one connection,
+// and the store is closed while that connection is still held: no statement
+// runs between the copy and the close, and every later one fails with
+// "sql: database is closed". SQLite syncs the copy, since the store runs with
+// synchronous FULL.
+func (s *Store) CopyAndClose(path string) error {
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return errors.Join(err, s.db.Close())
+	}
+	_, err = conn.ExecContext(ctx, "VACUUM INTO ?", path)
+	err = errors.Join(err, s.db.Close())
+	return errors.Join(err, conn.Close())
+}
 
 // Create writes a new card in the backlog, waiting for the developer, with its
 // first entry.

@@ -212,8 +212,10 @@ func detach(cmd *exec.Cmd) {
 
 // atHostRound is what the tick does for the cards at the Git host: main is
 // brought up to date when a run may start or a card waits for the Git host,
-// and after each round every card with a pull request whose change is in main
-// is closed; then a publisher is started for every card the core publishes.
+// and on every tick under a launcher, and after each round every card with a
+// pull request whose change is in main is closed, and the update looks at
+// main (update.go); then a publisher is started for every card the core
+// publishes.
 //
 // The tick waits for a fetch at most fetchWait, so that a slow origin holds
 // no run back for long; a publisher waits for it to its end.
@@ -226,24 +228,33 @@ func (c *core) atHostRound(ctx context.Context, starts bool) error {
 	if err != nil {
 		return err
 	}
-	if !(starts || len(toPublish) > 0 || len(published) > 0) {
-		return c.startPublishers(ctx, toPublish)
-	}
-	if rounds := c.refreshMain(ctx, fetchWait); rounds != c.checked {
-		c.checked = rounds
-		ids := slices.Sorted(func(yield func(int64) bool) {
-			for id := range published {
-				if !yield(id) {
-					return
+	// A core with a launcher brings main up to date on every tick as well, so
+	// that an update is seen while nothing else needs main, without waiting
+	// for the fetch (update.go).
+	needed := starts || len(toPublish) > 0 || len(published) > 0
+	moved := false
+	if needed || c.update.launched {
+		wait := fetchWait
+		if !needed {
+			wait = 0
+		}
+		if rounds := c.refreshMain(ctx, wait); rounds != c.checked {
+			c.checked, moved = rounds, true
+			ids := slices.Sorted(func(yield func(int64) bool) {
+				for id := range published {
+					if !yield(id) {
+						return
+					}
 				}
-			}
-		})
-		for _, id := range ids {
-			if err := c.closeIfMerged(ctx, id, published[id]); err != nil {
-				fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", id, run.Printable(err.Error()))
+			})
+			for _, id := range ids {
+				if err := c.closeIfMerged(ctx, id, published[id]); err != nil {
+					fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", id, run.Printable(err.Error()))
+				}
 			}
 		}
 	}
+	c.checkUpdate(ctx, moved)
 	return c.startPublishers(ctx, toPublish)
 }
 
@@ -279,6 +290,7 @@ func (c *core) closeIfMerged(ctx context.Context, card int64, commit string) err
 	if _, err := c.store.MoveWithReason(card, atHost, closed, store.CauseHost, store.MergedReason); err != nil {
 		return err
 	}
+	c.update.merged.Store(true)
 	fmt.Fprintf(c.out, "card %d: merged\n", card)
 	return nil
 }

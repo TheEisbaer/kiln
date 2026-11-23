@@ -32,6 +32,9 @@ const (
 	proxyNetwork = "kiln"
 )
 
+// The toolchain image the core builds its update in (ADR 0037, ADR 0039).
+const toolchainImage = "kiln-toolchain"
+
 // A run's way out (ADR 0059): its image, and the outward network it reaches
 // the hosts on its list on.
 const (
@@ -128,6 +131,7 @@ func coreCommand(args []string, getenv func(string) string, stdout, stderr io.Wr
 	}
 	cfg.WayOutImage, cfg.WayOutNetwork = wayOutImage, wayOutNetwork
 	cfg.Version = version
+	cfg.ToolchainImage = toolchainImage
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := tick.Core(ctx, cfg, stdout, stderr); err != nil {
