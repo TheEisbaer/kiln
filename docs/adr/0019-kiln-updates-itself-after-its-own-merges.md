@@ -4,11 +4,11 @@ status: accepted
 
 # Kiln updates itself after a merge to its own repo
 
-Automatic update is part of the POC: when a card in Kiln's own repo merges, the running instance replaces itself with the merged version. ADR 0005 first deferred this; it was moved forward because updating by hand after every merged card is an intervention per card (ADR 0007), because the developer wants to see merged work in use at once, and because it is cheap while Kiln runs from a checkout (ADR 0018). The simplest way, fast-forwarding the running checkout and restarting, kills runs in flight.
+Automatic update is part of the POC: when `main` of Kiln's own repo moves past the running version, the running instance replaces itself with that version. ADR 0005 first deferred this; it was moved forward because updating by hand after every merged card is an intervention per card (ADR 0007), because the developer wants to see merged work in use at once, and because it is cheap while Kiln runs from a checkout (ADR 0018). The simplest way, fast-forwarding the running checkout and restarting, kills runs in flight.
 
 Three conditions:
 
-1. **Only for Kiln's own repo.** The instance updates when one of its own cards merges.
+1. **Only for Kiln's own repo.** The instance updates when `main` of Kiln's own repo moves past the running version, whether one of its own cards merged or another change did.
 2. **Runs survive the restart** and are picked up again afterwards; a sealed run does not depend on the Kiln process staying up.
 3. **A failed update undoes itself.** If the new version does not start properly, Kiln returns to the previous one, turns automatic merging off, and needs the developer.
 

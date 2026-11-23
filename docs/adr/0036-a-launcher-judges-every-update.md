@@ -18,7 +18,7 @@ A new version may change the shape of the store, and the previous version does n
 2. **The old core copies the store** just before it asks to be replaced, and puts the copy back itself when it is started again after a failed update. The launcher never touches the store.
 3. **Until it has reported healthy, a new core changes nothing outside the store.** It converts the store, reads the container engine and the Git host, and serves the UI without accepting actions; it starts no run, removes no container and publishes nothing. Putting the copy back therefore loses nothing, because everything outside the store is still there to be compared again (ADR 0035).
 4. **A core refuses to open a store newer than it knows,** so a copy that was not put back correctly stops the previous version with a clear message.
-5. **The last few copies are kept,** each beside the version of the core that made it, and the oldest is deleted at the next update. The count is set in the instance. Kiln itself only ever goes back one step.
+5. **The copy of the last update is kept,** beside the version of the core that made it, and the one before it is deleted at the next update. Kiln itself only ever goes back one step.
 
 A failed update is therefore what ADR 0019 says it is: a new version that does not start properly. A fault that shows once the new version is acting is an ordinary bug and reaches the developer by the usual rules.
 
