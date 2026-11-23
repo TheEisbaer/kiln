@@ -29,25 +29,20 @@ Kiln needs a container engine with the `docker` command, and Git. The commands r
 
    `kiln` with no arguments prints its commands and their flags.
 
-3. Start the proxy. It reads two variables. `KILN_CLAUDE_UPSTREAM` is the upstream, Claude's API or a service in front of it, as an http or https URL. `KILN_CLAUDE_CREDENTIAL_COMMAND` is a command that prints a credential, the same contract as Claude Code's key helper.
-
-   ```sh
-   KILN_CLAUDE_UPSTREAM=<url> KILN_CLAUDE_CREDENTIAL_COMMAND='<command>' ./kiln proxy
-   ```
-
-   It starts the container `kiln-proxy` with the credential the command printed, and returns. To give the proxy a fresh credential, run it again: it replaces the proxy. What that means for a run in flight is under "The push card" in [docs/open-points.md](docs/open-points.md).
-
-4. Make the instance's copy of the target repo, a bare clone. Runs start from its `HEAD`, which must be `main`. While it runs, the core fetches `main` from the copy's `origin`, at most once in 30 seconds, before it starts a run or publishes a card. The fetch asks nothing: ssh runs in batch mode with no terminal, so a key with a passphrase needs an agent. A fetch that fails is printed, and the `main` that is there is used.
+3. Make the instance's copy of the target repo, a bare clone. Runs start from its `HEAD`, which must be `main`. While it runs, the core fetches `main` from the copy's `origin`, at most once in 30 seconds, before it starts a run or publishes a card. The fetch asks nothing: ssh runs in batch mode with no terminal, so a key with a passphrase needs an agent. A fetch that fails is printed, and the `main` that is there is used.
 
    ```sh
    git clone --bare <target repo> <bare repo>
    ```
 
-5. Start the core.
+4. Start the core. It reads two variables, and does not start without them. `KILN_CLAUDE_UPSTREAM` is the upstream, Claude's API or a service in front of it, as an http or https URL. `KILN_CLAUDE_CREDENTIAL_COMMAND` is a command that prints a credential, the same contract as Claude Code's key helper.
 
    ```sh
-   ./kiln core --data <dir> --repo <bare repo> --model <model id>
+   KILN_CLAUDE_UPSTREAM=<url> KILN_CLAUDE_CREDENTIAL_COMMAND='<command>' \
+       ./kiln core --data <dir> --repo <bare repo> --model <model id>
    ```
+
+   The core keeps the proxy, the container `kiln-proxy` on the network `kiln`: one that runs with the image `kiln-proxy` as it is now and the same upstream is kept, so that the runs in flight keep it, and any other is replaced. The proxy starts without a credential. The core runs the command with `sh -c` in the data directory, with no standard input and for at most 30 seconds, and gives what it prints to the proxy inside the proxy's container, never through a port: at its start, before any run, then five minutes after each success, and at once when a run it follows shows that the upstream refused the credential. When the command fails, runs out of time or prints nothing, the core says so once with the command's standard error, the screen says "Paused" at the top with the reason, and no run starts until the command succeeds again, which is tried every 30 seconds; the runs in flight go on. The command's standard output is never printed or kept.
 
    `--data` is the instance's data directory, which is made if it is missing. `--model` is the exact model identifier for spec runs. It also applies to implement and review runs, unless `--implement-model` or `--review-model` names another. An implement run uses the model its approved spec names on its line `Model for implement:`, if it is one of the three the spec instruction allows; otherwise `--implement-model`, or `--model` without it. `--spec-hosts` names the hosts a spec run may reach. It is none by default, and `*` stands for every public host. `--runs` is the most runs in flight at once, 3 by default and from 1 to 8. Ctrl-C ends the core. The runs it was following go on in their containers.
 
@@ -63,7 +58,7 @@ Kiln needs a container engine with the `docker` command, and Git. The commands r
 
    Exit status 0 means published, and the last line of standard output that starts with `https://` is the pull request's address. Any other status puts the card under "needs you" with the command's standard error, and the developer can publish again; the command may be run again for the same card and commit, and copes with a branch or a pull request that exists. A change that touches a file under `.github/workflows/` waits on the screen until the developer presses "Publish" and says yes to its workflow files. Once the change is in `main` after a fetch, the card is done as merged.
 
-6. Open the screen at <http://127.0.0.1:4747/>. The core prints the address when it starts, and `--listen` serves the screen on another loopback address. Cards are written on the screen, or with `./kiln card --data <dir> <text>`. `--page <file>` reads the page from that file on every request instead of the embedded one, so that a change to it shows after a refresh; it is for work on the screen, and the file is trusted like the program itself. A page left open while the core is restarted with another page reloads itself once; with `--page` it reloads when the file changes.
+5. Open the screen at <http://127.0.0.1:4747/>. The core prints the address when it starts, and `--listen` serves the screen on another loopback address. Cards are written on the screen, or with `./kiln card --data <dir> <text>`. `./kiln run` carries out one run by hand, through the proxy that a core keeps and gives the credential. `--page <file>` reads the page from that file on every request instead of the embedded one, so that a change to it shows after a refresh; it is for work on the screen, and the file is trusted like the program itself. A page left open while the core is restarted with another page reloads itself once; with `--page` it reloads when the file changes.
 
 ## Where the decisions are
 

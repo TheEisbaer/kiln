@@ -239,7 +239,7 @@ func StartRun(ctx context.Context, id string) error {
 }
 
 // AttachProxy attaches the proxy to the network of a run, for instance after
-// ReplaceProxy has replaced it. It does nothing when the proxy is attached
+// KeepProxy has replaced it. It does nothing when the proxy is attached
 // already. A proxy without the label kiln.proxy is refused.
 func AttachProxy(ctx context.Context, id, proxy string) error {
 	if err := checkRunID(id); err != nil {
