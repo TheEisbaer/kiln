@@ -11,7 +11,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -47,14 +49,20 @@ type child struct {
 	// Builds is the file the engine's builds are counted in, a line each,
 	// with NoEngine.
 	Builds string
+	// Images is the file of the engine's images and of its calls on them, an
+	// imageBook as JSON, with NoEngine; empty, the engine has no images and
+	// keeps none.
+	Images string
 	// Reviews starts core on the fake engine, with every run's exit open,
 	// and these first lines of the reviews of each card.
 	Reviews map[int64][]string
 }
 
 // noEngine is an engine with no runs, which starts none. Its Build is
-// standInBuild, and appends a line to the file builds, if it is set.
-type noEngine struct{ builds string }
+// standInBuild, and appends a line to the file builds, if it is set. Its
+// images are in the file images, read and written on each call, so that they
+// live across a killed child; without the file it has none.
+type noEngine struct{ builds, images string }
 
 func (e noEngine) Build(_ context.Context, p seal.Program, src io.Reader, out io.Writer) error {
 	if e.builds != "" {
@@ -104,8 +112,170 @@ func (noEngine) ReadDocument(string, string, string) (run.Document, error) {
 func (noEngine) Carry(context.Context, run.Inputs, func() error, io.Writer) (run.Verdict, error) {
 	return run.Verdict{}, errors.New("no engine in this test")
 }
-func (noEngine) KeepProxy(context.Context, seal.Proxy) (bool, error)  { return true, nil }
 func (noEngine) PushCredential(context.Context, string, string) error { return nil }
+
+// KeepProxy keeps the proxy, and records the ID of its image's name.
+func (e noEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {
+	return true, e.withBook(func(b *imageBook) error {
+		b.Events = append(b.Events, "keep "+p.Image+" "+b.id(p.Image))
+		return nil
+	})
+}
+
+func (e noEngine) BuildImage(_ context.Context, im seal.Image, src io.Reader) error {
+	entries, err := tarEntries(src)
+	if err != nil {
+		return err
+	}
+	return e.withBook(func(b *imageBook) error { return b.build(im, entries) })
+}
+
+func (e noEngine) ImageID(_ context.Context, ref string) (id string, err error) {
+	err = e.withBook(func(b *imageBook) error {
+		id = b.id(ref)
+		return nil
+	})
+	return id, err
+}
+
+func (e noEngine) TagImage(_ context.Context, src, dst string) error {
+	return e.withBook(func(b *imageBook) error { return b.tag(src, dst) })
+}
+
+func (e noEngine) RemoveImageTag(_ context.Context, ref string) error {
+	return e.withBook(func(b *imageBook) error { return b.rm(ref) })
+}
+
+func (e noEngine) ImageTags(_ context.Context, name string) (tags []string, err error) {
+	err = e.withBook(func(b *imageBook) error {
+		tags = b.tags(name)
+		return nil
+	})
+	return tags, err
+}
+
+// noEngineMu guards the file of a noEngine's images within one process.
+var noEngineMu sync.Mutex
+
+// withBook reads the engine's images, gives them to f, and writes them back
+// unless f failed. Without the file, f is given an empty book that is not
+// kept.
+func (e noEngine) withBook(f func(b *imageBook) error) error {
+	noEngineMu.Lock()
+	defer noEngineMu.Unlock()
+	b := &imageBook{}
+	if e.images == "" {
+		return f(b)
+	}
+	data, err := os.ReadFile(e.images)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, b); err != nil {
+			return err
+		}
+	}
+	if err := f(b); err != nil {
+		return err
+	}
+	data, err = json.Marshal(b)
+	if err != nil {
+		return err
+	}
+	return writeAtomically(e.images, data)
+}
+
+// imageBook is a stand-in engine's images, as a map from reference,
+// <name>:<tag>, to ID, and its calls on them in order: "build <ref>",
+// "tag <src> <dst>", "rm <ref>", and "keep <image> <its ID>" of KeepProxy.
+type imageBook struct {
+	Images map[string]string `json:"images"`
+	Events []string          `json:"events"`
+	Next   int               `json:"next"` // the builds so far, which name the IDs
+}
+
+// fullRef is a reference with its tag, latest for a plain name.
+func fullRef(ref string) string {
+	if !strings.Contains(ref, ":") {
+		return ref + ":latest"
+	}
+	return ref
+}
+
+// build records a build of an image from a context of the entries, under a
+// new ID. A context without the Dockerfile fails, as the engine's would.
+func (b *imageBook) build(im seal.Image, entries []string) error {
+	ref := im.Name + ":" + im.Tag
+	if im.Name == "" || !versionTag.MatchString(im.Tag) {
+		return fmt.Errorf("the image %q is not one to build", ref)
+	}
+	if !slices.Contains(entries, im.Dockerfile) {
+		return fmt.Errorf("the context of %s has no %s: %q", ref, im.Dockerfile, entries)
+	}
+	b.Next++
+	if b.Images == nil {
+		b.Images = map[string]string{}
+	}
+	b.Images[ref] = fmt.Sprintf("built-%d", b.Next)
+	b.Events = append(b.Events, "build "+ref)
+	return nil
+}
+
+func (b *imageBook) id(ref string) string { return b.Images[fullRef(ref)] }
+
+func (b *imageBook) tag(src, dst string) error {
+	id := b.Images[fullRef(src)]
+	if id == "" {
+		return fmt.Errorf("no such image: %s", src)
+	}
+	b.Images[fullRef(dst)] = id
+	b.Events = append(b.Events, "tag "+src+" "+dst)
+	return nil
+}
+
+func (b *imageBook) rm(ref string) error {
+	if !strings.Contains(ref, ":") {
+		return fmt.Errorf("the reference %s has no tag", ref)
+	}
+	if _, ok := b.Images[ref]; !ok {
+		return fmt.Errorf("no such image: %s", ref)
+	}
+	delete(b.Images, ref)
+	b.Events = append(b.Events, "rm "+ref)
+	return nil
+}
+
+func (b *imageBook) tags(name string) []string {
+	var tags []string
+	for ref := range b.Images {
+		if tag, ok := strings.CutPrefix(ref, name+":"); ok {
+			tags = append(tags, tag)
+		}
+	}
+	slices.Sort(tags)
+	return tags
+}
+
+// tarEntries reads a tar to its end, and returns the names of its files.
+func tarEntries(src io.Reader) ([]string, error) {
+	var names []string
+	tr := tar.NewReader(src)
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("the context is not a tar: %w", err)
+		}
+		if h.Typeflag != tar.TypeXGlobalHeader && h.Typeflag != tar.TypeDir {
+			names = append(names, h.Name)
+		}
+	}
+	_, err := io.Copy(io.Discard, src)
+	return names, err
+}
 
 // exitAtPoint is the status with which the binary exits at a point, as a kill
 // there would end it.
@@ -188,7 +358,7 @@ func asKiln(spec string) int {
 		}
 		var eng engine = sealed{}
 		if c.NoEngine {
-			eng = noEngine{builds: c.Builds}
+			eng = noEngine{builds: c.Builds, images: c.Images}
 		}
 		if c.Reviews != nil {
 			e := newFakeEngine()

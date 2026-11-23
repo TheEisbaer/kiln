@@ -87,9 +87,11 @@ type Config struct {
 	// Version is the commit the program was built from, 40 lowercase hex
 	// digits; anything else counts as none, a program built by hand.
 	Version string
-	// The toolchain image the core's update builds the new program in
+	// The toolchain image the core's update builds the new program in, and
+	// the run image it builds beside the proxy's and the way out's images
 	// (update.go).
 	ToolchainImage string
+	RunImage       string
 }
 
 // The limit of runs in flight: DefaultRuns unless `kiln core --runs` says
@@ -410,7 +412,11 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 	// hand-over to a new core cancels (update.go).
 	acting, stopActing := context.WithCancel(ctx)
 	defer stopActing()
-	// The proxy, with a credential before the first tick.
+	// The images of this core's version become the plain names, and then the
+	// proxy is kept, with a credential before the first tick (update.go).
+	if err := c.promote(acting); err != nil {
+		return err
+	}
 	if err := c.keepProxy(acting); err != nil {
 		return err
 	}
@@ -433,7 +439,7 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 		case <-ctx.Done():
 			return nil
 		case program := <-c.update.built:
-			return c.handOver(stopActing, stopScreen, l, program)
+			return c.handOver(ctx, stopActing, stopScreen, l, program)
 		case <-time.After(every):
 		}
 	}
@@ -520,6 +526,11 @@ type engine interface {
 	KeepProxy(ctx context.Context, p seal.Proxy) (bool, error)
 	PushCredential(ctx context.Context, proxy, credential string) error
 	Build(ctx context.Context, p seal.Program, src io.Reader, out io.Writer) error
+	BuildImage(ctx context.Context, im seal.Image, src io.Reader) error
+	ImageID(ctx context.Context, ref string) (string, error)
+	TagImage(ctx context.Context, src, dst string) error
+	RemoveImageTag(ctx context.Context, ref string) error
+	ImageTags(ctx context.Context, name string) ([]string, error)
 }
 
 // sealed is the engine of a core: the seal and internal/run.
@@ -535,6 +546,24 @@ func (sealed) PushCredential(ctx context.Context, proxy, credential string) erro
 
 func (sealed) Build(ctx context.Context, p seal.Program, src io.Reader, out io.Writer) error {
 	return seal.Build(ctx, p, src, out)
+}
+
+func (sealed) BuildImage(ctx context.Context, im seal.Image, src io.Reader) error {
+	return seal.BuildImage(ctx, im, src)
+}
+
+func (sealed) ImageID(ctx context.Context, ref string) (string, error) { return seal.ImageID(ctx, ref) }
+
+func (sealed) TagImage(ctx context.Context, src, dst string) error {
+	return seal.TagImage(ctx, src, dst)
+}
+
+func (sealed) RemoveImageTag(ctx context.Context, ref string) error {
+	return seal.RemoveImageTag(ctx, ref)
+}
+
+func (sealed) ImageTags(ctx context.Context, name string) ([]string, error) {
+	return seal.ImageTags(ctx, name)
 }
 
 func (sealed) ListRuns(ctx context.Context, instance string) ([]string, error) {

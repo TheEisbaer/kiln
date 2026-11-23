@@ -26,9 +26,12 @@ import (
 
 // The update of the core (ADR 0019, ADR 0036, ADR 0037). Once main of Kiln's
 // own repo has moved past the running version, a core under a launcher builds
-// the program of main's head into <data>/programs/, stops acting, copies the
-// store beside its own version, asks the launcher to replace it and exits;
-// the runs go on in their containers. After a failed update the launcher
+// the images of main's head under its tag, <name>:<first 12 hex digits>, the
+// toolchain always and the others when their files changed, and the program
+// of main's head in that toolchain into <data>/programs/; it stops acting,
+// copies the store beside its own version, asks the launcher to replace it
+// and exits; the runs go on in their containers. The new core makes its tagged
+// images the plain names once it has reported. After a failed update the launcher
 // starts the previous program with KILN_UPDATE_FAILED, and that core puts its
 // copy back before it opens the store.
 //
@@ -261,9 +264,9 @@ func isAncestor(ctx context.Context, repo, ancestor, commit string) (bool, error
 	return false, fmt.Errorf("git merge-base on %s: %w: %s", repo, err, strings.TrimSpace(stderr.String()))
 }
 
-// startBuild starts the build of a commit's program beside the tick, counted
-// among the followers, unless a build runs or a program waits for the main
-// loop. A finished build hands its program to the main loop; a failed one is
+// startBuild starts the build of a commit's images and program beside the
+// tick, counted among the followers, unless a build runs or a program waits
+// for the main loop. A finished build hands its program to the main loop; a failed one is
 // printed, and the commit is not built again in this core's life.
 func (c *core) startBuild(ctx context.Context, target string) {
 	c.update.mu.Lock()
@@ -281,8 +284,12 @@ func (c *core) startBuild(ctx context.Context, target string) {
 	c.followers.Add(1)
 	go func() {
 		defer c.followers.Done()
-		c.sayImages(ctx, target)
-		program, err := c.build(ctx, target)
+		all, _ := c.imagesDue(ctx, target)
+		toolchain, err := c.buildImages(ctx, target, all)
+		var program string
+		if err == nil {
+			program, err = c.build(ctx, target, toolchain)
+		}
 		c.update.mu.Lock()
 		defer c.update.mu.Unlock()
 		c.update.building = false
@@ -301,31 +308,107 @@ func (c *core) startBuild(ctx context.Context, target string) {
 	}()
 }
 
-// sayImages says when the files of the images changed between the running
-// version and the commit: the update builds only the program.
-func (c *core) sayImages(ctx context.Context, target string) {
+// tagOf is the tag of a version's images: the first 12 hex digits of its
+// commit.
+func tagOf(commit string) string { return commit[:12] }
+
+// versionTag is a tag of the images of a version.
+var versionTag = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
+// kilnImage is one of the images the update builds, as the README builds it:
+// its context is `git archive` of the commit, or of a directory of it, with
+// only some paths, or all of them; its Dockerfile is a path in that context.
+type kilnImage struct {
+	name        string
+	dir         string   // the directory of the commit that is the context, "" for its root
+	paths       []string // the paths in the context, none for all of them
+	dockerfile  string
+	noNetwork   bool // the image only compiles, from the toolchain image's module cache
+	onToolchain bool // the image is built FROM the new toolchain image
+}
+
+// images are the images the update builds, in the order it builds them: the
+// toolchain first, which the others are built on.
+func (c *core) images() []kilnImage {
+	return []kilnImage{
+		{name: c.ToolchainImage, paths: []string{"go.mod", "go.sum", "images/toolchain/Dockerfile"}, dockerfile: "images/toolchain/Dockerfile"},
+		{name: c.ProxyImage, dockerfile: "images/proxy/Dockerfile", noNetwork: true, onToolchain: true},
+		{name: c.WayOutImage, dockerfile: "images/wayout/Dockerfile", noNetwork: true, onToolchain: true},
+		{name: c.RunImage, dir: "images/run", dockerfile: "Dockerfile", onToolchain: true},
+	}
+}
+
+// imageNames are the names of the images, in that order, without an empty
+// one.
+func (c *core) imageNames() []string {
+	var names []string
+	for _, im := range c.images() {
+		if im.name != "" {
+			names = append(names, im.name)
+		}
+	}
+	return names
+}
+
+// imagesDue reports whether the update builds every image, and not only the
+// toolchain image, and prints why: when the files of the images changed
+// between the running version and the commit, which it returns, and always
+// for a core built by hand, which cannot tell, or when the diff fails.
+func (c *core) imagesDue(ctx context.Context, target string) (bool, string) {
+	as := "building the images as <name>:" + tagOf(target)
 	v := versionOf(c.Version)
 	if v == "" {
-		fmt.Fprintln(c.out, "kiln core: this core was built by hand, so it cannot tell whether the images' files changed; the update builds only the program, rebuild the images by hand if they did")
-		return
+		fmt.Fprintln(c.out, "kiln core: this core was built by hand, so it cannot tell whether the images' files changed; "+as)
+		return true, ""
 	}
 	files, err := gitLine(ctx, c.Repo, append([]string{"diff", "--name-only", "--no-renames", v, target, "--"}, imageFiles...)...)
 	if err != nil {
 		if ctx.Err() == nil {
-			fmt.Fprintln(c.errOut, "kiln core: the images' files:", run.Printable(err.Error()))
+			fmt.Fprintf(c.errOut, "kiln core: the images' files: %s; %s\n", run.Printable(err.Error()), as)
 		}
-		return
+		return true, ""
 	}
-	if files != "" {
-		fmt.Fprintf(c.out, "kiln core: the images' files changed between %s and %s (%s); the update builds only the program, rebuild the images by hand\n",
-			v, target, run.Printable(fileNames(strings.Split(files, "\n"))))
+	if files == "" {
+		return false, ""
 	}
+	fmt.Fprintf(c.out, "kiln core: the images' files changed between %s and %s (%s); %s\n",
+		v, target, run.Printable(fileNames(strings.Split(files, "\n"))), as)
+	return true, files
+}
+
+// buildImages builds the images of a commit, each under the commit's tag and
+// one after the other: the toolchain image always, and the others when all is
+// set. It returns the toolchain image the program is built in. A failed build
+// is returned, and the images already built keep their tags.
+func (c *core) buildImages(ctx context.Context, target string, all bool) (string, error) {
+	tag := tagOf(target)
+	toolchain := c.ToolchainImage + ":" + tag
+	for i, im := range c.images() {
+		if i > 0 && !all {
+			break
+		}
+		spec := seal.Image{Name: im.name, Tag: tag, Dockerfile: im.dockerfile, NoNetwork: im.noNetwork}
+		if im.onToolchain {
+			spec.Toolchain = toolchain
+		}
+		treeish := target
+		if im.dir != "" {
+			treeish += ":" + im.dir
+		}
+		err := c.fromArchive(ctx, append([]string{"archive", "--format=tar", treeish}, im.paths...),
+			func(ctx context.Context, src io.Reader) error { return c.engine.BuildImage(ctx, spec, src) })
+		if err != nil {
+			return "", fmt.Errorf("the image %s:%s: %w", im.name, tag, err)
+		}
+	}
+	return toolchain, nil
 }
 
 // build builds a commit's program to <data>/programs/kiln-<commit>, unless it
-// is there: from `git archive` of the commit, through the engine's build,
-// into kiln-<commit>.new, which is synced and renamed once it is whole.
-func (c *core) build(ctx context.Context, target string) (string, error) {
+// is there: from `git archive` of the commit, through the engine's build in
+// the toolchain image, into kiln-<commit>.new, which is synced and renamed
+// once it is whole.
+func (c *core) build(ctx context.Context, target, toolchain string) (string, error) {
 	dir := c.programs()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -339,7 +422,7 @@ func (c *core) build(ctx context.Context, target string) (string, error) {
 	if err := removeIfThere(partial); err != nil {
 		return "", err
 	}
-	if err := c.buildInto(ctx, target, partial); err != nil {
+	if err := c.buildInto(ctx, target, toolchain, partial); err != nil {
 		os.Remove(partial)
 		return "", err
 	}
@@ -355,21 +438,13 @@ func (c *core) build(ctx context.Context, target string) (string, error) {
 	return program, nil
 }
 
-// buildInto streams `git archive` of a commit into the engine's build, and
-// the program into a new file at path, synced and closed. An empty program is
-// refused.
-func (c *core) buildInto(ctx context.Context, target, path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := f.Chmod(0o700); err != nil {
-		return err
-	}
+// fromArchive streams `git archive` with the arguments into consume, on a
+// context that ends with it. A consumer that did not read the whole archive
+// lets git go; its error carries git's, if git said one.
+func (c *core) fromArchive(ctx context.Context, args []string, consume func(context.Context, io.Reader) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	archive := gitCommand(ctx, c.Repo, "archive", "--format=tar", target)
+	archive := gitCommand(ctx, c.Repo, args...)
 	var stderr strings.Builder
 	archive.Stderr = &stderr
 	src, err := archive.StdoutPipe()
@@ -379,17 +454,40 @@ func (c *core) buildInto(ctx context.Context, target, path string) error {
 	if err := archive.Start(); err != nil {
 		return err
 	}
-	buildErr := c.engine.Build(ctx, seal.Program{Instance: c.instance, Image: c.ToolchainImage, Version: target,
-		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}, src, f)
-	// A build that did not read the whole archive lets git go.
+	consumeErr := consume(ctx, src)
 	src.Close()
-	if buildErr != nil {
+	if consumeErr != nil {
 		cancel()
 		archive.Wait()
-		return buildErr
+		if said := strings.TrimSpace(stderr.String()); said != "" {
+			return fmt.Errorf("%w; git archive: %s", consumeErr, said)
+		}
+		return consumeErr
 	}
 	if err := archive.Wait(); err != nil {
 		return fmt.Errorf("git archive on %s: %w: %s", c.Repo, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// buildInto streams `git archive` of a commit into the engine's build in the
+// toolchain image, and the program into a new file at path, synced and
+// closed. An empty program is refused.
+func (c *core) buildInto(ctx context.Context, target, toolchain, path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := f.Chmod(0o700); err != nil {
+		return err
+	}
+	err = c.fromArchive(ctx, []string{"archive", "--format=tar", target}, func(ctx context.Context, src io.Reader) error {
+		return c.engine.Build(ctx, seal.Program{Instance: c.instance, Image: toolchain, Version: target,
+			GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}, src, f)
+	})
+	if err != nil {
+		return err
 	}
 	if err := f.Sync(); err != nil {
 		return err
@@ -404,14 +502,80 @@ func (c *core) buildInto(ctx context.Context, target, path string) error {
 	return f.Close()
 }
 
+// promote makes the images of the running version's tag the plain names, in
+// the new core after its report and before it keeps the proxy, so that after
+// a failed update the previous core finds the plain names as they were. For
+// each image whose tag is there: the plain name is tagged to the tag's image
+// unless it is that image already, and the tag is removed. A kill between
+// the two is finished by the next start. A core built by hand promotes
+// nothing. A step that fails is returned.
+func (c *core) promote(ctx context.Context) error {
+	v := versionOf(c.Version)
+	if v == "" {
+		return nil
+	}
+	for _, name := range c.imageNames() {
+		tagged := name + ":" + tagOf(v)
+		id, err := c.engine.ImageID(ctx, tagged)
+		if err != nil {
+			return fmt.Errorf("the image %s is not made %s: %w", tagged, name, err)
+		}
+		if id == "" {
+			continue
+		}
+		plain, err := c.engine.ImageID(ctx, name)
+		if err != nil {
+			return fmt.Errorf("the image %s is not made %s: %w", tagged, name, err)
+		}
+		if plain != id {
+			if err := c.engine.TagImage(ctx, tagged, name); err != nil {
+				return fmt.Errorf("the image %s is not made %s: %w", tagged, name, err)
+			}
+		}
+		at("promote-tagged")
+		if err := c.engine.RemoveImageTag(ctx, tagged); err != nil {
+			return fmt.Errorf("the tag %s is not removed: %w", tagged, err)
+		}
+		fmt.Fprintf(c.out, "kiln core: the image %s is now %s\n", tagged, name)
+	}
+	return nil
+}
+
+// removeOldTags removes, by exact reference, every tag of 12 hex digits of
+// the images but the running version's and the new version's. Every other
+// tag and name, and every untagged image, is left alone. A removal that fails
+// is printed.
+func (c *core) removeOldTags(ctx context.Context, target string) {
+	keep := []string{tagOf(target)}
+	if v := versionOf(c.Version); v != "" {
+		keep = append(keep, tagOf(v))
+	}
+	for _, name := range c.imageNames() {
+		tags, err := c.engine.ImageTags(ctx, name)
+		if err != nil {
+			fmt.Fprintf(c.errOut, "kiln core: the old tags of %s are not removed: %s\n", name, run.Printable(err.Error()))
+			continue
+		}
+		for _, tag := range tags {
+			if !versionTag.MatchString(tag) || slices.Contains(keep, tag) {
+				continue
+			}
+			if err := c.engine.RemoveImageTag(ctx, name+":"+tag); err != nil {
+				fmt.Fprintln(c.errOut, "kiln core: an old image's tag is not removed:", run.Printable(err.Error()))
+			}
+		}
+	}
+}
+
 // handOver is the hand-over to a built program, in the main loop: the core
 // stops acting and waits for every follower, as on Ctrl-C, and stops the
 // screen; then it copies the store beside its own version and closes it, so
 // that nothing is written after the copy; it removes the programs and copies
-// beyond one step back, asks the launcher to replace it by the program, and
+// beyond one step back, and the images' tags beyond one step back under ctx,
+// the core's context, asks the launcher to replace it by the program, and
 // returns. A failed copy or request is returned, and the launcher starts the
 // core again, which repeats the update.
-func (c *core) handOver(stopActing, stopScreen func(), l reporter, program string) error {
+func (c *core) handOver(ctx context.Context, stopActing, stopScreen func(), l reporter, program string) error {
 	c.acting.Store(false)
 	stopActing()
 	c.followers.Wait()
@@ -437,6 +601,7 @@ func (c *core) handOver(stopActing, stopScreen func(), l reporter, program strin
 	}
 	at("update-copied")
 	c.removeOld(dir, filepath.Base(program), filepath.Base(copied))
+	c.removeOldTags(ctx, strings.TrimPrefix(filepath.Base(program), "kiln-"))
 	at("update-removed")
 	if err := l.AskReplace(program); err != nil {
 		return err
