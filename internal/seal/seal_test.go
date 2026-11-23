@@ -439,14 +439,26 @@ func testPushUnseen(t *testing.T, proxy, credential string) {
 		"docker inspect of the proxy":            must(t, "inspect", proxy),
 		"the processes in the proxy's container": must(t, "top", proxy, "-o", "pid,args"),
 	}
-	// The arguments and the environments of the processes on this machine,
-	// the docker command's included.
-	if out, err := exec.CommandContext(t.Context(), "ps", "axeww", "-o", "args").Output(); err != nil {
+	// The arguments of the processes on this machine, and the environment of
+	// the docker commands that carry a push and of no other process. What is
+	// read here is searched and never printed: an environment may hold a
+	// secret of the developer's.
+	if args, err := exec.CommandContext(t.Context(), "ps", "axww", "-o", "pid=,args=").Output(); err != nil {
 		t.Errorf("ps: %v", err)
-	} else if !strings.Contains(string(out), "docker exec --interactive") || !strings.Contains(string(out), canary) {
-		t.Errorf("ps shows no docker exec with its environment, so it proves nothing:\n%s", out)
 	} else {
-		seen["the processes on this machine, with their environments"] = string(out)
+		seen["the arguments of the processes on this machine"] = string(args)
+		var environs strings.Builder
+		for _, line := range strings.Split(string(args), "\n") {
+			pid, rest, _ := strings.Cut(strings.TrimSpace(line), " ")
+			if strings.Contains(rest, "docker exec --interactive") && strings.Contains(rest, "/proxy push") {
+				environs.WriteString(environOf(t, pid))
+			}
+		}
+		if !strings.Contains(environs.String(), canary) {
+			t.Error("the environment of the docker command that carries the push was not read, so it proves nothing")
+		} else {
+			seen["the environment of the docker command that carries the push"] = environs.String()
+		}
 	}
 	// The environment of the push in the proxy's container, read from a
 	// container on the proxy's process namespace, which needs SYS_PTRACE to
@@ -477,6 +489,17 @@ func testPushUnseen(t *testing.T, proxy, credential string) {
 	if inspect := must(t, "inspect", proxy); strings.Contains(inspect, credential) {
 		t.Error("the credential is in docker inspect of the proxy after the push")
 	}
+}
+
+// environOf is the environment of a process on this machine, or nothing if it
+// cannot be read. It is for searching only and is never printed.
+func environOf(t *testing.T, pid string) string {
+	t.Helper()
+	if b, err := os.ReadFile("/proc/" + pid + "/environ"); err == nil {
+		return string(b)
+	}
+	out, _ := exec.CommandContext(t.Context(), "ps", "eww", "-o", "args=", "-p", pid).Output()
+	return string(out)
 }
 
 // testNoPush asserts that the probe, a run on its sealed network, reaches the
