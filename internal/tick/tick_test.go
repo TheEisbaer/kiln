@@ -620,6 +620,121 @@ func TestStageInputs(t *testing.T) {
 		}
 	})
 
+	// The developer's note on approving a spec is told to every implement run
+	// and review run that works from that spec, after it, and to a spec run
+	// that revises it; a new approved spec ends it.
+	const specNoteHead = "## The developer's note on the spec\n\n"
+	const noteSentence = "The developer approved the spec with this note. It is the developer's correction to the spec: where the two differ, the note counts. "
+	approve := func(c *core, note string) {
+		t.Helper()
+		if _, err := c.store.Decide(1, store.Approve, note); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("implement, approved with a note", func(t *testing.T) {
+		c, main := stagedCore(t)
+		approve(c, "Write no card number.")
+		in, _, err := c.inputs(ctx, newRow(c, main), card(c), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := instructions.Implement + "## The card\n\nThe card's text.\n\n## The approved spec\n\n" + fenced("# The spec\n", "markdown") +
+			"\n" + specNoteHead + noteSentence + "Build the spec as the note corrects it.\n\nWrite no card number."
+		if got := string(readFile(t, in.Instruction)); got != want {
+			t.Errorf("the implement run is told\n%q\nwant\n%q", got, want)
+		}
+	})
+
+	t.Run("implement, after a send-back, approved with a note", func(t *testing.T) {
+		c, main := stagedCore(t)
+		approve(c, "Write no card number.")
+		endRun(t, c, store.Implement, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})
+		tip := commitOnBranch(t, c.Repo, main, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+		endRun(t, c, store.Review, reviewNeedsYou, &store.Doc{Kind: store.KindReview, Text: "Verdict: goes back\n"})
+		if _, err := c.store.Decide(1, store.SendBack, "Fix finding 1."); err != nil {
+			t.Fatal(err)
+		}
+		in, _, err := c.inputs(ctx, newRow(c, tip), card(c), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(readFile(t, in.Instruction))
+		want := []string{"## The card", "## The approved spec", "## The developer's note on the spec", "## The last review", "## The developer's note"}
+		if h := toldParts(t, got, instructions.Implement); !reflect.DeepEqual(h, want) {
+			t.Errorf("the headings are %q, want %q", h, want)
+		}
+		if !strings.Contains(got, specNoteHead+noteSentence+"Build the spec as the note corrects it.\n\nWrite no card number.\n\n## The last review") ||
+			!strings.HasSuffix(got, "\n\nFix finding 1.") {
+			t.Errorf("the notes are not told as they should:\n%s", got)
+		}
+	})
+
+	t.Run("review, approved with a note", func(t *testing.T) {
+		c, main := stagedCore(t)
+		approve(c, "Write no card number.")
+		endRun(t, c, store.Implement, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})
+		tip := commitOnBranch(t, c.Repo, main, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+		in, _, err := c.inputs(ctx, newRow(c, tip), card(c), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(readFile(t, in.Instruction))
+		want := []string{"## The card", "## The approved spec", "## The developer's note on the spec", "## The change"}
+		if h := toldParts(t, got, instructions.Review); !reflect.DeepEqual(h, want) {
+			t.Errorf("the headings are %q, want %q", h, want)
+		}
+		if !strings.Contains(got, specNoteHead+noteSentence+"Judge the change against the spec as the note corrects it.\n\nWrite no card number.\n\n## The change") {
+			t.Errorf("the review run is not told the note as it should:\n%s", got)
+		}
+	})
+
+	t.Run("implement, after a new approved spec", func(t *testing.T) {
+		for _, newNote := range []string{"", "New note."} {
+			c, main := stagedCore(t)
+			approve(c, "Old note.")
+			endRun(t, c, store.Implement, store.State{Stage: store.Implement, WaitsFor: store.Developer}, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})
+			if _, err := c.store.Decide(1, store.ToSpec, ""); err != nil {
+				t.Fatal(err)
+			}
+			endRun(t, c, store.Spec, store.State{Stage: store.Spec, WaitsFor: store.Approval}, &store.Doc{Kind: store.KindSpec, Text: "# Spec two\n"})
+			approve(c, newNote)
+			in, _, err := c.inputs(ctx, newRow(c, main), card(c), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(readFile(t, in.Instruction))
+			if !strings.Contains(got, fenced("# Spec two\n", "markdown")) || strings.Contains(got, "Old note.") {
+				t.Errorf("after a new approved spec (note %q) the run is told\n%s", newNote, got)
+			}
+			if has := strings.Contains(got, "## The developer's note on the spec"); has != (newNote != "") || strings.Contains(got, "New note.") != (newNote != "") {
+				t.Errorf("after a new approved spec (note %q) the run is told\n%s", newNote, got)
+			}
+		}
+	})
+
+	t.Run("spec, sent back to spec after an approval with a note", func(t *testing.T) {
+		c, main := stagedCore(t)
+		approve(c, "Write no card number.")
+		endRun(t, c, store.Implement, store.State{Stage: store.Implement, WaitsFor: store.Developer}, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})
+		if _, err := c.store.Decide(1, store.ToSpec, "Start over."); err != nil {
+			t.Fatal(err)
+		}
+		in, _, err := c.inputs(ctx, newRow(c, main), card(c), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(readFile(t, in.Instruction))
+		want := []string{"## The card", "## The last spec", "## The developer's note on the last spec", "## The last report", "## The developer's note"}
+		if h := toldParts(t, got, instructions.Spec); !reflect.DeepEqual(h, want) {
+			t.Errorf("the headings are %q, want %q", h, want)
+		}
+		if !strings.Contains(got, "## The developer's note on the last spec\n\nThe developer approved the last spec with this note, as their correction to it: "+
+			"where the two differ, the note counts. Carry what it corrects into the spec you write.\n\nWrite no card number.\n\n## The last report") {
+			t.Errorf("the spec run is not told the note as it should:\n%s", got)
+		}
+	})
+
 	t.Run("review", func(t *testing.T) {
 		c, main := stagedCore(t)
 		endRun(t, c, store.Implement, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})

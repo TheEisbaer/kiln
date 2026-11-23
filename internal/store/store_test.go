@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 8"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 9"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 8 was opened")
+		t.Fatal("a store of version 9 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 8") || !strings.Contains(msg, "version 7") {
+	if msg := err.Error(); !strings.Contains(msg, "version 9") || !strings.Contains(msg, "version 8") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 8 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 8 and 0", v, tables)
+	if v != 9 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 9 and 0", v, tables)
 	}
 }
 
@@ -972,7 +972,7 @@ func TestMigrateV3(t *testing.T) {
 	if sp, err := s.Spec(1); err != nil || sp != want || !strings.Contains(sp.Text, "\xff") {
 		t.Errorf("the spec of version 3 is %+v (%v), want %+v", sp, err, want)
 	}
-	if d, err := s.Newest(1, KindSpec, KindReview, KindReport); err != nil || d != (Document{KindSpec, "ab12cd34-1-1", oldSpec}) {
+	if d, err := s.Newest(1, KindSpec, KindReview, KindReport); err != nil || d != (Document{KindSpec, "ab12cd34-1-1", oldSpec, ""}) {
 		t.Errorf("the newest document is %+v (%v)", d, err)
 	}
 	// The run in flight ends with its spec.
@@ -1016,10 +1016,10 @@ func TestDocumentKinds(t *testing.T) {
 		kinds []string
 		want  Document
 	}{
-		{[]string{KindSpec}, Document{KindSpec, "r1", "the spec"}},
-		{[]string{KindReport}, Document{KindReport, "r2", "the report"}},
-		{[]string{KindSpec, KindReview}, Document{KindReview, "r3", "Verdict: goes back\n"}},
-		{[]string{KindSpec, KindReview, KindReport}, Document{KindReview, "r3", "Verdict: goes back\n"}},
+		{[]string{KindSpec}, Document{KindSpec, "r1", "the spec", ""}},
+		{[]string{KindReport}, Document{KindReport, "r2", "the report", ""}},
+		{[]string{KindSpec, KindReview}, Document{KindReview, "r3", "Verdict: goes back\n", ""}},
+		{[]string{KindSpec, KindReview, KindReport}, Document{KindReview, "r3", "Verdict: goes back\n", ""}},
 	} {
 		if got, err := s.Newest(card.ID, row.kinds...); err != nil || got != row.want {
 			t.Errorf("Newest of %v is %+v (%v), want %+v", row.kinds, got, err, row.want)
@@ -1148,8 +1148,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 7 {
-		t.Fatalf("the store is version %d after Open, want 7", v)
+	if v := userVersion(t, s); v != version || version != 8 {
+		t.Fatalf("the store is version %d after Open, want 8", v)
 	}
 	// What version 1 held is still there, and has no run or reason.
 	card, err := s.Card(1)
@@ -1418,6 +1418,21 @@ func TestKill(t *testing.T) {
 		}
 		t.Logf("20 kills, %d moves committed before them", moves)
 	})
+	t.Run("an approval with a note, at the hook", func(t *testing.T) {
+		path := killAt(t, "approve-hook")
+		s := reopen(t, path)
+		card, _ := s.Card(1)
+		sp, err := s.Spec(1)
+		if err != nil || card.State != (State{Spec, Approval}) || sp.Note != "" {
+			t.Fatalf("an approval killed before the commit left %+v and the spec %+v, %v, want the card waiting with no note", card, sp, err)
+		}
+		if _, err := s.Decide(1, Approve, "the note"); err != nil {
+			t.Fatal(err)
+		}
+		if sp, _ := s.Spec(1); sp.Note != "the note" {
+			t.Errorf("the repeated approval kept the note %q", sp.Note)
+		}
+	})
 }
 
 // killAt runs a child that stops at the place mode names, kills it there and
@@ -1473,6 +1488,7 @@ func reopen(t *testing.T, path string) *Store {
 //	endrun-hook   at the commit of EndRun, after a Create, a Move and an AddRun
 //	endrun-after  after EndRun has returned
 //	endrun-spec-hook  as endrun-hook, with a spec given to EndRun
+//	approve-hook  at the commit of an approval with a note, after a spec waits for approval
 //	migrate       in the move forward of the store at path, of version 1 or 2
 //	loop    never: it moves card 1 through valid states, printing a line each time
 //	open    never: it opens a new store in the directory path, again and again
@@ -1554,6 +1570,19 @@ func asChild(mode, path string) {
 			afterCardWritten = func() error { stop(); return nil }
 		}
 		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}, spec); err != nil {
+			fail(err)
+		}
+		stop()
+	}
+	if mode == "approve-hook" {
+		if err := s.AddRun(theRun(1, "r1"), 8); err != nil {
+			fail(err)
+		}
+		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}, specDoc("the spec")); err != nil {
+			fail(err)
+		}
+		afterCardWritten = func() error { stop(); return nil }
+		if _, err := s.Decide(1, Approve, "the note"); err != nil {
 			fail(err)
 		}
 		stop()

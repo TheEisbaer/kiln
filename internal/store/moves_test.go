@@ -19,7 +19,7 @@ type row struct {
 // The table of moves, written out here and not read from the code, so that a
 // row dropped or changed in the code fails the test.
 var wantMoves = map[Action]map[State]row{
-	"approve": {{"spec", "approval"}: {State{"implement", "run"}, "none"}},
+	"approve": {{"spec", "approval"}: {State{"implement", "run"}, "optional"}},
 	"again": {
 		{"spec", "approval"}:       {State{"spec", "run"}, "required"},
 		{"spec", "developer"}:      {State{"spec", "run"}, "optional"},
@@ -82,6 +82,10 @@ func TestDecide(t *testing.T) {
 				}
 				switch {
 				case !ok:
+					refused(ErrRefused)
+					continue
+				case action == "approve" && trimmed != "":
+					// These cards have no spec to keep the note with.
 					refused(ErrRefused)
 					continue
 				case want.note == "required" && trimmed == "", want.note == "none" && trimmed != "":
@@ -269,8 +273,8 @@ func TestDocuments(t *testing.T) {
 	if _, err := s.EndRun("r4", Finished, "", State{Review, Approval}, &Doc{KindReview, "Verdict: passes\n"}); err != nil {
 		t.Fatal(err)
 	}
-	want := []Document{{"spec", "r1", "the first <script>"}, {"spec", "r2", "the second \x1b[2J"},
-		{"report", "r3", "the report"}, {"review", "r4", "Verdict: passes\n"}}
+	want := []Document{{"spec", "r1", "the first <script>", ""}, {"spec", "r2", "the second \x1b[2J", ""},
+		{"report", "r3", "the report", ""}, {"review", "r4", "Verdict: passes\n", ""}}
 	if docs, err := s.Documents(card.ID); err != nil || !reflect.DeepEqual(docs, want) {
 		t.Errorf("Documents = %+v, %v; want %+v", docs, err, want)
 	}
@@ -339,5 +343,53 @@ func TestBoard(t *testing.T) {
 	runs, err := s.Runs(ended.ID)
 	if err != nil || len(runs) != 1 || runs[0].ID != "r1" || runs[0].Ending != Failed || runs[0].Started.IsZero() {
 		t.Errorf("Runs = %+v, %v", runs, err)
+	}
+}
+
+// TestApproveNote keeps the note of an approval on the spec's row, and nowhere
+// else: the entry has no reason, and the next run is not told it as a
+// send-back note.
+func TestApproveNote(t *testing.T) {
+	s := open(t)
+	card := mustCreate(t, s, "a card")
+	for i, id := range []string{"r1", "r2"} {
+		if _, err := s.Move(card.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+			t.Fatal(err)
+		}
+		mustAddRun(t, s, theRun(card.ID, id))
+		if _, err := s.EndRun(id, Finished, "", State{Spec, Approval}, specDoc("spec "+id)); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			if _, err := s.Decide(card.ID, Again, "again"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// Refused for a note that is too long: nothing is written.
+	if _, err := s.Decide(card.ID, Approve, strings.Repeat("a", MaxNote+1)); !errors.Is(err, ErrNote) {
+		t.Fatalf("a long note: %v", err)
+	}
+	before := len(mustHistory(t, s, card.ID))
+	got, err := s.Decide(card.ID, Approve, "  Write no card number.\n")
+	if err != nil || got.State != (State{Implement, Run}) {
+		t.Fatalf("Decide: %+v, %v", got, err)
+	}
+	if sp, err := s.Spec(card.ID); err != nil || sp.Note != "Write no card number." || sp.Run != "r2" {
+		t.Errorf("Spec = %+v, %v", sp, err)
+	}
+	docs, err := s.Documents(card.ID)
+	if err != nil || len(docs) != 2 || docs[0].Note != "" || docs[1].Note != "Write no card number." {
+		t.Errorf("Documents = %+v, %v", docs, err)
+	}
+	h := mustHistory(t, s, card.ID)
+	if len(h) != before+1 || h[len(h)-1].Reason != "" {
+		t.Errorf("the approval's entry: %+v", h[before:])
+	}
+	if n, err := s.Note(card.ID); err != nil || n != "" {
+		t.Errorf("Note = %q, %v; want none", n, err)
+	}
+	if d, err := s.Newest(card.ID, KindSpec); err != nil || d.Note != "" {
+		t.Errorf("Newest = %+v, %v; it does not read the note", d, err)
 	}
 }

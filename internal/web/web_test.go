@@ -251,10 +251,10 @@ func TestCard(t *testing.T) {
 	c := decode[cardJSON](t, w)
 	if c.ID != id || c.Title != "The card" || c.Text != "The card\n\nits text <b>" || c.Stage != "spec" || c.WaitsFor != "approval" ||
 		c.Reason != "exit 0" || c.Run != nil || c.Note != "" || c.Dropped ||
-		!reflect.DeepEqual(c.Moves, []moveJSON{{"approve", "none"}, {"again", "required"}, {"drop", "optional"}}) {
+		!reflect.DeepEqual(c.Moves, []moveJSON{{"approve", "optional"}, {"again", "required"}, {"drop", "optional"}}) {
 		t.Errorf("the card: %+v", c)
 	}
-	if want := []documentJSON{{"spec", "r1", doc}}; !reflect.DeepEqual(c.Documents, want) {
+	if want := []documentJSON{{"spec", "r1", doc, ""}}; !reflect.DeepEqual(c.Documents, want) {
 		t.Errorf("the documents: %+v, want %+v", c.Documents, want)
 	}
 	if len(c.History) != 3 || c.History[2].Run != "r1" || c.History[2].Cause != "run" || c.History[2].Reason != "exit 0" {
@@ -268,8 +268,12 @@ func TestCard(t *testing.T) {
 	}
 
 	// The activity of the run in flight, and only of it.
-	if _, err := f.store.Decide(id, store.Approve, ""); err != nil {
+	if _, err := f.store.Decide(id, store.Approve, "the note"); err != nil {
 		t.Fatal(err)
+	}
+	c = decode[cardJSON](t, f.do(t, "GET", fmt.Sprintf("/api/cards/%d", id), ""))
+	if want := []documentJSON{{"spec", "r1", doc, "the note"}}; !reflect.DeepEqual(c.Documents, want) || c.Note != "" {
+		t.Errorf("after an approval with a note: documents %+v (want %+v), note %q", c.Documents, want, c.Note)
 	}
 	if err := f.store.AddRun(store.RunRow{ID: "r2", Card: id, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
@@ -484,7 +488,7 @@ func TestDecide(t *testing.T) {
 		{"a spec sent back without a note", `{"action":"again"}`, spec, "this move needs a note that says what should change"},
 		{"a spec sent back with white space", `{"action":"again","note":" \n\t "}`, spec, "this move needs a note that says what should change"},
 		{"a passing review sent back without a note", `{"action":"send-back","note":""}`, passed, "this move needs a note that says what should change"},
-		{"an approval with a note", `{"action":"approve","note":"fine"}`, spec, "this move takes no note"},
+		{"an approval with a note too long", `{"action":"approve","note":"` + strings.Repeat("a", 16<<10+1) + `"}`, spec, "the note is 16.1 KiB, more than 16 KiB"},
 		{"done with a note", `{"action":"done","note":"fine"}`, passed, "this move takes no note"},
 		{"a note too long", `{"action":"again","note":"` + strings.Repeat("a", 16<<10+1) + `"}`, spec, "the note is 16.1 KiB, more than 16 KiB"},
 	} {
@@ -492,6 +496,13 @@ func TestDecide(t *testing.T) {
 		if got := refused(id, tc.body, tc.from, 400, tc.what); got["error"] != tc.want {
 			t.Errorf("%s: the error is %q, want %q", tc.what, got["error"], tc.want)
 		}
+	}
+
+	// An approval with a note, for a card that has no spec, is refused with
+	// 409 and nothing changes.
+	{
+		id := f.card(t, "a card", spec)
+		refused(id, `{"action":"approve","note":"fine"}`, spec, 409, "an approval with a note and no spec")
 	}
 
 	if w := f.do(t, "POST", "/api/cards/99/decide", `{"action":"approve"}`); w.Code != 404 {

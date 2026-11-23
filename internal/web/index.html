@@ -338,6 +338,10 @@ button:disabled { opacity: .55; cursor: default; }
 .moves { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 20px; }
 .moves .note { font-size: 12.5px; color: var(--muted); align-self: center; }
 .moves .err { font-size: 12.5px; color: var(--amber-ink); align-self: center; }
+.moves .approve-note { flex: 0 0 100%; }
+.moves .approve-note label { display: block; font-size: 12.5px; font-weight: 600; margin: 0 0 4px; }
+.moves .approve-note textarea { width: 100%; box-sizing: border-box; }
+.moves .approve-note .hint { font-size: 12px; color: var(--faint); margin: 4px 0 0; }
 .moves .drop {
   margin-left: auto; align-self: center; padding: 4px 10px; font-size: 12.5px;
   color: var(--muted); background: transparent; border-color: transparent;
@@ -1192,10 +1196,34 @@ function renderMoves(c) {
   box.replaceChildren();
   const rank = (m) => m.action === first(c) ? 0 : quiet(c, m) ? 3 : m.action === "to-spec" ? 2 : 1;
   const moves = c.moves.filter((m) => m.action !== "drop").sort((a, b) => rank(a) - rank(b));
+  // An approval takes a note in a field of its own before the buttons, empty
+  // by default, so that approving without one stays a single click.
+  const approves = c.moves.some((m) => m.action === "approve" && m.note !== "none");
+  if (approves) {
+    const f = el("div", "approve-note");
+    const label = el("label", null, "A note on the spec (optional)");
+    label.htmlFor = "p-approve-note";
+    const ta = el("textarea");
+    ta.id = "p-approve-note";
+    ta.rows = 3;
+    ta.spellcheck = true;
+    f.append(label, ta, el("div", "hint", "The implement and review runs are told it after the spec; where the two differ, the note counts. The pull request's title and the model come from the spec's own lines."));
+    box.append(f);
+  }
   moves.forEach((m, i) => {
     const b = el("button", i === 0 && rank(m) === 0 ? "primary" : quiet(c, m) ? "quiet" : "", moveLabel(c, m.action));
     b.type = "button";
-    b.addEventListener("click", () => m.action === "publish" ? publish(c, box) : m.note === "none" ? decide(c.id, m.action, "", box) : openNote(m));
+    if (m.action === "approve" && approves) {
+      b.addEventListener("click", async () => {
+        const r = await decide(c.id, "approve", $("p-approve-note").value, box);
+        if (r && r.refused) {
+          for (const old of box.querySelectorAll(".err")) old.remove();
+          box.append(el("span", "err", r.refused));
+        }
+      });
+    } else {
+      b.addEventListener("click", () => m.action === "publish" ? publish(c, box) : m.note === "none" ? decide(c.id, m.action, "", box) : openNote(m));
+    }
     box.append(b);
   });
   if (!moves.length) {
@@ -1404,6 +1432,13 @@ function renderActivity(list) {
   if (atBottom) log.scrollTop = log.scrollHeight;
 }
 
+// specNote shows the developer's note on approving a spec, as text, under it.
+function specNote(note) {
+  const n = el("div", "yournote");
+  n.append(el("div", "label", "Your note on approving this spec"), el("div", "words", note));
+  return n;
+}
+
 // renderDocuments shows the card's documents, newest first, each kind under
 // its heading with its earlier ones folded, and the change on the card's
 // branch before the spec it builds.
@@ -1424,12 +1459,14 @@ function renderDocuments(docs, change) {
     const doc = el("div", "doc");
     doc.append(markdown(newest.text));
     sec.append(doc);
+    if (newest.note) sec.append(specNote(newest.note));
     if (of.length > 1) {
       const older = el("details", "older");
       older.append(el("summary", null, "Earlier, " + (of.length - 1) + " more"));
       for (const d of of.slice(0, -1).reverse()) {
         const o = el("div", "doc");
         o.append(el("div", "from", "by run " + d.run), markdown(d.text));
+        if (d.note) o.append(specNote(d.note));
         older.append(o);
       }
       sec.append(older);
@@ -1620,6 +1657,8 @@ function reloadFor(build) {
     return false;
   }
   if ($("dialog").open || $("note").open || $("ask").open) return false;
+  const typed = $("p-approve-note");
+  if (openId !== null && typed && typed.value.trim()) return false;
   try {
     if (sessionStorage.getItem("kiln-reloaded-for") !== build) {
       sessionStorage.setItem("kiln-reloaded-for", build);
@@ -1673,7 +1712,8 @@ $("scrim").addEventListener("click", closeCard);
 window.addEventListener("hashchange", fromHash);
 document.addEventListener("keydown", (e) => {
   if ($("dialog").open || $("note").open || $("ask").open) return;
-  if (e.key === "Escape" && openId !== null) closeCard();
+  const inApprove = document.activeElement && document.activeElement.id === "p-approve-note" && document.activeElement.value.trim();
+  if (e.key === "Escape" && openId !== null && !inApprove) closeCard();
   const typing = /INPUT|TEXTAREA/.test(document.activeElement.tagName);
   if (e.key === "n" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); openDialog(); }
 });
