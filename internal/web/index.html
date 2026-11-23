@@ -130,7 +130,7 @@ button:disabled { opacity: .55; cursor: default; }
 .brand .name { font-weight: 650; font-size: 17px; letter-spacing: .2px; }
 .where { display: flex; flex-direction: column; min-width: 0; flex: 1; padding-left: 14px; border-left: 1px solid var(--line); }
 .where .repo { font-family: var(--mono); font-size: 12.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.where .meta { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.where .meta, .brand .version { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .offline {
   margin: 12px 28px 0;
   padding: 9px 14px;
@@ -506,6 +506,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
       <path d="M13 21c-2.6 0-4-1.7-4-3.7 0-2.3 2-3.3 2.6-5.8 1.9 1.2 2 2.8 1.8 3.9.7-.4 1.3-1.2 1.4-2.1 1.3 1.1 2.2 2.4 2.2 4 0 2-1.4 3.7-4 3.7z" fill="var(--accent)"/>
     </svg>
     <span class="name">Kiln</span>
+    <span class="version" id="version"></span>
   </div>
   <div class="where">
     <span class="repo" id="repo"></span>
@@ -797,6 +798,9 @@ function renderBoard(b) {
     " · review on " + m.review +
     " · " + (b.runs === 1 ? "one run at a time" : "up to " + b.runs + " runs at once");
   $("meta").title = $("meta").textContent;
+  // The version of Kiln that runs, so that an update shows.
+  $("version").textContent = b.version ? b.version.slice(0, 12) : "built by hand";
+  $("version").title = b.version || "";
   // A paused instance starts no run; the reason says why.
   $("paused").hidden = !b.paused;
   $("paused").textContent = b.paused ? "Paused: " + b.paused : "";
@@ -1280,7 +1284,8 @@ async function decide(id, action, note, box, more) {
       $("p-moves").append(el("span", "err", "The card moved meanwhile: it is in " + r.data.stage + ", " + (WAITS[r.data.waits_for] || r.data.waits_for) + "."));
       return { moved: true };
     }
-    if (r.status === 400) {
+    // 503: the core is starting and accepts no move yet.
+    if (r.status === 400 || r.status === 503) {
       for (const b of box.querySelectorAll("button")) b.disabled = false;
       return { refused: sentence((r.data && r.data.error) || "the move was refused") };
     }

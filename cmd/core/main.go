@@ -3,9 +3,10 @@
 // (ADR 0040), ticks, gives every card that waits for a run the run of its
 // stage, and serves the screen on a loopback address (ADR 0044); `kiln card`
 // writes a card that waits for a run without the screen; and `kiln run`
-// carries out one run started by hand, through the proxy that a core keeps.
-// It only parses flags and the environment and calls internal/tick and
-// internal/run.
+// carries out one run started by hand, through the proxy that a core keeps;
+// and `kiln launch` starts `kiln core` with its flags and starts it again
+// after a crash (internal/launcher, ADR 0036). It only parses flags and the
+// environment and calls internal/tick, internal/run and internal/launcher.
 package main
 
 import (
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/TheEisbaer/kiln/internal/launcher"
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/tick"
 )
@@ -44,7 +46,12 @@ const (
 	commandVar  = "KILN_CLAUDE_CREDENTIAL_COMMAND"
 )
 
+// version is the commit the program was built from, set at build with
+// -ldflags "-X main.version=<commit>"; a program built by hand has none.
+var version string
+
 const usage = `usage:
+  kiln launch <the flags of kiln core>   (starts kiln core with them, and starts it again after a crash)
   kiln core --data <dir> --repo <bare repo> --model <id>   (reads ` + upstreamVar + ` and ` + commandVar + `)
             [--implement-model <id>] [--review-model <id>]
             [--image kiln-run] [--proxy kiln-proxy] [--spec-hosts <* or names, by commas>]
@@ -64,6 +71,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "launch":
+		os.Exit(launcher.Main(os.Args[2:], os.Stderr))
 	case "core":
 		os.Exit(coreCommand(os.Args[2:], os.Getenv, os.Stdout, os.Stderr))
 	case "card":
@@ -118,6 +127,7 @@ func coreCommand(args []string, getenv func(string) string, stdout, stderr io.Wr
 		cfg.ReviewModel = cfg.Model
 	}
 	cfg.WayOutImage, cfg.WayOutNetwork = wayOutImage, wayOutNetwork
+	cfg.Version = version
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := tick.Core(ctx, cfg, stdout, stderr); err != nil {

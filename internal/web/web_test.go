@@ -919,3 +919,65 @@ func TestPublish(t *testing.T) {
 		t.Errorf("the board: %+v", b.Cards)
 	}
 }
+
+// TestStarting refuses every POST with 503 while the core has not reported,
+// after the checks of the request's Host, type and Origin, and serves GET as
+// always (ADR 0036, rule 3).
+func TestStarting(t *testing.T) {
+	f := newFixture(t)
+	accepting := false
+	h, err := Handler(f.store, Info{Accepting: func() bool { return accepting }}, f.act, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h = h
+	id := f.card(t, "a card", store.State{Stage: store.Spec, WaitsFor: store.Approval})
+	for _, p := range []struct{ path, body string }{
+		{"/api/cards", `{"text":"a new card"}`},
+		{fmt.Sprintf("/api/cards/%d/decide", id), `{"action":"approve"}`},
+	} {
+		w := f.do(t, "POST", p.path, p.body)
+		if w.Code != 503 || decode[map[string]string](t, w)["error"] != starting {
+			t.Errorf("POST %s while starting: %d %s", p.path, w.Code, w.Body)
+		}
+		if w := f.do(t, "POST", p.path, p.body, func(r *http.Request) { r.Header.Set("Origin", "https://evil.example") }); w.Code != 403 {
+			t.Errorf("POST %s with a foreign Origin while starting: %d", p.path, w.Code)
+		}
+	}
+	for _, path := range []string{"/", "/api/board", fmt.Sprintf("/api/cards/%d", id)} {
+		if w := f.do(t, "GET", path, ""); w.Code != 200 {
+			t.Errorf("GET %s while starting: %d", path, w.Code)
+		}
+	}
+	if b, _ := f.store.Board(); len(b) != 1 {
+		t.Errorf("a refused request changed the store: %d cards", len(b))
+	}
+	accepting = true
+	if w := f.do(t, "POST", "/api/cards", `{"text":"a new card"}`); w.Code != 201 {
+		t.Errorf("POST /api/cards once accepting: %d %s", w.Code, w.Body)
+	}
+}
+
+// TestVersion says the core's version on the board, empty for a program
+// built by hand, which the page then says.
+func TestVersion(t *testing.T) {
+	f := newFixture(t)
+	if raw := decode[map[string]any](t, f.do(t, "GET", "/api/board", "")); raw["version"] != "" {
+		t.Errorf("the board's version without one: %#v", raw["version"])
+	}
+	commit := strings.Repeat("0123456789", 4)
+	h, err := Handler(f.store, Info{Version: commit}, f.act, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h = h
+	if b := decode[boardJSON](t, f.do(t, "GET", "/api/board", "")); b.Version != commit {
+		t.Errorf("the board's version: %q, want %q", b.Version, commit)
+	}
+	body := f.do(t, "GET", "/", "").Body.String()
+	for _, want := range []string{`id="version"`, "built by hand", "b.version.slice(0, 12)"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the page lacks %q", want)
+		}
+	}
+}

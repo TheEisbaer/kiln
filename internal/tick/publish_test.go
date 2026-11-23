@@ -837,13 +837,14 @@ func TestFetchCannotAsk(t *testing.T) {
 }
 
 // TestFetchDoesNotHoldRuns starts a spec run while the fetch hangs: the tick
-// waits for it no longer than fetchWait.
+// waits for it no longer than fetchWait. The comparison before the report
+// waits for the hanging origin up to compareLimit, shortened here.
 func TestFetchDoesNotHoldRuns(t *testing.T) {
 	b := newBench(t, 3)
 	hangingOrigin(t, b.cfg.Repo)
-	was := fetchWait
-	fetchWait = 100 * time.Millisecond
-	t.Cleanup(func() { fetchWait = was })
+	was, wasCompare := fetchWait, compareLimit
+	fetchWait, compareLimit = 100*time.Millisecond, 100*time.Millisecond
+	t.Cleanup(func() { fetchWait, compareLimit = was, wasCompare })
 	var card int64
 	b.with(t, func(s *store.Store) { card = b.card(t, s, store.Spec) })
 	e := newFakeEngine()

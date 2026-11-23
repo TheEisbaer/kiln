@@ -27,7 +27,7 @@ Kiln needs a container engine with the `docker` command, and Git. The commands r
        chmod +x kiln.new && mv kiln.new kiln || { rm -f kiln.new; false; }
    ```
 
-   `kiln` with no arguments prints its commands and their flags.
+   Build from the head of `main`: a program older than the store refuses to open it, and the core then does not start. `kiln` with no arguments prints its commands and their flags.
 
 3. Make the instance's copy of the target repo, a bare clone. Runs start from its `HEAD`, which must be `main`. While it runs, the core fetches `main` from the copy's `origin`, at most once in 30 seconds, before it starts a run or publishes a card. The fetch asks nothing: ssh runs in batch mode with no terminal, so a key with a passphrase needs an agent. A fetch that fails is printed, and the `main` that is there is used.
 
@@ -35,12 +35,14 @@ Kiln needs a container engine with the `docker` command, and Git. The commands r
    git clone --bare <target repo> <bare repo>
    ```
 
-4. Start the core. It reads two variables, and does not start without them. `KILN_CLAUDE_UPSTREAM` is the upstream, Claude's API or a service in front of it, as an http or https URL. `KILN_CLAUDE_CREDENTIAL_COMMAND` is a command that prints a credential, the same contract as Claude Code's key helper.
+4. Start the instance with the launcher, `kiln launch`, and the flags of the core. The core reads two variables, and does not start without them. `KILN_CLAUDE_UPSTREAM` is the upstream, Claude's API or a service in front of it, as an http or https URL. `KILN_CLAUDE_CREDENTIAL_COMMAND` is a command that prints a credential, the same contract as Claude Code's key helper.
 
    ```sh
    KILN_CLAUDE_UPSTREAM=<url> KILN_CLAUDE_CREDENTIAL_COMMAND='<command>' \
-       ./kiln core --data <dir> --repo <bare repo> --model <model id>
+       ./kiln launch --data <dir> --repo <bare repo> --model <model id>
    ```
+
+   The launcher starts `kiln core` with those flags and the same environment. Every core first compares the store, the container engine and the Git host, with the screen served, and acts only after that; until then the screen refuses moves. The launcher starts the core again after a crash, after 1 second and then up to 60 seconds. A core that ends before that comparison, or ends with 0, as on Ctrl-C, ends the launcher. `kiln core` is the command the launcher starts, and it can also run alone with the same flags.
 
    The core keeps the proxy, the container `kiln-proxy` on the network `kiln`: one that runs with the image `kiln-proxy` as it is now and the same upstream is kept, so that the runs in flight keep it, and any other is replaced. The proxy starts without a credential. The core runs the command with `sh -c` in the data directory, with no standard input and for at most 30 seconds, and gives what it prints to the proxy inside the proxy's container, never through a port: at its start, before any run, then five minutes after each success, and at once when a run it follows shows that the upstream refused the credential. When the command fails, runs out of time or prints nothing, the core says so once with the command's standard error, the screen says "Paused" at the top with the reason, and no run starts until the command succeeds again, which is tried every 30 seconds; the runs in flight go on. The command's standard output is never printed or kept.
 

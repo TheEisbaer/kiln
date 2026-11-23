@@ -155,7 +155,7 @@ func asKiln(spec string) int {
 			}
 			eng = e
 		}
-		if err := runCore(ctx, c.Config, os.Stdout, os.Stderr, eng, interval, realClock{}); err != nil {
+		if err := startCore(ctx, c.Config, os.Stdout, os.Stderr, eng, interval, realClock{}); err != nil {
 			fmt.Fprintln(os.Stderr, "kiln core:", err)
 			return 1
 		}

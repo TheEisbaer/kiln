@@ -447,7 +447,7 @@ func TestCredentialRefusedConfig(t *testing.T) {
 	} {
 		data := filepath.Join(t.TempDir(), "data")
 		err := runCore(t.Context(), Config{Data: data, Repo: "/repo.git", Model: "m", Runs: 1, Upstream: tc.upstream,
-			CredentialCommand: tc.command}, io.Discard, io.Discard, newFakeEngine(), time.Millisecond, newFakeClock())
+			CredentialCommand: tc.command}, io.Discard, io.Discard, newFakeEngine(), time.Millisecond, newFakeClock(), nil)
 		if err == nil || !strings.Contains(err.Error(), tc.says) {
 			t.Errorf("upstream %q, command %q: %v", tc.upstream, tc.command, err)
 		}

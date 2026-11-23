@@ -2,7 +2,7 @@
 
 What cards have settled under a decision, by the decision's number. A card adds its lines here, in the pull request that settles them, and never changes a file in `docs/adr/`. The decisions themselves change only by the developer (ADR 0058).
 
-A line says what was settled and ends with the date in brackets, for example (2026-11-20). It names no card: the pull request that added a line is found with `git blame`. The lines already there stay as they are. The spec that a line comes from is the text of that card's pull request.
+A line says what was settled and ends with the date in brackets, for example (2026-11-20). It names no card: the pull request that added a line is found with `git blame`. The lines already there stay as they are, except that a line whose "until" or "yet" a later change ends is replaced in that change's pull request. The spec that a line comes from is the text of that card's pull request.
 
 ## ADR 0005: Kiln's work ends at "ready to merge"; merging belongs to the target repo's Git host
 
@@ -54,7 +54,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - "Not written anywhere" means that remarks are no part of review's result and are shown to nobody. The full output of a review run is still kept, like any run's (ADR 0032, ADR 0038).
 - Every review round starts in a fresh session; a stage that is sent back resumes its own (ADR 0053).
 - The number of send-backs is a fact on the card, and a failed check on the Git host counts as one (ADR 0054).
-- A review run is told the card, the approved spec and the diff, from where the card's branch left `main` to its tip, made in the instance's copy, and writes `review.md` with its verdict as the first line, `Verdict: passes` or `Verdict: goes back`. A diff over 1 MiB starts no review run, and the card needs the developer with the size. A change that goes back stops for the developer; nothing sends it back by itself yet. The next implement run is told the last review when it sent the change back (card 14, 2026-11-19).
+- A review run is told the card, the approved spec and the diff, from where the card's branch left `main` to its tip, made in the instance's copy, and writes `review.md` with its verdict as the first line, `Verdict: passes` or `Verdict: goes back`. A diff over 1 MiB starts no review run, and the card needs the developer with the size. A change that goes back is sent back to implement by the rule of the next line. The next implement run is told the last review when it sent the change back (card 14, 2026-11-19).
 - A review run that finishes with `Verdict: goes back` while its card's number of send-backs is below two sends the card to implement, waiting for a run, by the rule, in the transaction that ends the review run. The run's entry stays as before, at review needing you. The rule's entry follows with `the review sent the change back; implement runs again by the rule, send-back <n> of 2`, and the number goes up by one. At two or more, the rule's entry keeps the card under "needs you", saying that review sent it back a third time, or again, and the developer's moves are as before. The next implement run is told the last review as before (2026-11-23).
 
 ## ADR 0016: Run failures are handled by a few fixed rules, not by a supervising agent
@@ -88,6 +88,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - Where the new version is built (ADR 0037).
 - Kiln no longer runs from a checkout. Each version is a program built in a sealed container, with the previous one kept beside it (ADR 0036, ADR 0037).
 - That automatic merging is off after a failed update is state of the instance (ADR 0055).
+- The board's header names the running version: the commit set at build by `-X main.version`, or "built by hand" (2026-11-23).
 
 ## ADR 0020: Stage runs use Claude Code's headless command line, and nothing calls a model outside a run
 
@@ -134,7 +135,6 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The model of each stage is a flag of the core, `--model` for spec and `--implement-model` and `--review-model`, which default to `--model`, and the effort is fixed per stage: spec `high`, implement `medium`, review `high`. `kiln core --effort` is gone; `kiln run` by hand keeps its `--effort` (card 14, 2026-11-19).
 - An implement run starts on the model the approved spec names on its line `Model for implement: <identifier>`, with or without backticks, when the identifier is one of `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`, the three `instructions/spec.md` allows. The line is read like the title's line: in the head before the first `## `, a list item allowed, the first such line deciding. Otherwise the run uses `--implement-model`, which is now only that fallback. The model is chosen when the run's row is built and kept in it, so a run in flight keeps its model across a restarted core. Spec and review runs keep their flags (2026-11-23).
 - An implement run of a card whose number of send-backs is above zero starts on `claude-opus-5-5`, whatever its spec names, also after main moved. Otherwise it starts on the spec's model, as above. The model is chosen when the run's row is built (2026-11-23).
-- The board's header says `implement on the model its spec names, else <--implement-model>` (2026-11-23).
 - The board's header says `implement on the model its spec names, else <--implement-model>, and on claude-opus-5-5 after a send-back` (2026-11-23).
 
 ## ADR 0031: Checks on Kiln's own repo stay fast by structure, not by a stopwatch
@@ -159,6 +159,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The core does not depend on the directory it was started in: it makes its paths absolute at its start, runs git in the instance's copy of the repo and every other command, through the seal, in the data directory (card 16, 2026-11-20).
 - `--page` is made absolute at start, like `--data` and `--repo` (2026-11-20).
 - The core owns the proxy. `kiln core` reads `KILN_CLAUDE_UPSTREAM` and `KILN_CLAUDE_CREDENTIAL_COMMAND` and does not start without them. At its start it keeps a proxy of Kiln's that runs with the image of its name as that is then and with the same upstream, since replacing it cuts the runs in flight from it, and starts or replaces any other; a proxy it cannot keep ends the core. It pushes a credential before the first tick. `kiln card` needs nothing of it, and `kiln run` by hand uses the proxy that a core keeps: without a core's push its requests get the proxy's 503 (2026-11-23).
+- The proxy is kept, and the first credential pushed, after the core's report; a core whose launcher is gone ends as on SIGTERM (2026-11-23).
 
 ## ADR 0035: The core keeps nothing in memory that matters; it reconciles the store, the container engine and the Git host
 
@@ -177,6 +178,16 @@ A line says what was settled and ends with the date in brackets, for example (20
 - Ctrl-C ends the following of every run and the tick; the core returns when every follower has, and the runs go on in their containers. One run's failure or error touches only its card, and is printed with the card's ID (card 17).
 - The copy's `main` follows its origin: with a remote `origin` the core fetches `+refs/heads/main:refs/heads/main` before it starts a run and before it publishes, at most once in 30 seconds and that often while a card waits for the Git host. A fetch runs beside the tick, which waits for it at most 5 seconds and then starts runs from the `main` that is there, so that a slow origin holds no run back; a publisher waits for it to its end. It runs in a session of its own with no terminal, git never prompts, ssh runs with `-o BatchMode=yes` after the developer's `GIT_SSH_COMMAND`, the copy's `core.sshCommand` or `ssh`, and at the limit of 30 seconds the whole session is killed. A fetch that fails is printed once per text, and the `main` that is there is used; a copy without `origin` is used as it is (card 19, 2026-11-20).
 - A card that waits for the Git host without a pull request is published by a publisher beside the tick, like a run's follower and counted in no limit, one per card. Its commit is made the same from the same branch and `main`, so a publisher a kill stopped is started again by the next core and publishes the same commit once more; the address is kept, with an entry of the rule, only after the command has printed it. Ctrl-C ends the command with the core. An error of the publishing itself, not of the command, moves the card to review, needing you, with the reason, as a failed command does, so that no card is left without a move and nothing is tried again on every tick. After every fetch a card with a pull request whose published commit, merged into `main`, changes nothing is done, by the Git host, with the reason `merged`; a pull request closed without a merge is not noticed (card 19).
+- Every core starts in one order: store, screen without actions, the comparison, the report, and only then the proxy, the credential and the ticks. A core does not know whether it is on probation (2026-11-23).
+
+## ADR 0036: A small launcher judges every update, and the store is copied before it
+
+- The launcher is `kiln launch <the flags of kiln core>`, in `internal/launcher`. It starts `<its program> core <the same arguments>` and reads nothing in the data directory (2026-11-23).
+- A core talks to the launcher on file descriptor 3, a socket of its own per start, named by `KILN_LAUNCHER=3`. The core makes the descriptor close-on-exec and unsets the variable at its start, so its children see neither (2026-11-23).
+- A core reports `healthy` and may ask `replace <path>`. A replace is accepted only from a core that has reported, and only for an absolute path to a regular file of the launcher's user (2026-11-23).
+- A new core is on probation for 2 minutes. One that ends or does not report in time is replaced by the previous program, started with `KILN_UPDATE_FAILED` and `KILN_UPDATE_FAILED_PROGRAM`. Until it reports, that program is started again only after a death by a signal, at most three times; a non-zero exit ends the launcher (2026-11-23).
+- A core that crashes after its report is started again after 1 s, doubling to 60 s, and back to 1 s after 10 minutes of running. One that ends with 0, or a first start that ends before its report, ends the launcher (2026-11-23).
+- Healthy is the core's report after one comparison that reads the store, the container engine, `main` at the Git host and its own screen. A Git host that does not answer is printed and does not count (2026-11-23).
 
 ## ADR 0037: Kiln is built in a sealed container, and the core contains no C code
 
@@ -243,6 +254,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - A core started with `--page` serves a page that is not built into its program. Rule 4 holds for the core as it runs by default. The flag is for work on the screen, and the file is trusted like the program: whatever it holds is "the core's own page" for rule 6, and may act through the API (2026-11-20).
 - The board's JSON says the core's `build`, the first 16 hex digits of the SHA-256 of the embedded page, and the page carries the build it was served with in `data-build`. A page that sees another build on the board reloads itself, before it reads that answer further. It does not reload while a dialog is open, and it reloads once per build: a page reloaded for a build and still served another says so and stays. A core rebuilt with the same page reloads no page (2026-11-20).
 - With `--page`, the build is the file's as it is at that moment: the page is served with it and the board says it, so a page left open reloads itself when the file changes. A file that cannot be read has no build, and a page left open stays as it is (2026-11-20).
+- Until the core's report every POST gets 503, after the checks of rule 6. The board's JSON says `version` (2026-11-23).
 
 ## ADR 0045: Kiln's checks are one command that runs the tools directly in the toolchain image
 
