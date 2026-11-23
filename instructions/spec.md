@@ -34,6 +34,7 @@ Judge the card's size first, and work to it. This rule limits three sentences fu
 - A card that names its change exactly, or whose change is text or a few lines in known places: read the files concerned, write the spec, and stop. Build no prototype. Read no web page unless the card depends on something outside the repo that you do not know; what the card only mentions, it does not depend on. Survey no options for what the card has already decided: section 3 then says what you read and that the card decided it.
 - Any card: build a prototype only of what cannot be decided by reading the code, and only of that part, never of the whole change; building the change is the implement run's work. Trying a command or a small piece is fine.
 - The web stays open to every spec run, and a card that depends on something outside the repo is still looked up, as "Research" asks. The rule is about not doing it when nothing depends on it.
+- A card whose size, as the spec states it under "What every spec says", comes to more than about 1,000 lines of code and tests together is too big for one card. The spec's first question then recommends a split into cards of about 800 lines each, names what goes into each, and says what the first card leaves out. The spec specifies only the first card, and the size it states is the first card's.
 
 ## Research
 
