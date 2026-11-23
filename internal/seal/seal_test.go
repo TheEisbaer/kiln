@@ -186,7 +186,8 @@ func TestSeal(t *testing.T) {
 
 	// What a run reaches of the proxy: the proxy's network namespace listens
 	// on the API's port and on nothing else, in TCP or UDP and in either
-	// family; the push socket is a file, not an address.
+	// family, but for the engine's resolver on its loopback; the push socket
+	// is a file, not an address.
 	t.Run("the proxy listens on its API port and nothing else", func(t *testing.T) {
 		api := false
 		for _, table := range []string{"tcp", "tcp6", "udp", "udp6"} {
@@ -199,8 +200,13 @@ func TestSeal(t *testing.T) {
 				}
 				_, port, _ := strings.Cut(f[1], ":")
 				listens := f[3] == "0A" || strings.HasPrefix(table, "udp") // TCP_LISTEN, or a bound UDP socket
+				addr, _, _ := strings.Cut(f[1], ":")
 				switch {
 				case !listens:
+				// The engine's own resolver, which it puts on 127.0.0.11 in
+				// every container on a network of its own, on the loopback
+				// only, where no other container reaches it.
+				case addr == "0B00007F":
 				case strings.HasPrefix(table, "tcp") && port == fmt.Sprintf("%04X", 8080):
 					api = true
 				default:
@@ -443,8 +449,10 @@ func testPushUnseen(t *testing.T, proxy, credential string) {
 		seen["the processes on this machine, with their environments"] = string(out)
 	}
 	// The environment of the push in the proxy's container, read from a
-	// container on the proxy's process namespace.
-	environ := must(t, "run", "--rm", "--pid", "container:"+proxy, "--network", "none", "--entrypoint", "sh", toolchainImage, "-c",
+	// container on the proxy's process namespace, which needs SYS_PTRACE to
+	// read another user's environment.
+	environ := must(t, "run", "--rm", "--pid", "container:"+proxy, "--cap-add", "SYS_PTRACE", "--network", "none",
+		"--entrypoint", "sh", toolchainImage, "-c",
 		`for p in /proc/[0-9]*; do if [ "$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null)" = "/proxy push " ]; then tr '\0' '\n' <"$p/environ"; fi; done`)
 	if !strings.Contains(environ, upstreamVar+"=") {
 		t.Errorf("no environment of the push was read, so it proves nothing: %q", environ)
