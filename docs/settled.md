@@ -28,6 +28,10 @@ A line says what was settled and ends with the date in brackets, for example (20
 
 - A spec run judges the card's size first (`instructions/spec.md`, "First, the card's size"). For a card that names its change exactly, or whose change is text or a few lines in known places, it reads the files concerned and writes the spec, with no prototype, no survey of options the card decided, and no web page unless the card depends on something outside the repo the run does not know. On any card, it prototypes only what reading the code cannot decide, and only that part. The web stays open to every spec run (2026-11-23).
 
+## ADR 0010: A card is one self-contained pull request; order is a hold on starting
+
+- A spec whose size, as it states it, is over about 1,000 lines of code and tests together recommends a split into cards of about 800 lines each in its first question, names what goes into each and what the first card leaves out, and specifies only the first card (`instructions/spec.md`, "First, the card's size") (2026-11-23).
+
 ## ADR 0011: A card ends as done or dropped, and only the developer drops it
 
 - The developer drops a card with a move on the screen, `drop`, from every state but done, with one confirmation that names the card and an optional note. A card with a run in flight is not dropped (409) until stopping a run comes. The branch of a dropped card stays (card 16, 2026-11-20).
