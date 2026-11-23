@@ -4,7 +4,7 @@ status: accepted
 
 # Kiln is built in a sealed container, and the core contains no C code
 
-A new version of Kiln (ADR 0019) is compiled inside a sealed container started from Kiln's own run image, which already carries both toolchains (ADR 0023), and the result is a program for the developer's machine. The first install is the same build, started by one command. The developer's machine therefore needs only the container engine; the toolchain is the one the checks used, pinned and changed by a card; and the install scripts of UI dependencies run sealed, with only the listed hosts reachable, not on the developer's machine with their home directory in reach.
+A new version of Kiln (ADR 0019) is compiled inside a sealed container started from Kiln's toolchain image, `images/toolchain`, the one the checks build in, and the result is a program for the developer's machine. The first install is the same build, started by one command. The developer's machine therefore needs only the container engine; the toolchain is the one the checks used, pinned and changed by a card; and the install scripts of UI dependencies run sealed, with only the listed hosts reachable, not on the developer's machine with their home directory in reach.
 
 The price is a permanent restriction: the core contains no C code, because a program for macOS with C parts cannot reasonably be built from a Linux container. That narrows the choice of embedded database (ADR 0032) to ones written in pure Go. Confirmed on 2026-11-16: a Go program compiled in a Linux container for macOS on arm64 ran on the developer's machine, signed by the compiler itself, with name lookup working.
 
