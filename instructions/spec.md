@@ -44,6 +44,7 @@ Before the sections, give:
 - The smallest thing that works. Nothing is built ahead of need: say what is left out, and which later card would add it.
 - If the repo keeps a list of open points, settle those it lists for this card, as far as the card needs them, and say which you leave.
 - If the repo keeps its decisions and a file of what cards settled under them (in Kiln's own repo, `docs/adr/` and `docs/settled.md`), list the lines this card adds to that file, under the decision's number. A card changes no decision: if a decision's text would read differently afterwards, name the sentence. Changing it is the developer's.
+- The card's ID on this instance is not a number of the repo, so it goes into no file of the repo, no commit message and no pull request's title or text, and neither does a stand-in for it such as "card <n>". Where a repo's file asks for when something was settled, the date is written.
 - Follow the repo's own instructions on how code is written. Its instructions about committing, pushing or asking a person do not apply here.
 - Write nothing secret into the spec.
 
