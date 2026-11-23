@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -121,15 +122,9 @@ const titleLine = "Pull request title: `"
 // validTitle, the result is "" and later lines are not tried.
 func TitleOf(spec string) string {
 	for _, line := range strings.Split(spec, "\n") {
-		if strings.HasPrefix(line, "## ") {
+		line, ok := headLine(line)
+		if !ok {
 			return ""
-		}
-		line = strings.TrimRight(line, "\r \t")
-		line = strings.TrimLeft(line, " ")
-		if rest, ok := strings.CutPrefix(line, "- "); ok {
-			line = rest
-		} else if rest, ok := strings.CutPrefix(line, "* "); ok {
-			line = rest
 		}
 		inner, ok := strings.CutPrefix(line, titleLine)
 		if !ok || !strings.HasSuffix(inner, "`") {
@@ -140,6 +135,68 @@ func TitleOf(spec string) string {
 			return ""
 		}
 		return title
+	}
+	return ""
+}
+
+// headLine normalises a line of a spec's head: right-trimmed of CR, space and
+// tab, left-trimmed of spaces, with one list marker "- " or "* " removed. It
+// returns false at a line that starts with "## ", where the head ends.
+func headLine(line string) (string, bool) {
+	if strings.HasPrefix(line, "## ") {
+		return "", false
+	}
+	line = strings.TrimRight(line, "\r \t")
+	line = strings.TrimLeft(line, " ")
+	if rest, ok := strings.CutPrefix(line, "- "); ok {
+		line = rest
+	} else if rest, ok := strings.CutPrefix(line, "* "); ok {
+		line = rest
+	}
+	return line, true
+}
+
+// ImplementModels are the models a spec may name for its implement run: the
+// three that instructions/spec.md allows, which a test keeps equal.
+var ImplementModels = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}
+
+// modelLine is how the line that names the implement model starts.
+const modelLine = "Model for implement:"
+
+// ModelOf returns the model a spec names on its line "Model for implement:
+// <identifier>", or "" when it names none of ImplementModels. The head is read
+// as TitleOf reads it, and the first such line decides. The identifier is
+// between the first backtick and the next, or, without backticks, runs up to
+// the first space, tab, comma, semicolon, colon or parenthesis, less one
+// trailing period. Text after it is ignored.
+func ModelOf(spec string) string {
+	for _, line := range strings.Split(spec, "\n") {
+		line, ok := headLine(line)
+		if !ok {
+			return ""
+		}
+		rest, ok := strings.CutPrefix(line, modelLine)
+		if !ok {
+			continue
+		}
+		rest = strings.TrimLeft(rest, " \t")
+		var id string
+		if inner, ok := strings.CutPrefix(rest, "`"); ok {
+			end := strings.Index(inner, "`")
+			if end < 0 {
+				return ""
+			}
+			id = strings.TrimSpace(inner[:end])
+		} else {
+			if end := strings.IndexAny(rest, " \t,;:()"); end >= 0 {
+				rest = rest[:end]
+			}
+			id = strings.TrimSuffix(rest, ".")
+		}
+		if slices.Contains(ImplementModels, id) {
+			return id
+		}
+		return ""
 	}
 	return ""
 }

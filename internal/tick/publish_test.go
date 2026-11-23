@@ -116,7 +116,7 @@ func (p *publishing) card(t *testing.T, s *store.Store, files map[string]string)
 			t.Fatal(err)
 		}
 	}
-	end(1, waiting, finished, &store.Doc{Kind: store.KindSpec, Text: "# Spec\n\nPull request title: `" + publishTitle + "`\n\n## 1. What\n"})
+	end(1, waiting, finished, &store.Doc{Kind: store.KindSpec, Text: "# Spec\n\nModel for implement: `claude-haiku-5-5`\n\nPull request title: `" + publishTitle + "`\n\n## 1. What\n"})
 	end(2, implementWaits, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"},
 		&store.Doc{Kind: store.KindPullRequest, Text: publishText})
 	p.save(t, c.ID, "refs/heads/main", files, fmt.Sprintf("%s-%d-2", p.instance, c.ID))
@@ -821,6 +821,11 @@ func TestPublishMarkers(t *testing.T) {
 	p.with(t, func(s *store.Store) {
 		if r, err := s.Run(run); err != nil || r.Commit != partial {
 			t.Errorf("the run is %+v (%v), want it from the partial save %s", r, err, partial)
+		}
+		for _, id := range []string{fmt.Sprintf("%s-1-4", p.instance), run} {
+			if r, err := s.Run(id); err != nil || r.Model != "claude-haiku-5-5" {
+				t.Errorf("the run %s is %+v (%v), want it on the spec's claude-haiku-5-5", id, r, err)
+			}
 		}
 		if _, err := s.EndRun(run, store.Finished, "exit 0, result success, 1 turns, $0.0001, no change", reviewPassed); err != nil {
 			t.Fatal(err)

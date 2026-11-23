@@ -1014,3 +1014,52 @@ func TestPageRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestSpecModel checks that an implement run starts on the model its approved
+// spec names, if allowed, on every run of the card, and that a review run
+// keeps its flag.
+func TestSpecModel(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		what, line, want string
+	}{
+		{"the line", "Model for implement: claude-haiku-5-5, as it is small.\n", "claude-haiku-5-5"},
+		{"backticks", "Model for implement: `claude-opus-5-5`\n", "claude-opus-5-5"},
+		{"not allowed", "Model for implement: claude-opus-5-6\n", "claude-sonnet-5-5"},
+		{"no line", "", "claude-sonnet-5-5"},
+	} {
+		c, main := stagedCore(t)
+		c.engine = noEngine{}
+		endRun(t, c, store.Spec, store.State{Stage: store.Spec, WaitsFor: store.Approval},
+			&store.Doc{Kind: store.KindSpec, Text: "# Spec\n\n" + tc.line + "\n## 1. What\n"})
+		if _, err := c.store.Decide(1, store.Approve, ""); err != nil {
+			t.Fatal(err)
+		}
+		check := func(when string) {
+			t.Helper()
+			f, err := c.card(ctx, 1, true)
+			if err != nil || f == nil {
+				t.Fatalf("%s: %v, %v", tc.what, f, err)
+			}
+			if f.row.Model != tc.want || f.in.Model != tc.want {
+				t.Errorf("%s, %s: the implement run is on %s (%s), want %s", tc.what, when, f.row.Model, f.in.Model, tc.want)
+			}
+		}
+		check("first run")
+
+		endRun(t, c, store.Implement, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})
+		commitOnBranch(t, c.Repo, main, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+		if _, err := c.store.Move(1, reviewWaits, store.CauseRun); err != nil {
+			t.Fatal(err)
+		}
+		f, err := c.card(ctx, 1, true)
+		if err != nil || f == nil || f.row.Model != "claude-opus-5-6" {
+			t.Errorf("%s: the review run is %+v (%v), want claude-opus-5-6", tc.what, f, err)
+		}
+		endRun(t, c, store.Review, reviewNeedsYou, &store.Doc{Kind: store.KindReview, Text: "Verdict: goes back\n"})
+		if _, err := c.store.Decide(1, store.SendBack, "Again."); err != nil {
+			t.Fatal(err)
+		}
+		check("after a send-back")
+	}
+}
