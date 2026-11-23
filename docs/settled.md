@@ -2,7 +2,7 @@
 
 What cards have settled under a decision, by the decision's number. A card adds its lines here, in the pull request that settles them, and never changes a file in `docs/adr/`. The decisions themselves change only by the developer (ADR 0058).
 
-A line says what was settled and, where it matters, when and by which card. The spec that a line comes from is the text of that card's pull request.
+A line says what was settled and ends with the date in brackets, for example (2026-11-20). It names no card: the pull request that added a line is found with `git blame`. The lines already there stay as they are. The spec that a line comes from is the text of that card's pull request.
 
 ## ADR 0005: Kiln's work ends at "ready to merge"; merging belongs to the target repo's Git host
 
