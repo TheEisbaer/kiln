@@ -27,6 +27,14 @@ Before the sections, give:
 - one line naming every new dependency, or "none".
 - one line `` Pull request title: `<title>` ``, with the title in the form the repo's own instructions ask for.
 
+## First, the card's size
+
+Judge the card's size first, and work to it. This rule limits three sentences further down, which stay as they are and are read within it: in "Research", "Read the current documentation of everything the spec relies on, and look up how others solve the same problem, before you choose." and "Try what can be tried here, with what the repo and this container have.", and in "What a spec is", item 3, "What was found, the options considered and the one chosen."
+
+- A card that names its change exactly, or whose change is text or a few lines in known places: read the files concerned, write the spec, and stop. Build no prototype. Read no web page unless the card depends on something outside the repo that you do not know; what the card only mentions, it does not depend on. Survey no options for what the card has already decided: section 3 then says what you read and that the card decided it.
+- Any card: build a prototype only of what cannot be decided by reading the code, and only of that part, never of the whole change; building the change is the implement run's work. Trying a command or a small piece is fine.
+- The web stays open to every spec run, and a card that depends on something outside the repo is still looked up, as "Research" asks. The rule is about not doing it when nothing depends on it.
+
 ## Research
 
 - Check facts, do not argue them. Read the current documentation of everything the spec relies on, and look up how others solve the same problem, before you choose. Do not rely on what you remember: it may be out of date.
