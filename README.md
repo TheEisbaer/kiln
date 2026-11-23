@@ -11,7 +11,8 @@ Kiln needs a container engine with the `docker` command, and Git. The commands r
 1. Build the images. The toolchain image comes first, since the others are built on it. Building the run image downloads the pinned Claude Code. The way out is needed only with `--spec-hosts`.
 
    ```sh
-   docker build --tag kiln-toolchain --file images/toolchain/Dockerfile .
+   tar -cf - go.mod go.sum images/toolchain/Dockerfile |
+       docker build --tag kiln-toolchain --file images/toolchain/Dockerfile -
    docker build --tag kiln-proxy --file images/proxy/Dockerfile .
    docker build --tag kiln-wayout --file images/wayout/Dockerfile .
    docker build --tag kiln-run images/run
@@ -22,8 +23,8 @@ Kiln needs a container engine with the `docker` command, and Git. The commands r
    ```sh
    docker run --rm --network none --volume "$PWD:/src:ro" --workdir /src \
        --env GOOS=darwin --env GOARCH=arm64 --env CGO_ENABLED=0 \
-       kiln-toolchain sh -c 'go build -trimpath -o /tmp/kiln ./cmd/core && cat /tmp/kiln' >kiln
-   chmod +x kiln
+       kiln-toolchain sh -c 'go build -trimpath -o /tmp/kiln ./cmd/core && cat /tmp/kiln' >kiln.new &&
+       chmod +x kiln.new && mv kiln.new kiln || { rm -f kiln.new; false; }
    ```
 
    `kiln` with no arguments prints its commands and their flags.

@@ -164,6 +164,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 ## ADR 0037: Kiln is built in a sealed container, and the core contains no C code
 
 - The database is pure Go: SQLite translated to Go, through `ncruces/go-sqlite3` (ADR 0057).
+- The README's build writes the program to `kiln.new` and renames it to `kiln` only after the build has succeeded and the file is executable. A failed build leaves no `kiln.new` and leaves a `kiln` from before as it was. The rename makes a new file, so a `kiln` that is running is not written over in place, which Linux refuses ("Text file busy") and which on macOS risks a code-signing crash (2026-11-20).
 
 ## ADR 0038: The container engine carries everything into and out of a run
 
@@ -224,6 +225,7 @@ A line says what was settled and, where it matters, when and by which card. The 
 - The toolchain image carries the Go modules of `go.mod` and `go.sum`, downloaded when it is built, so that the check finds them with the network off (ADR 0057).
 - On the Git host's runner, `check/in-image` mounts Go's build cache, `KILN_GO_CACHE`, writable into the check's container and into the container that compiles the engine-test programs, still with the network off and the repo read-only. On the developer's machine the variable is ignored. `check/in-image --compile-only` compiles what the check compiles, runs none of it, and fills that cache (2026-11-20).
 - The toolchain image carries the label `kiln.context`, the SHA-256 of its context's three files, and an image of that name with the same label is not built again (2026-11-20).
+- The README builds the toolchain image from the same context as `check/in-image`: a tar of `go.mod`, `go.sum` and `images/toolchain/Dockerfile` on standard input, so that the image built by hand is the check's. A change to that list changes both (2026-11-20).
 
 ## ADR 0047: One repo with one Go module, divided by Kiln's parts, with guardrail files in a few named places
 
