@@ -566,7 +566,7 @@ func testRemoveRun(t *testing.T, f fixture) {
 	t.Run("with no proxy", func(t *testing.T) {
 		gone := Proxy{Name: f.name("gone-proxy"), Image: f.proxyImage, Network: f.proxy.Network, Upstream: f.proxy.Upstream}
 		cleanup(t, "rm", "--force", gone.Name)
-		if err := ReplaceProxy(t.Context(), gone, "echo unused"); err != nil {
+		if _, err := KeepProxy(t.Context(), gone); err != nil {
 			t.Fatal(err)
 		}
 		id := f.runID("remove-no-proxy")
@@ -624,7 +624,7 @@ func testNoPull(t *testing.T, f fixture) {
 	missing := f.name("no-such-image")
 	p := Proxy{Name: f.name("no-image-proxy"), Image: missing, Network: f.proxy.Network, Upstream: f.proxy.Upstream}
 	cleanup(t, "rm", "--force", p.Name)
-	if err := StartProxy(t.Context(), p, "unused"); err == nil || !strings.Contains(err.Error(), "No such image") {
+	if err := StartProxy(t.Context(), p); err == nil || !strings.Contains(err.Error(), "No such image") {
 		t.Errorf("StartProxy: want the image missing locally, got %v", err)
 	}
 	if got := containerID(t, p.Name); got != "" {

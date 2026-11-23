@@ -58,6 +58,8 @@ func (noEngine) ReadDocument(string, string, string) (run.Document, error) {
 func (noEngine) Carry(context.Context, run.Inputs, func() error, io.Writer) (run.Verdict, error) {
 	return run.Verdict{}, errors.New("no engine in this test")
 }
+func (noEngine) KeepProxy(context.Context, seal.Proxy) (bool, error)  { return true, nil }
+func (noEngine) PushCredential(context.Context, string, string) error { return nil }
 
 // exitAtPoint is the status with which the binary exits at a point, as a kill
 // there would end it.
@@ -142,7 +144,7 @@ func asKiln(spec string) int {
 		if c.NoEngine {
 			eng = noEngine{}
 		}
-		if err := runCore(ctx, c.Config, os.Stdout, os.Stderr, eng, interval); err != nil {
+		if err := runCore(ctx, c.Config, os.Stdout, os.Stderr, eng, interval, realClock{}); err != nil {
 			fmt.Fprintln(os.Stderr, "kiln core:", err)
 			return 1
 		}

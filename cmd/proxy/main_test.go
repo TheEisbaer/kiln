@@ -28,7 +28,7 @@ func start(t *testing.T, upstreamHandler http.Handler) (*http.Client, *httptest.
 	up := httptest.NewServer(upstreamHandler)
 	t.Cleanup(up.Close)
 	upURL, _ := url.Parse(up.URL)
-	px := httptest.NewServer(handler(upURL, "the-credential"))
+	px := httptest.NewServer(handler(upURL, holding("the-credential")))
 	t.Cleanup(px.Close)
 	pxURL, _ := url.Parse(px.URL)
 	return &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(pxURL)}}, px
@@ -203,7 +203,7 @@ func TestDoesNotCutOffAnAnswerItHasBegunToPassOn(t *testing.T) {
 	}))
 	t.Cleanup(up.Close)
 	upURL, _ := url.Parse(up.URL)
-	proxy := handler(upURL, "the-credential")
+	proxy := handler(upURL, holding("the-credential"))
 	px := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		held.ReadCloser, held.remaining, held.ctx = r.Body, r.ContentLength, r.Context()
 		r.Body = held
@@ -231,22 +231,5 @@ func TestDoesNotCutOffAnAnswerItHasBegunToPassOn(t *testing.T) {
 	got, err := io.ReadAll(resp.Body)
 	if string(got) != "first\nrest\n" || err != nil {
 		t.Errorf("the run got %q, %v; want the whole answer", got, err)
-	}
-}
-
-func TestSettings(t *testing.T) {
-	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
-	if _, _, err := settings(env(map[string]string{credentialVar: "c"})); err == nil {
-		t.Error("started without an upstream")
-	}
-	if _, _, err := settings(env(map[string]string{upstreamVar: "https://up.example"})); err == nil {
-		t.Error("started without a credential")
-	}
-	if _, _, err := settings(env(map[string]string{upstreamVar: "up.example", credentialVar: "c"})); err == nil {
-		t.Error("started with an upstream that is not a URL")
-	}
-	u, c, err := settings(env(map[string]string{upstreamVar: "https://up.example", credentialVar: "c"}))
-	if err != nil || u.Host != "up.example" || c != "c" {
-		t.Errorf("got %v, %q, %v", u, c, err)
 	}
 }

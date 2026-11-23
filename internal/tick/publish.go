@@ -775,14 +775,7 @@ func (c *core) runPublish(ctx context.Context, env []string) (address, failure s
 	stdout, stderr := &tail{max: 64 << 10}, &tail{max: 4 * maxReason}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
-	said := strings.TrimSpace(run.Printable(strings.ToValidUTF8(string(stderr.bytes()), "\uFFFD")))
-	if len(said) > maxReason {
-		cut := len(said) - maxReason
-		for !utf8.RuneStart(said[cut]) {
-			cut++
-		}
-		said = "…" + said[cut:]
-	}
+	said := said(stderr)
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return "", fmt.Sprintf("the publish command did not end within %s", publishLimit)
@@ -806,6 +799,20 @@ func (c *core) runPublish(ctx context.Context, env []string) (address, failure s
 		return "", "the publish command printed an address that is not one: " + run.Printable(address)
 	}
 	return address, ""
+}
+
+// said is what a command printed to its standard error, kept by a tail:
+// made printable, trimmed, and cut to its last maxReason bytes.
+func said(stderr *tail) string {
+	s := strings.TrimSpace(run.Printable(strings.ToValidUTF8(string(stderr.bytes()), "\uFFFD")))
+	if len(s) > maxReason {
+		cut := len(s) - maxReason
+		for !utf8.RuneStart(s[cut]) {
+			cut++
+		}
+		s = "…" + s[cut:]
+	}
+	return s
 }
 
 // tail keeps the last max bytes written to it.

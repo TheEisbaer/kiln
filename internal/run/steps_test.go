@@ -223,6 +223,53 @@ func TestReadEvents(t *testing.T) {
 	})
 }
 
+// refusedOutput is the output of a run whose credential the upstream refused,
+// with the events Claude Code wrote in a real run on 2026-11-23, cut short: a
+// retry after a 401, one after a 500, and the result that ended the run.
+const refusedOutput = `{"type":"system","subtype":"init","cwd":"/work","model":"claude-opus-5-5","claude_code_version":"2.1.326"}
+{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":509,"error_status":401,"error":"authentication_failed"}
+{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":1022,"error_status":401,"error":"authentication_failed"}
+{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":511,"error_status":500,"error":"server_error"}
+{"type":"system","subtype":"status","error_status":401}
+{"type":"result","subtype":"success","is_error":true,"num_turns":23,"total_cost_usd":1.5,"api_error_status":401,"terminal_reason":"api_error"}
+`
+
+// TestRefused checks that following calls refused for each retry after a 401
+// and for nothing else, and that a run that the 401 ended says so in its
+// reason.
+func TestRefused(t *testing.T) {
+	refused := 0
+	f := &follower{out: io.Discard, model: "claude-opus-5-5", mismatch: func(string) {}, refused: func() { refused++ }}
+	s, err := readEvents(strings.NewReader(refusedOutput), f.see)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refused != 2 {
+		t.Errorf("refused was called %d times, want 2", refused)
+	}
+	if want := (Result{Subtype: "success", IsError: true, NumTurns: 23, TotalCostUSD: 1.5, APIErrorStatus: 401}); s.result == nil || *s.result != want {
+		t.Errorf("the result is %+v, want %+v", s.result, want)
+	}
+	rec := &record{Inputs: RecordInputs{Model: "claude-opus-5-5"}, ModelSeen: s.model, Result: s.result,
+		Ending: Ending{ExitCode: 1}, Saved: notSaved}
+	if rec.status() == 0 {
+		t.Error("a run that the 401 ended has the exit status 0")
+	}
+	if got, want := rec.reason(), "the upstream refused the Claude credential (401), 23 turns, $1.5000, not saved"; got != want {
+		t.Errorf("the reason is %q, want %q", got, want)
+	}
+	// Following without refused set, as `kiln run` by hand does.
+	f.refused = nil
+	if _, err := readEvents(strings.NewReader(refusedOutput), f.see); err != nil {
+		t.Fatal(err)
+	}
+	// Another error of the API keeps the reason as it was.
+	rec.Result.APIErrorStatus = 500
+	if got, want := rec.reason(), "exit 1, result success, 23 turns, $1.5000, not saved"; got != want {
+		t.Errorf("with a 500 the reason is %q, want %q", got, want)
+	}
+}
+
 // TestActivities checks what following hands to the screen: each text, cut at
 // 500 characters, and each tool use with one line of its input.
 func TestActivities(t *testing.T) {

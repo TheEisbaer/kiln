@@ -512,6 +512,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
   </div>
   <button id="new" class="primary" type="button">New card</button>
 </header>
+<div id="paused" class="offline" role="status" hidden></div>
 <div id="offline" class="offline" hidden>the core does not answer; trying again every 2 seconds</div>
 <div id="stale" class="offline" hidden>the core serves another version of this page; reload the page to use it</div>
 <section id="strip" class="strip" aria-label="What needs you"></section>
@@ -783,6 +784,9 @@ function renderBoard(b) {
     " · implement on the model its spec names, else " + m.implement + " · review on " + m.review +
     " · " + (b.runs === 1 ? "one run at a time" : "up to " + b.runs + " runs at once");
   $("meta").title = $("meta").textContent;
+  // A paused instance starts no run; the reason says why.
+  $("paused").hidden = !b.paused;
+  $("paused").textContent = b.paused ? "Paused: " + b.paused : "";
   const ids = new Set();
   const per = Object.fromEntries(STAGES.map(([s]) => [s, []]));
   for (const c of b.cards) {

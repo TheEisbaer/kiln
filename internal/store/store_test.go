@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 9"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 10"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 9 was opened")
+		t.Fatal("a store of version 10 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 9") || !strings.Contains(msg, "version 8") {
+	if msg := err.Error(); !strings.Contains(msg, "version 10") || !strings.Contains(msg, "version 9") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 9 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 9 and 0", v, tables)
+	if v != 10 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 10 and 0", v, tables)
 	}
 }
 
@@ -805,13 +805,17 @@ func TestMigrateV2(t *testing.T) {
 	keep := func(d string, migrated bool) string {
 		var out []string
 		for _, line := range strings.Split(d, "\n") {
+			if migrated && line == "ab12cd34 | <nil>" { // the instance's row, not paused
+				line = "ab12cd34"
+			}
 			if migrated && strings.HasPrefix(line, "ab12cd34-") { // a run's row
 				line = strings.TrimSuffix(line, " | <nil>")
 			}
 			line = withoutSince(line, migrated)
 			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") &&
 				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") && !strings.HasPrefix(line, "runs | ") &&
-				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") {
+				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") &&
+				!strings.HasPrefix(line, "instance | ") && !strings.HasPrefix(line, "instance_entries | ") {
 				out = append(out, line)
 			}
 		}
@@ -951,12 +955,16 @@ func TestMigrateV3(t *testing.T) {
 	keep := func(d string, migrated bool) string {
 		var out []string
 		for _, line := range strings.Split(d, "\n") {
+			if migrated && line == "ab12cd34 | <nil>" { // the instance's row, not paused
+				line = "ab12cd34"
+			}
 			if migrated && strings.HasPrefix(line, "ab12cd34-") { // a run's row
 				line = strings.TrimSuffix(line, " | <nil>")
 			}
 			line = withoutSince(line, migrated)
 			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") && !strings.HasPrefix(line, "runs | ") &&
 				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") &&
+				!strings.HasPrefix(line, "instance | ") && !strings.HasPrefix(line, "instance_entries | ") &&
 				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") {
 				out = append(out, line)
 			}
@@ -1148,8 +1156,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 8 {
-		t.Fatalf("the store is version %d after Open, want 8", v)
+	if v := userVersion(t, s); v != version || version != 9 {
+		t.Fatalf("the store is version %d after Open, want 9", v)
 	}
 	// What version 1 held is still there, and has no run or reason.
 	card, err := s.Card(1)
