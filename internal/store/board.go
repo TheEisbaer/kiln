@@ -24,12 +24,13 @@ type Document struct {
 	Kind string
 	Run  string
 	Text string
+	Note string // the developer's note on approving a spec; "" on every other row
 }
 
 // Documents reads a card's documents, newest last, each under its kind: the
 // specs, reports and reviews, from the table specs.
 func (s *Store) Documents(card int64) ([]Document, error) {
-	rows, err := s.db.Query(`SELECT kind, run, text FROM specs WHERE card = ? ORDER BY rowid`, card)
+	rows, err := s.db.Query(`SELECT kind, run, text, note FROM specs WHERE card = ? ORDER BY rowid`, card)
 	if err != nil {
 		return nil, err
 	}
@@ -37,9 +38,11 @@ func (s *Store) Documents(card int64) ([]Document, error) {
 	var docs []Document
 	for rows.Next() {
 		var d Document
-		if err := rows.Scan(&d.Kind, &d.Run, &d.Text); err != nil {
+		var note sql.NullString
+		if err := rows.Scan(&d.Kind, &d.Run, &d.Text, &note); err != nil {
 			return nil, err
 		}
+		d.Note = note.String
 		docs = append(docs, d)
 	}
 	return docs, rows.Err()

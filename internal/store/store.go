@@ -21,7 +21,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 7
+const version = 8
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -121,6 +121,7 @@ type SpecRow struct {
 	Run    string
 	Commit string
 	Text   string
+	Note   string // the developer's note on approving this spec, "" if none
 }
 
 // RunRow is one run of a card, as the store keeps it. An empty Ending means
@@ -242,6 +243,12 @@ CREATE TABLE publishes (
 	address TEXT,
 	branch TEXT
 ) STRICT;`)
+		return err
+	},
+	func(tx *sql.Tx) error {
+		// The developer's note on approving a spec, kept on that spec's row;
+		// NULL on every other row.
+		_, err := tx.Exec(`ALTER TABLE specs ADD COLUMN note TEXT`)
 		return err
 	},
 }
@@ -717,13 +724,15 @@ func (s *Store) Note(card int64) (string, error) {
 // ID and commit.
 func (s *Store) Spec(card int64) (SpecRow, error) {
 	var sp SpecRow
-	err := s.db.QueryRow(`SELECT specs.run, runs.commit_id, specs.text FROM specs
+	var note sql.NullString
+	err := s.db.QueryRow(`SELECT specs.run, runs.commit_id, specs.text, specs.note FROM specs
 		JOIN runs ON runs.id = specs.run WHERE specs.card = ? AND specs.kind = ? ORDER BY specs.rowid DESC LIMIT 1`,
 		card, KindSpec).
-		Scan(&sp.Run, &sp.Commit, &sp.Text)
+		Scan(&sp.Run, &sp.Commit, &sp.Text, &note)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SpecRow{}, fmt.Errorf("card %d has no spec: %w", card, err)
 	}
+	sp.Note = note.String
 	return sp, err
 }
 

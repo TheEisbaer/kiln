@@ -1003,6 +1003,18 @@ const (
 	noteIntro   = "The developer wrote this when sending the card back. Follow it. Where it differs from the spec, the note wins."
 )
 
+// The parts of the developer's note on a spec they approved: for an implement
+// run and a review run after the approved spec, for a spec run that revises
+// an approved spec after the last spec.
+const (
+	specNoteHeading     = "## The developer's note on the spec"
+	specNoteCommon      = "The developer approved the spec with this note. It is the developer's correction to the spec: where the two differ, the note counts. "
+	specNoteImplement   = specNoteCommon + "Build the spec as the note corrects it."
+	specNoteReview      = specNoteCommon + "Judge the change against the spec as the note corrects it."
+	lastSpecNoteHeading = "## The developer's note on the last spec"
+	lastSpecNoteIntro   = "The developer approved the last spec with this note, as their correction to it: where the two differ, the note counts. Carry what it corrects into the spec you write."
+)
+
 // told is what a run is told after its stage's instruction, each part under its
 // heading: the card; for a spec run that follows the developer's note, or a
 // send-back to spec, the last spec, which it revises, and after a send-back to
@@ -1037,6 +1049,9 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 			switch {
 			case err == nil:
 				parts = append(parts, "## The last spec", fenced(last.Text, "markdown"))
+				if last.Note != "" {
+					parts = append(parts, lastSpecNoteHeading, lastSpecNoteIntro+"\n\n"+last.Note)
+				}
 			case !errors.Is(err, sql.ErrNoRows):
 				return "", "", err
 			}
@@ -1051,6 +1066,13 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 		return "", "", err
 	}
 	parts = append(parts, "## The approved spec", fenced(spec.Text, "markdown"))
+	if spec.Note != "" {
+		intro := specNoteImplement
+		if card.Stage != store.Implement {
+			intro = specNoteReview
+		}
+		parts = append(parts, specNoteHeading, intro+"\n\n"+spec.Note)
+	}
 	if card.Stage == store.Implement {
 		last, err := c.store.Newest(card.ID, store.KindSpec, store.KindReview)
 		if err != nil {

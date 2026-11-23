@@ -226,7 +226,7 @@ func TestTwoDocuments(t *testing.T) {
 	if _, err := s.EndRun("r1", Finished, "", State{Review, Run}, &Doc{KindReport, "# Report"}, nil, &Doc{KindPullRequest, "The text."}); err != nil {
 		t.Fatal(err)
 	}
-	want := []Document{{KindReport, "r1", "# Report"}, {KindPullRequest, "r1", "The text."}}
+	want := []Document{{KindReport, "r1", "# Report", ""}, {KindPullRequest, "r1", "The text.", ""}}
 	if docs, err := s.Documents(card.ID); err != nil || !reflect.DeepEqual(docs, want) {
 		t.Errorf("the documents: %+v, %v", docs, err)
 	}
@@ -269,7 +269,7 @@ func TestMigrateV6(t *testing.T) {
 	if v := userVersion(t, s); v != version {
 		t.Fatalf("the store is version %d, want %d", v, version)
 	}
-	want := []Document{{KindSpec, "ab12cd34-1-1", "# Spec"}, {KindReport, "ab12cd34-1-2", "# Report"}}
+	want := []Document{{KindSpec, "ab12cd34-1-1", "# Spec", ""}, {KindReport, "ab12cd34-1-2", "# Report", ""}}
 	if docs, err := s.Documents(1); err != nil || !reflect.DeepEqual(docs, want) {
 		t.Errorf("the documents after the move forward: %+v, %v", docs, err)
 	}

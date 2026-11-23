@@ -87,7 +87,7 @@ func settled(f Facts) bool { return f.Published || !f.Publishing }
 // only for a card without a run in flight (see Decide), and at the Git host
 // only as the moves from there.
 var moves = append([]move{
-	{Approve, State{Spec, Approval}, State{Implement, Run}, NoNote, nil},
+	{Approve, State{Spec, Approval}, State{Implement, Run}, OptionalNote, nil},
 	{Again, State{Spec, Approval}, State{Spec, Run}, RequiredNote, nil},
 	{Again, State{Spec, Developer}, State{Spec, Run}, OptionalNote, nil},
 	{Again, State{Implement, Developer}, State{Implement, Run}, OptionalNote, nil},
@@ -222,6 +222,9 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 		return c, fmt.Errorf("%w: the note is %d.%d KiB, more than 16 KiB", ErrNote, tenths/10, tenths%10)
 	}
 	reason := note
+	if action == Approve {
+		reason = "" // the note is kept on the spec's row, not told twice
+	}
 	if action == Drop {
 		reason = DroppedReason
 		if note != "" {
@@ -251,6 +254,21 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 		}
 		return State{}, fmt.Errorf("%w: %q from %s waiting for %s", ErrRefused, action, from.Stage, from.WaitsFor)
 	}
+	if action == Approve && note != "" {
+		e.write = func(tx *sql.Tx, card int64) error {
+			res, err := tx.Exec(`UPDATE specs SET note = ? WHERE rowid = (SELECT rowid FROM specs WHERE card = ? AND kind = ? ORDER BY rowid DESC LIMIT 1)`,
+				note, card, KindSpec)
+			if err != nil {
+				return err
+			}
+			if n, err := res.RowsAffected(); err != nil {
+				return err
+			} else if n == 0 {
+				return fmt.Errorf("%w: the card has no spec to keep the note with", ErrRefused)
+			}
+			return nil
+		}
+	}
 	if action == Publish {
 		e.write = func(tx *sql.Tx, card int64) error {
 			_, err := tx.Exec(`INSERT INTO publishes (card, workflow_yes, commit_id, address) VALUES (?, ?, NULL, NULL)
@@ -259,5 +277,12 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 			return err
 		}
 	}
-	return s.change(e)
+	c, err := s.change(e)
+	if errors.Is(err, ErrRefused) && c.ID == 0 {
+		// The refusal came from the write, which rolled everything back.
+		if cur, cerr := s.Card(id); cerr == nil {
+			c = cur
+		}
+	}
+	return c, err
 }

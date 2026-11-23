@@ -19,6 +19,9 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The developer approves a spec with a move on the screen: it moves the card from spec, waiting for approval, to implement, waiting for a run. The developer's moves are one table in the store (`Decide` in `internal/store`): approve, again, send back and done (card 13, 2026-11-19). Done is the move from review, waiting for approval, where a review that passed leaves the card; ready to merge comes with publishing (card 14, 2026-11-19).
 - The developer's moves carry a note, at most 16 KiB, trimmed, kept as the reason of the move's entry; no column is added. A spec that waits for approval is sent back to a spec run with a note it cannot go without (`again`), a review that passed is sent back to implement the same way (`send-back`), the moves of a stage that needs you take one or none, and approve and done refuse one. The run that follows a move with a note is told it last, under `## The developer's note`, and the note wins where it differs from the spec (card 16, 2026-11-20).
 - With a publish command the table has `publish`: from review, waiting for approval, to review, waiting for the Git host, with no note. It is offered again from review, needing you, only when the card is there because its publishing failed, which its last entry says, as for a drop. From the Git host the developer has `send-back` with a note and `done`, which the page calls "Close", once the card has its pull request's address; while the core publishes it, the card has no move, drop included. A review that passes shows "Publish" first, then "Send back to implement", then "Close without publishing", today's `done` (card 19, 2026-11-20).
+- Approve takes an optional note, trimmed and at most 16 KiB like every note. It is kept with the spec it approves, in the column note of that spec's row in specs, written in the move's transaction; the approval's entry has no reason, so that the next run is not also told it as the developer's note. With a note, a card that has no spec is refused (409). Approving without a note is as before (2026-11-23).
+- Every implement run and every review run of a card is told its approved spec's note, if it has one, under ## The developer's note on the spec, right after ## The approved spec, with a sentence that it is the developer's correction to the spec and that the note counts where the two differ; a review judges the change against the spec as the note corrects it. A spec run that revises an approved spec is told its note after ## The last spec, under ## The developer's note on the last spec. A new approved spec has its own note or none, so the old note ends with it (2026-11-23).
+- The page offers a field for the note before "Approve", empty by default, and shows an approved spec's note under that spec on the card's page, the earlier specs' as well. The core reads no line of the note: the pull request's title and the model for implement come from the spec's lines (2026-11-23).
 
 ## ADR 0009: Five stages; research is a step inside spec, not a stage
 
@@ -141,6 +144,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The schema is version 3, with `specs`, one row per spec, written in the transaction that ends its run (card 11).
 - The schema is version 5, after card 13's version 4 with the time a run started: `specs` holds every run's document, one row per run, with a column `kind`, `spec`, `report` or `review`; the rows that were there are specs (card 14, 2026-11-19).
 - The schema is version 7: `specs` is keyed by a document's run and kind, since an implement run keeps two, its report and the pull request's text, and the rows keep their order; `publishes` holds a card's publication, one row per card the developer has published: the commit of the branch whose workflow files the developer said yes to, once published the commit and the pull request's address, and the branch on the Git host, kept from the first publishing (card 19, 2026-11-20).
+- The schema is version 8: specs has a column note, the developer's note on approving that spec, NULL on every other row (2026-11-23).
 
 ## ADR 0034: Kiln is a core on the developer's machine, a proxy in a container, and one detached container per run
 
@@ -205,6 +209,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - A card carries two more facts beside its stage and what it waits for, so that no rule has to read the history (ADR 0054).
 - The one place is `change` in `internal/store`: one transaction that checks, writes the card and writes its entry (ADR 0057).
 - A card also carries when it got its state, `since`, written by `change` with the same time as the entry, so that the tick takes the card that has waited longest first without reading the history (rule 3). A store of version 5 takes the time of each card's last entry (card 17, 2026-11-20).
+- The note on an approval is state, kept on the approved spec's row, and the core never reads it from the history (rule 3) (2026-11-23).
 
 ## ADR 0043: A card stores its stage and what it waits for; a run is in flight or has ended in one of four ways
 
@@ -266,6 +271,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The instructions are embedded in the core's program by the package `instructions`. A run's instruction is written once, when it starts, and a run in flight keeps it (card 11).
 - `instructions/implement.md` and `instructions/review.md` are embedded beside `instructions/spec.md`. A run is told its stage's instruction and then, each under its heading, `## The card`, `## The approved spec`, `## The last review` and `## The change`, as its stage has them (card 14, 2026-11-19).
 - A part of what a run is told that a run wrote (`## The last spec`, `## The last report`, `## The last review` and `## The approved spec`) is told inside a code fence with the info string `markdown`, as the change is told inside one with `diff`. The fence is backticks, one longer than the longest run of backticks in the part, so nothing in the part ends it and only the tick's own headings are headings. The card and the developer's note are not fenced, and the store keeps every document as the run wrote it (2026-11-20).
+- The developer's note on the spec is told unfenced, like the card and the developer's note, between the approved spec and the parts after it (2026-11-23).
 
 ## ADR 0060: Kiln may change workflow files, and the developer says yes before such a change is published
 

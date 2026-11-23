@@ -368,6 +368,7 @@ type (
 		Kind string `json:"kind"`
 		Run  string `json:"run"`
 		Text string `json:"text"`
+		Note string `json:"note"`
 	}
 	activityJSON struct {
 		At   time.Time `json:"at"`
@@ -588,7 +589,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	out.Publishing = atHost && pub.Address == "" && h.info.Publishing
 	seen := map[string]bool{}
 	for _, d := range docs {
-		out.Documents = append(out.Documents, documentJSON{Kind: d.Kind, Run: d.Run, Text: d.Text})
+		out.Documents = append(out.Documents, documentJSON{Kind: d.Kind, Run: d.Run, Text: d.Text, Note: d.Note})
 		if !seen[d.Kind] {
 			seen[d.Kind] = true
 			sum.Kinds = append(sum.Kinds, d.Kind)
