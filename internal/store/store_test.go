@@ -1284,6 +1284,16 @@ func TestKill(t *testing.T) {
 			t.Errorf("the run is %+v after the repeated EndRun", r)
 		}
 	})
+	t.Run("ending a run by the rule, at the hook", func(t *testing.T) {
+		path := killAt(t, "endrun-rule-hook")
+		s := reopen(t, path)
+		card, _ := s.Card(1)
+		r, _ := s.Run("r1")
+		if card.State != (State{Spec, Run}) || r.Ending != "" || len(mustHistory(t, s, 1)) != 2 || countRows(t, s, "publishes") != 0 {
+			t.Fatalf("an EndRunByRule killed before the commit left %+v, the run %+v, %d entries and %d publications, want nothing of it",
+				card, r, len(mustHistory(t, s, 1)), countRows(t, s, "publishes"))
+		}
+	})
 	t.Run("ending a run, after the commit", func(t *testing.T) {
 		path := killAt(t, "endrun-after")
 		s := reopen(t, path)
@@ -1488,6 +1498,7 @@ func reopen(t *testing.T, path string) *Store {
 //	endrun-hook   at the commit of EndRun, after a Create, a Move and an AddRun
 //	endrun-after  after EndRun has returned
 //	endrun-spec-hook  as endrun-hook, with a spec given to EndRun
+//	endrun-rule-hook  at the commit of EndRunByRule, with a publication to write
 //	approve-hook  at the commit of an approval with a note, after a spec waits for approval
 //	migrate       in the move forward of the store at path, of version 1 or 2
 //	loop    never: it moves card 1 through valid states, printing a line each time
@@ -1566,8 +1577,15 @@ func asChild(mode, path string) {
 		if mode == "endrun-spec-hook" {
 			spec = specDoc("the spec")
 		}
-		if mode == "endrun-hook" || mode == "endrun-spec-hook" {
+		if mode == "endrun-hook" || mode == "endrun-spec-hook" || mode == "endrun-rule-hook" {
 			afterCardWritten = func() error { stop(); return nil }
+		}
+		if mode == "endrun-rule-hook" {
+			rule := Rule{To: State{Review, Host}, Reason: "by the rule", Publish: true}
+			if _, err := s.EndRunByRule("r1", Finished, "saved", State{Review, Approval}, rule); err != nil {
+				fail(err)
+			}
+			stop()
 		}
 		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}, spec); err != nil {
 			fail(err)
@@ -1590,4 +1608,92 @@ func asChild(mode, path string) {
 	if mode == "after" {
 		stop()
 	}
+}
+
+func TestEndRunByRule(t *testing.T) {
+	setup := func(t *testing.T) *Store {
+		s := open(t)
+		if _, err := s.Create("a card"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Move(1, State{Review, Run}, CauseRule); err != nil {
+			t.Fatal(err)
+		}
+		mustAddRun(t, s, theRun(1, "r1"))
+		return s
+	}
+	rule := Rule{To: State{Review, Host}, Reason: "the rule publishes it", Publish: true}
+
+	t.Run("both entries, the card and the publication", func(t *testing.T) {
+		s := setup(t)
+		// A branch kept from an earlier publishing, and a yes and an address to reset.
+		if _, err := s.db.Exec(`INSERT INTO publishes (card, workflow_yes, commit_id, address, branch) VALUES (1, 'abc', 'def', 'https://x/1', 'card/1-x')`); err != nil {
+			t.Fatal(err)
+		}
+		card, err := s.EndRunByRule("r1", Finished, "passes", State{Review, Approval}, rule)
+		if err != nil || card.State != rule.To {
+			t.Fatalf("EndRunByRule: %+v, %v", card, err)
+		}
+		if got, _ := s.Card(1); got.State != rule.To {
+			t.Errorf("the card is %+v", got)
+		}
+		h := mustHistory(t, s, 1)
+		if len(h) != 4 {
+			t.Fatalf("history %+v", h)
+		}
+		a, b := h[2], h[3]
+		if a.Cause != CauseRun || a.State != (State{Review, Approval}) || a.Reason != "passes" || a.Run != "r1" {
+			t.Errorf("the run's entry is %+v", a)
+		}
+		if b.Cause != CauseRule || b.State != rule.To || b.Reason != rule.Reason || b.Run != "" {
+			t.Errorf("the rule's entry is %+v", b)
+		}
+		if !a.At.Equal(b.At) {
+			t.Errorf("the entries have the times %v and %v", a.At, b.At)
+		}
+		var since string
+		if err := s.db.QueryRow(`SELECT since FROM cards WHERE id = 1`).Scan(&since); err != nil || since != b.At.Format(time.RFC3339Nano) {
+			t.Errorf("since is %q (%v), want %v", since, err, b.At.Format(time.RFC3339Nano))
+		}
+		if r, _ := s.Run("r1"); r.Ending != Finished {
+			t.Errorf("the run is %+v", r)
+		}
+		if p, err := s.Publication(1); err != nil || p != (Publication{Branch: "card/1-x"}) {
+			t.Errorf("the publication is %+v, %v", p, err)
+		}
+		// A second call for the same run writes nothing.
+		if _, err := s.EndRunByRule("r1", Finished, "passes", State{Review, Approval}, rule); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(mustHistory(t, s, 1)); n != 4 {
+			t.Errorf("a repeat left %d entries", n)
+		}
+	})
+	t.Run("without Publish no publication is written", func(t *testing.T) {
+		s := setup(t)
+		r := Rule{To: State{Review, Approval}, Reason: "waits"}
+		if _, err := s.EndRunByRule("r1", Finished, "passes", State{Review, Approval}, r); err != nil {
+			t.Fatal(err)
+		}
+		if n := countRows(t, s, "publishes"); n != 0 {
+			t.Errorf("%d publications", n)
+		}
+		if n := len(mustHistory(t, s, 1)); n != 4 {
+			t.Errorf("%d entries", n)
+		}
+	})
+	t.Run("refused before anything is written", func(t *testing.T) {
+		s := setup(t)
+		for name, r := range map[string]Rule{
+			"no reason":     {To: State{Review, Host}, Publish: true},
+			"a bad pairing": {To: State{Backlog, Host}, Reason: "x"},
+		} {
+			if _, err := s.EndRunByRule("r1", Finished, "passes", State{Review, Approval}, r); err == nil {
+				t.Errorf("%s: no error", name)
+			}
+		}
+		if run, _ := s.Run("r1"); run.Ending != "" || len(mustHistory(t, s, 1)) != 2 || countRows(t, s, "publishes") != 0 {
+			t.Errorf("something was written: %+v", run)
+		}
+	})
 }

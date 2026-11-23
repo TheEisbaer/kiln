@@ -407,6 +407,9 @@ type edit struct {
 	end    *runEnd
 	write  func(tx *sql.Tx, card int64) error
 	always bool
+	// rule, when set with end, is a second step in the same transaction: the
+	// card ends at rule.To, with a second entry of the cause rule and no run.
+	rule *Rule
 }
 
 // change is the one place every change to a card goes through (ADR 0042). In
@@ -468,8 +471,12 @@ func (s *Store) change(e edit) (Card, error) {
 		}
 	}
 
-	// The card's row and its entry carry the same time: since is when the
+	// The card's row and its entries carry the same time: since is when the
 	// card got the state it has.
+	final := to
+	if e.rule != nil {
+		final = e.rule.To
+	}
 	at := time.Now().UTC().Format(time.RFC3339Nano)
 	if e.create {
 		res, err := tx.Exec(`INSERT INTO cards (text, stage, waits_for, since) VALUES (?, ?, ?, ?)`,
@@ -486,11 +493,11 @@ func (s *Store) change(e edit) (Card, error) {
 			return card, nil
 		}
 		if _, err := tx.Exec(`UPDATE cards SET stage = ?, waits_for = ?, since = ? WHERE id = ?`,
-			to.Stage, to.WaitsFor, at, id); err != nil {
+			final.Stage, final.WaitsFor, at, id); err != nil {
 			return Card{}, err
 		}
 	}
-	card.State = to
+	card.State = final
 	if e.write != nil {
 		if err := e.write(tx, id); err != nil {
 			return Card{}, err
@@ -510,6 +517,12 @@ func (s *Store) change(e edit) (Card, error) {
 	if _, err := tx.Exec(`INSERT INTO entries (card, at, cause, stage, waits_for, run, reason) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		id, at, e.cause, to.Stage, to.WaitsFor, run, why); err != nil {
 		return Card{}, err
+	}
+	if e.rule != nil {
+		if _, err := tx.Exec(`INSERT INTO entries (card, at, cause, stage, waits_for, run, reason) VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+			id, at, CauseRule, final.Stage, final.WaitsFor, e.rule.Reason); err != nil {
+			return Card{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Card{}, err
@@ -684,6 +697,15 @@ func (s *Store) EndRun(id string, ending Ending, reason string, to State, docs .
 	if ending != Finished && ending != Failed {
 		return Card{}, fmt.Errorf("%q is not an ending of a run (ADR 0043)", ending)
 	}
+	kept, err := keepDocs(id, docs)
+	if err != nil {
+		return Card{}, err
+	}
+	return s.change(edit{next: fixed(to), cause: CauseRun, reason: reason, end: &runEnd{id, ending, kept}})
+}
+
+// keepDocs checks a run's documents, nil ones left out.
+func keepDocs(id string, docs []*Doc) ([]Doc, error) {
 	var kept []Doc
 	seen := map[string]bool{}
 	for _, d := range docs {
@@ -691,15 +713,52 @@ func (s *Store) EndRun(id string, ending Ending, reason string, to State, docs .
 			continue
 		}
 		if !kinds[d.Kind] {
-			return Card{}, fmt.Errorf("%q is not a kind of document", d.Kind)
+			return nil, fmt.Errorf("%q is not a kind of document", d.Kind)
 		}
 		if seen[d.Kind] {
-			return Card{}, fmt.Errorf("run %s: two documents of the kind %s", id, d.Kind)
+			return nil, fmt.Errorf("run %s: two documents of the kind %s", id, d.Kind)
 		}
 		seen[d.Kind] = true
 		kept = append(kept, *d)
 	}
-	return s.change(edit{next: fixed(to), cause: CauseRun, reason: reason, end: &runEnd{id, ending, kept}})
+	return kept, nil
+}
+
+// Rule is the step of the rule that follows a run's end: the state the card
+// goes on to, the reason on the rule's entry, and whether the card's
+// publication is written, as the move publish writes it without a yes.
+type Rule struct {
+	To      State
+	Reason  string
+	Publish bool
+}
+
+// EndRunByRule does what EndRun does, and in the same transaction of change
+// writes a second entry, of the cause rule and with no run, at rule.To with
+// rule.Reason; the card's row ends at rule.To. With rule.Publish the card's
+// publication is written anew, with no yes, no commit and no address, and its
+// branch kept. A rule with no reason, or a state that is not a valid pairing,
+// is refused before anything is written. A run that has ended already writes
+// nothing.
+func (s *Store) EndRunByRule(id string, ending Ending, reason string, to State, rule Rule, docs ...*Doc) (Card, error) {
+	if ending != Finished && ending != Failed {
+		return Card{}, fmt.Errorf("%q is not an ending of a run (ADR 0043)", ending)
+	}
+	if rule.Reason == "" {
+		return Card{}, errors.New("a step of the rule needs a reason")
+	}
+	if !valid[rule.To] {
+		return Card{}, fmt.Errorf("a card cannot be in %s waiting for %s (ADR 0043)", rule.To.Stage, rule.To.WaitsFor)
+	}
+	kept, err := keepDocs(id, docs)
+	if err != nil {
+		return Card{}, err
+	}
+	e := edit{next: fixed(to), cause: CauseRun, reason: reason, end: &runEnd{id, ending, kept}, rule: &rule}
+	if rule.Publish {
+		e.write = func(tx *sql.Tx, card int64) error { return writePublication(tx, card, "") }
+	}
+	return s.change(e)
 }
 
 // Note reads the developer's note that a card's next run is told: the note on

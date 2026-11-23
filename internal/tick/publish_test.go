@@ -99,6 +99,18 @@ func (p *publishing) look(t *testing.T, f func(s *store.Store)) {
 // returns the card's ID.
 func (p *publishing) card(t *testing.T, s *store.Store, files map[string]string) int64 {
 	t.Helper()
+	return p.stage(t, s, files, true)
+}
+
+// reviewing writes a card as card does, without its review run: it waits for
+// one, with its branch saved, and the run is the core's to start.
+func (p *publishing) reviewing(t *testing.T, s *store.Store, files map[string]string) int64 {
+	t.Helper()
+	return p.stage(t, s, files, false)
+}
+
+func (p *publishing) stage(t *testing.T, s *store.Store, files map[string]string, passed bool) int64 {
+	t.Helper()
 	c, err := s.Create("Add a line to the notes.\n\nThe second paragraph.")
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +132,9 @@ func (p *publishing) card(t *testing.T, s *store.Store, files map[string]string)
 	end(2, implementWaits, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"},
 		&store.Doc{Kind: store.KindPullRequest, Text: publishText})
 	p.save(t, c.ID, "refs/heads/main", files, fmt.Sprintf("%s-%d-2", p.instance, c.ID))
-	end(3, reviewWaits, reviewPassed, &store.Doc{Kind: store.KindReview, Text: "Verdict: passes\n"})
+	if passed {
+		end(3, reviewWaits, reviewPassed, &store.Doc{Kind: store.KindReview, Text: "Verdict: passes\n"})
+	}
 	return c.ID
 }
 
@@ -1013,4 +1027,225 @@ func ended(pid int) bool {
 	// The state follows the command's name, which is in parentheses.
 	_, rest, ok := strings.Cut(string(stat[bytes.LastIndexByte(stat, ')')+1:]), " ")
 	return ok && strings.HasPrefix(rest, "Z")
+}
+
+// states reads a card's history from its last entry that waits for a review
+// run on, as "stage/waits by cause" (ADR 0043), with each entry's reason.
+func (p *publishing) states(t *testing.T, card int64) (lines, reasons []string) {
+	t.Helper()
+	p.look(t, func(s *store.Store) {
+		h, err := s.History(card)
+		if err != nil {
+			t.Fatal(err)
+		}
+		from := 0
+		for i, e := range h {
+			if e.State == reviewWaits {
+				from = i
+			}
+		}
+		for _, e := range h[from:] {
+			lines = append(lines, fmt.Sprintf("%s/%s by %s", e.State.Stage, e.State.WaitsFor, e.Cause))
+			reasons = append(reasons, e.Reason)
+		}
+	})
+	return lines, reasons
+}
+
+const ruleReason = "the review passed; the core publishes the change by the rule"
+
+// TestPublishedByRule has a review pass with no move by the developer: the
+// card goes to the Git host by the rule and is published, and the history
+// names the rule.
+func TestPublishedByRule(t *testing.T) {
+	p := newPublishing(t)
+	var card int64
+	p.with(t, func(s *store.Store) {
+		card = p.reviewing(t, s, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+	})
+	e := newFakeEngine()
+	core := p.start(t, e, 3)
+	e.open(card, "exit")
+	got := p.waitFor(t, card, atHost, "published as ")
+	core.stop(t)
+	if got.Reason != "published as https://git.example/pull/1" {
+		t.Errorf("the entry is %+v", got)
+	}
+	p.look(t, func(s *store.Store) {
+		h, _ := s.History(card)
+		for i, e := range h {
+			if e.Cause == store.CauseDeveloper && i > 3 {
+				t.Errorf("an entry by the developer after the approval of the spec: %+v", e)
+			}
+		}
+	})
+	lines, reasons := p.states(t, card)
+	want := []string{"review/run by run", "review/approval by run", "review/host by rule", "review/host by rule"}
+	if !slices.Equal(lines, want) {
+		t.Errorf("the history is %q, want %q", lines, want)
+	} else if reasons[2] != ruleReason || reasons[3] != "published as https://git.example/pull/1" {
+		t.Errorf("the reasons are %q", reasons)
+	}
+	if n := p.calls(t); n != 1 {
+		t.Errorf("the command ran %d times", n)
+	}
+	p.look(t, func(s *store.Store) {
+		if pub, err := s.Publication(card); err != nil || pub.Branch != "card/1-add-a-line-to-the-notes" {
+			t.Errorf("the publication is %+v (%v)", pub, err)
+		}
+	})
+}
+
+// TestPublishByRuleWorkflows has a change to a workflow file wait for the
+// developer's yes: the rule does not publish it, and "Publish" with the yes
+// does.
+func TestPublishByRuleWorkflows(t *testing.T) {
+	p := newPublishing(t)
+	var card int64
+	p.with(t, func(s *store.Store) {
+		card = p.reviewing(t, s, map[string]string{"NOTES.md": "# Notes\nA line.\n", ".github/workflows/check.yml": "on: push\n"})
+	})
+	e := newFakeEngine()
+	core := p.start(t, e, 3)
+	e.open(card, "exit")
+	want := "the review passed; the change touches workflow files and waits for your yes before it is published: .github/workflows/check.yml"
+	got := p.waitFor(t, card, reviewPassed, want)
+	if got.Reason != want || got.Cause != store.CauseRule {
+		t.Errorf("the entry is %+v", got)
+	}
+	e.waitTicks(t, 10)
+	if n := p.calls(t); n != 0 {
+		t.Errorf("the command ran %d times", n)
+	}
+	p.look(t, func(s *store.Store) {
+		c, _ := s.Card(card)
+		moves, err := s.Moves(c, true)
+		if err != nil || len(moves) == 0 || moves[0].Action != store.Publish {
+			t.Errorf("the moves are %v, %v", moves, err)
+		}
+		p.publish(t, s, card, true)
+	})
+	p.waitFor(t, card, atHost, "published as ")
+	core.stop(t)
+	if n := p.calls(t); n != 1 || p.env(t, 1)[envWorkflowYes] != "1" {
+		t.Errorf("the command ran %d times, and was told %q", n, p.env(t, 1)[envWorkflowYes])
+	}
+}
+
+// TestPassedWithoutPublishCommand leaves a card whose review passed waiting
+// for approval when the core has no publish command.
+func TestPassedWithoutPublishCommand(t *testing.T) {
+	p := newPublishing(t)
+	p.cfg.PublishCommand = ""
+	var card int64
+	p.with(t, func(s *store.Store) {
+		card = p.reviewing(t, s, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+	})
+	e := newFakeEngine()
+	core := p.start(t, e, 3)
+	e.open(card, "exit")
+	got := p.waitFor(t, card, reviewPassed, "")
+	e.waitTicks(t, 5)
+	core.stop(t)
+	if got.Cause != store.CauseRun {
+		t.Errorf("the entry is %+v, want the run's", got)
+	}
+	lines, _ := p.states(t, card)
+	if want := []string{"review/run by run", "review/approval by run"}; !slices.Equal(lines, want) {
+		t.Errorf("the history is %q, want %q", lines, want)
+	}
+	p.look(t, func(s *store.Store) {
+		if c, _ := s.Card(card); c.State != reviewPassed {
+			t.Errorf("the card is in %+v", c.State)
+		}
+	})
+}
+
+// TestPublishByRuleFails puts a card whose publishing by the rule fails under
+// "needs you", with the command's reason, and "Publish" then works.
+func TestPublishByRuleFails(t *testing.T) {
+	p := newPublishing(t)
+	p.mode(t, 1, "fail")
+	var card int64
+	p.with(t, func(s *store.Store) {
+		card = p.reviewing(t, s, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+	})
+	e := newFakeEngine()
+	core := p.start(t, e, 3)
+	e.open(card, "exit")
+	got := p.waitFor(t, card, reviewNeedsYou, "")
+	if want := "publishing failed: the publish command failed: exit status 1: the Git host said no\n\uFFFD[2Jto card/1-add-a-line-to-the-notes"; got.Reason != want {
+		t.Errorf("the reason is %q, want %q", got.Reason, want)
+	}
+	p.look(t, func(s *store.Store) {
+		c, _ := s.Card(card)
+		moves, err := s.Moves(c, true)
+		if err != nil || !slices.Contains(moves, store.Allowed{Action: store.Publish, Note: store.NoNote}) {
+			t.Errorf("the moves after a failure: %v, %v", moves, err)
+		}
+		p.publish(t, s, card, false)
+	})
+	p.waitFor(t, card, atHost, "published as https://git.example/pull/1")
+	core.stop(t)
+	if n := p.calls(t); n != 2 {
+		t.Errorf("the command ran %d times, want 2", n)
+	}
+}
+
+// TestPublishByRuleAfterConflict sends a change that collides with main back
+// to implement, and publishes it by itself when its next review passes, on the
+// branch name the first publishing would have had.
+func TestPublishByRuleAfterConflict(t *testing.T) {
+	p := newPublishing(t)
+	var card int64
+	p.with(t, func(s *store.Store) {
+		card = p.reviewing(t, s, map[string]string{"NOTES.md": "# Notes\nA line of the card.\n"})
+	})
+	p.moveOrigin(t, map[string]string{"NOTES.md": "# Notes\nA line of other work.\n"})
+	e := newFakeEngine()
+	core := p.start(t, e, 3)
+	e.open(card, "exit")
+	// The fake engine's implement run changes nothing, and needs the developer;
+	// before it, the rule's step and the collision are in the history.
+	p.waitFor(t, card, implementNeedsYou, "the run changed nothing")
+	core.stop(t)
+	if _, reasons := p.states(t, card); !slices.Contains(reasons, "main moved and the change no longer applies: NOTES.md") {
+		t.Errorf("the reasons are %q, want the collision among them", reasons)
+	}
+	if n := p.calls(t); n != 0 {
+		t.Errorf("the command ran %d times", n)
+	}
+
+	// The developer resolves the branch and has the run go again; the run, held
+	// by the test, ends by hand at review, waiting for a run.
+	p.resolve(t, card, map[string]string{"NOTES.md": "# Notes\nA line of other work.\nA line of the card.\n"})
+	p.with(t, func(s *store.Store) {
+		if _, err := s.Decide(card, store.Again, ""); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e = newFakeEngine()
+	core = p.start(t, e, 3)
+	waitUntil(t, "the second implement run starts", func() bool { return slices.Contains(e.snapshot().started, card) })
+	core.stop(t)
+	p.with(t, func(s *store.Store) {
+		if _, err := s.EndRun(fmt.Sprintf("%s-1-5", p.instance), store.Finished, "resolved by the test", reviewWaits); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e = newFakeEngine()
+	core = p.start(t, e, 3)
+	e.open(card, "exit")
+	p.waitFor(t, card, atHost, "published as ")
+	core.stop(t)
+	if n := p.calls(t); n != 1 {
+		t.Errorf("the command ran %d times", n)
+	}
+	if got := p.env(t, 1)[envBranch]; got != "card/1-add-a-line-to-the-notes" {
+		t.Errorf("the command was told the branch %q", got)
+	}
+	lines, _ := p.states(t, card)
+	if n := len(lines); n < 4 || lines[n-2] != "review/host by rule" || lines[n-1] != "review/host by rule" {
+		t.Errorf("the history is %q", lines)
+	}
 }

@@ -271,10 +271,7 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 	}
 	if action == Publish {
 		e.write = func(tx *sql.Tx, card int64) error {
-			_, err := tx.Exec(`INSERT INTO publishes (card, workflow_yes, commit_id, address) VALUES (?, ?, NULL, NULL)
-				ON CONFLICT (card) DO UPDATE SET workflow_yes = excluded.workflow_yes, commit_id = NULL, address = NULL`,
-				card, sql.NullString{String: o.WorkflowYes, Valid: o.WorkflowYes != ""})
-			return err
+			return writePublication(tx, card, o.WorkflowYes)
 		}
 	}
 	c, err := s.change(e)
@@ -285,4 +282,13 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 		}
 	}
 	return c, err
+}
+
+// writePublication writes a card's publication anew: the developer's yes, if
+// any, and no commit and no address yet. Its branch is kept.
+func writePublication(tx *sql.Tx, card int64, yes string) error {
+	_, err := tx.Exec(`INSERT INTO publishes (card, workflow_yes, commit_id, address) VALUES (?, ?, NULL, NULL)
+		ON CONFLICT (card) DO UPDATE SET workflow_yes = excluded.workflow_yes, commit_id = NULL, address = NULL`,
+		card, sql.NullString{String: yes, Valid: yes != ""})
+	return err
 }
