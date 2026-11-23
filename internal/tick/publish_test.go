@@ -449,6 +449,14 @@ func TestPublishConflict(t *testing.T) {
 		if err != nil || r.Commit != merge {
 			t.Errorf("the implement run is %+v (%v), want it from the merge %s", r, err, merge)
 		}
+		// Main moved counts as a send-back (ADR 0054, rule 3), so the run is
+		// on the stronger model and not on the spec's claude-haiku-5-5.
+		if r.Model != "claude-opus-5-5" {
+			t.Errorf("the implement run is on %s, want claude-opus-5-5", r.Model)
+		}
+		if c, _ := s.Card(card); c.SendBacks != 1 {
+			t.Errorf("the card has %d send-backs, want 1", c.SendBacks)
+		}
 	})
 	told := string(readFile(t, filepath.Join(p.cfg.Data, "instructions", run+".md")))
 	if h := toldParts(t, told, instructions.Implement); !slices.Equal(h, []string{"## The card", "## The approved spec", "## What changed in main"}) {
@@ -479,6 +487,69 @@ func TestPublishConflict(t *testing.T) {
 	}
 	if n := p.calls(t); n != 0 {
 		t.Errorf("the command ran %d times", n)
+	}
+}
+
+// TestPublishConflictThird has main move under a card that was sent back
+// twice already: after the merge of main the card waits in implement for the
+// developer, its number goes up to 3, and no run starts. The developer's
+// again starts the implement run from the merge.
+func TestPublishConflictThird(t *testing.T) {
+	p := newPublishing(t)
+	var card int64
+	p.with(t, func(s *store.Store) {
+		card = p.card(t, s, map[string]string{"NOTES.md": "# Notes\nA line of the card.\n"})
+		// Two send-backs, as two returns by the rule would leave the card.
+		if _, err := s.MoveSentBack(card, reviewPassed, reviewNeedsYou, "sent back by the test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.MoveSentBack(card, reviewNeedsYou, reviewPassed, "sent back by the test"); err != nil {
+			t.Fatal(err)
+		}
+		p.publish(t, s, card, false)
+	})
+	tip := gitIn(t, p.cfg.Repo, "rev-parse", "refs/heads/kiln/card-1")
+	main := p.moveOrigin(t, map[string]string{"NOTES.md": "# Notes\nA line of other work.\n"})
+	e := newFakeEngine()
+	core := p.start(t, e, 3)
+	last := p.waitFor(t, card, implementNeedsYou, "")
+	e.waitTicks(t, 3)
+	core.stop(t)
+	want := "main moved and the change no longer applies: NOTES.md; the card was sent back twice already, so it waits for you"
+	if last.Reason != want || last.Cause != store.CauseRule {
+		t.Errorf("the entry is %+v, want the reason %q", last, want)
+	}
+	if s := e.snapshot(); len(s.started) != 0 || p.calls(t) != 0 {
+		t.Errorf("runs started for %v, and the command ran %d times", s.started, p.calls(t))
+	}
+	merge := gitIn(t, p.cfg.Repo, "rev-parse", "refs/heads/kiln/card-1")
+	if got := gitIn(t, p.cfg.Repo, "log", "--format=%P", "-1", merge); got != tip+" "+main {
+		t.Errorf("the merge's parents are %q, want the tip %s and main %s", got, tip, main)
+	}
+	p.with(t, func(s *store.Store) {
+		c, err := s.Card(card)
+		if err != nil || c.SendBacks != 3 {
+			t.Errorf("the card is %+v (%v), want 3 send-backs", c, err)
+		}
+		if n, _ := s.RunCount(card); n != 3 {
+			t.Errorf("the card has %d runs, want 3", n)
+		}
+		if _, err := s.Decide(card, store.Again, ""); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e = newFakeEngine()
+	core = p.start(t, e, 3)
+	waitUntil(t, "the implement run starts", func() bool { return slices.Contains(e.snapshot().started, card) })
+	core.stop(t)
+	run := fmt.Sprintf("%s-1-4", p.instance)
+	p.with(t, func(s *store.Store) {
+		if r, err := s.Run(run); err != nil || r.Commit != merge || r.Model != "claude-opus-5-5" {
+			t.Errorf("the implement run is %+v (%v), want it from the merge %s on claude-opus-5-5", r, err, merge)
+		}
+	})
+	if told := string(readFile(t, filepath.Join(p.cfg.Data, "instructions", run+".md"))); !strings.HasSuffix(told, mainMoved(card, []string{"NOTES.md"})) {
+		t.Errorf("the implement run is told\n%s", told)
 	}
 }
 
@@ -836,9 +907,11 @@ func TestPublishMarkers(t *testing.T) {
 		if r, err := s.Run(run); err != nil || r.Commit != partial {
 			t.Errorf("the run is %+v (%v), want it from the partial save %s", r, err, partial)
 		}
+		// Main moved counts as a send-back (ADR 0054, rule 3): both runs are
+		// on the stronger model, not on the spec's claude-haiku-5-5.
 		for _, id := range []string{fmt.Sprintf("%s-1-4", p.instance), run} {
-			if r, err := s.Run(id); err != nil || r.Model != "claude-haiku-5-5" {
-				t.Errorf("the run %s is %+v (%v), want it on the spec's claude-haiku-5-5", id, r, err)
+			if r, err := s.Run(id); err != nil || r.Model != "claude-opus-5-5" {
+				t.Errorf("the run %s is %+v (%v), want it on claude-opus-5-5", id, r, err)
 			}
 		}
 		if _, err := s.EndRun(run, store.Finished, "exit 0, result success, 1 turns, $0.0001, no change", reviewPassed); err != nil {

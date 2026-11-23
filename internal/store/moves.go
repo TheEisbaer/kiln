@@ -231,7 +231,9 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 			reason += ": " + note
 		}
 	}
-	e := edit{id: id, cause: CauseDeveloper, reason: reason}
+	// Approving a spec starts the number of send-backs again (ADR 0054); the
+	// developer's other moves leave it.
+	e := edit{id: id, cause: CauseDeveloper, reason: reason, approved: action == Approve}
 	e.next = func(from State, f Facts) (State, error) {
 		f.Publishing = o.Publishing
 		for _, m := range moves {

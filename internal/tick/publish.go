@@ -463,9 +463,16 @@ func (c *core) publishFailed(card store.Card, reason string) error {
 
 // toImplement sends a card at the Git host back to implement, because main
 // moved and the change no longer applies to it, with the files that collide.
+// It counts as a send-back (ADR 0054, rule 3): a card sent back twice already
+// waits in implement for the developer instead of a run.
 func (c *core) toImplement(card store.Card, files []string) error {
 	reason := run.Printable(conflictReason + ": " + fileNames(files))
-	if _, err := c.store.MoveWithReason(card.ID, atHost, implementWaits, store.CauseRule, reason); err != nil {
+	to := implementWaits
+	if card.SendBacks >= store.MaxSendBacks {
+		to = implementNeedsYou
+		reason = run.Printable(conflictReason + ": " + fileNames(files) + "; the card was sent back twice already, so it waits for you")
+	}
+	if _, err := c.store.MoveSentBack(card.ID, atHost, to, reason); err != nil {
 		return err
 	}
 	fmt.Fprintf(c.out, "card %d: %s\n", card.ID, run.Printable(reason))

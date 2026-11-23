@@ -43,6 +43,9 @@ type child struct {
 	// NoEngine starts core on an engine that holds no runs and starts none,
 	// for a test of publishing without the container engine.
 	NoEngine bool
+	// Reviews starts core on the fake engine, with every run's exit open,
+	// and these first lines of the reviews of each card.
+	Reviews map[int64][]string
 }
 
 // noEngine is an engine with no runs, which starts none.
@@ -143,6 +146,14 @@ func asKiln(spec string) int {
 		var eng engine = sealed{}
 		if c.NoEngine {
 			eng = noEngine{}
+		}
+		if c.Reviews != nil {
+			e := newFakeEngine()
+			for card, lines := range c.Reviews {
+				e.reviews[card] = lines
+				e.open(card, "exit")
+			}
+			eng = e
 		}
 		if err := runCore(ctx, c.Config, os.Stdout, os.Stderr, eng, interval, realClock{}); err != nil {
 			fmt.Fprintln(os.Stderr, "kiln core:", err)
@@ -1173,10 +1184,35 @@ func TestSpecModel(t *testing.T) {
 		if err != nil || f == nil || f.row.Model != "claude-opus-5-6" {
 			t.Errorf("%s: the review run is %+v (%v), want claude-opus-5-6", tc.what, f, err)
 		}
+		// A review that ends straight under "needs you", which the developer
+		// sends back, leaves the card at no send-backs: the spec's model holds.
 		endRun(t, c, store.Review, reviewNeedsYou, &store.Doc{Kind: store.KindReview, Text: "Verdict: goes back\n"})
 		if _, err := c.store.Decide(1, store.SendBack, "Again."); err != nil {
 			t.Fatal(err)
 		}
 		check("after a send-back")
+
+		// A review that the rule sends back moves implement to the stronger
+		// model, whatever the spec names (ADR 0030, rule 3).
+		endRun(t, c, store.Implement, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})
+		if _, err := c.store.Move(1, reviewWaits, store.CauseRun); err != nil {
+			t.Fatal(err)
+		}
+		n, err := c.store.RunCount(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := fmt.Sprintf("ab12cd34-1-%d", n+1)
+		if err := c.store.AddRun(store.RunRow{ID: id, Card: 1, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.store.EndRunByRule(id, store.Finished, "", reviewNeedsYou, *sentBackRule(0),
+			&store.Doc{Kind: store.KindReview, Text: "Verdict: goes back\n"}); err != nil {
+			t.Fatal(err)
+		}
+		f, err = c.card(ctx, 1, true)
+		if err != nil || f == nil || f.row.Model != run.SentBackModel || f.in.Model != run.SentBackModel {
+			t.Errorf("%s, after a send-back by the rule: the implement run is %+v (%v), want %s", tc.what, f, err, run.SentBackModel)
+		}
 	}
 }

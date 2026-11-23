@@ -115,13 +115,13 @@ func (s *Store) Board() ([]Summary, error) {
 
 	var out []Summary
 	at := map[int64]int{} // a card's index in out
-	rows, err := tx.Query(`SELECT id, text, stage, waits_for FROM cards ORDER BY id`)
+	rows, err := tx.Query(`SELECT id, text, stage, waits_for, send_backs FROM cards ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var c Card
-		if err := rows.Scan(&c.ID, &c.Text, &c.Stage, &c.WaitsFor); err != nil {
+		if err := rows.Scan(&c.ID, &c.Text, &c.Stage, &c.WaitsFor, &c.SendBacks); err != nil {
 			rows.Close()
 			return nil, err
 		}

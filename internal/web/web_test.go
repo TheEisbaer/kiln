@@ -116,7 +116,7 @@ func TestPage(t *testing.T) {
 func TestBoard(t *testing.T) {
 	f := newFixture(t)
 	if b := decode[boardJSON](t, f.do(t, "GET", "/api/board", "")); b.Instance != "ab12cd34" || b.Repo != "/data/repo.git" ||
-		b.Models != (modelsJSON{"claude-opus-5-5", "claude-opus-5-5", "claude-opus-5-5"}) || b.Runs != 3 || b.Cards == nil || len(b.Cards) != 0 {
+		b.Models != (modelsJSON{"claude-opus-5-5", "claude-opus-5-5", "claude-opus-5-5", "claude-opus-5-5"}) || b.Runs != 3 || b.Cards == nil || len(b.Cards) != 0 {
 		t.Fatalf("an empty board: %+v", b)
 	}
 	spec := f.card(t, "\n  Write the screen  \nwith more", store.State{Stage: store.Spec, WaitsFor: store.Run})
@@ -150,6 +150,35 @@ func TestBoard(t *testing.T) {
 	}
 	if c := b.Cards[2]; c.ID != long || c.Title != longTitle || c.Headline != longHeadline || c.WaitsFor != "approval" {
 		t.Errorf("the card with a long first line: %+v", c)
+	}
+}
+
+// TestSendBacks checks that the board and the card's page carry the card's
+// number of send-backs, and the board the model of an implement run after a
+// send-back.
+func TestSendBacks(t *testing.T) {
+	f := newFixture(t)
+	id := f.card(t, "Sent back", store.State{Stage: store.Review, WaitsFor: store.Run})
+	other := f.card(t, "Not sent back", store.State{Stage: store.Implement, WaitsFor: store.Run})
+	if err := f.store.AddRun(store.RunRow{ID: "r1", Card: id, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
+		t.Fatal(err)
+	}
+	rule := store.Rule{To: store.State{Stage: store.Implement, WaitsFor: store.Run}, Reason: "sent back by the rule", SendBack: true}
+	if _, err := f.store.EndRunByRule("r1", store.Finished, "goes back", store.State{Stage: store.Review, WaitsFor: store.Developer}, rule,
+		&store.Doc{Kind: store.KindReview, Text: "Verdict: goes back\n"}); err != nil {
+		t.Fatal(err)
+	}
+	w := f.do(t, "GET", "/api/board", "")
+	if !strings.Contains(w.Body.String(), `"send_backs":1`) || !strings.Contains(w.Body.String(), `"sent_back":"claude-opus-5-5"`) {
+		t.Errorf("the board does not carry send_backs or sent_back: %s", w.Body)
+	}
+	b := decode[boardJSON](t, w)
+	if len(b.Cards) != 2 || b.Cards[0].ID != id || b.Cards[0].SendBacks != 1 || b.Cards[1].ID != other || b.Cards[1].SendBacks != 0 ||
+		b.Models.SentBack != "claude-opus-5-5" {
+		t.Errorf("the board: %+v, models %+v", b.Cards, b.Models)
+	}
+	if c := decode[cardJSON](t, f.do(t, "GET", fmt.Sprintf("/api/cards/%d", id), "")); c.SendBacks != 1 {
+		t.Errorf("the card's page has %d send-backs, want 1", c.SendBacks)
 	}
 }
 

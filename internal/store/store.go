@@ -21,7 +21,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 9
+const version = 10
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -79,12 +79,19 @@ var valid = map[State]bool{
 // causes are the causes that can be written.
 var causes = map[Cause]bool{CauseDeveloper: true, CauseRun: true, CauseHost: true, CauseRule: true}
 
-// Card is a card as it is now.
+// Card is a card as it is now. SendBacks is its number of send-backs since
+// its spec was approved (ADR 0054): one for every review that went back and
+// every return from the Git host because main moved.
 type Card struct {
 	ID   int64
 	Text string
 	State
+	SendBacks int
 }
+
+// MaxSendBacks is the most send-backs the rule makes on a card; at that
+// number the card waits for the developer instead (ADR 0015, ADR 0054).
+const MaxSendBacks = 2
 
 // Entry is one change of a card: its state after the change, when, and by
 // whom. The state before it is in the card's previous entry. Run and Reason
@@ -263,6 +270,12 @@ CREATE TABLE instance_entries (
 ) STRICT;`)
 		return err
 	},
+	func(tx *sql.Tx) error {
+		// The card's number of send-backs since its spec was approved (ADR
+		// 0054); every card that was there starts at 0.
+		_, err := tx.Exec(`ALTER TABLE cards ADD COLUMN send_backs INTEGER NOT NULL DEFAULT 0`)
+		return err
+	},
 }
 
 // afterMigration, set only by the test, is called when the store has been moved
@@ -346,6 +359,15 @@ func (s *Store) MoveWithReason(id int64, from, to State, cause Cause, reason str
 	return s.change(edit{id: id, next: from.only(to), cause: cause, reason: reason})
 }
 
+// MoveSentBack is MoveWithReason with the cause rule for a send-back that is
+// not a review's, such as a card at the Git host whose change no longer
+// applies: in the same transaction the card's number of send-backs goes up by
+// one. A move to implement, waiting for a run, is refused with ErrRefused when
+// the number is MaxSendBacks or more, and nothing is written.
+func (s *Store) MoveSentBack(id int64, from, to State, reason string) (Card, error) {
+	return s.change(edit{id: id, next: from.only(to), cause: CauseRule, reason: reason, sendBack: true})
+}
+
 // only is the next state of a change that is made only from the state s.
 func (s State) only(to State) func(State, Facts) (State, error) {
 	return func(have State, _ Facts) (State, error) {
@@ -422,6 +444,11 @@ type edit struct {
 	// rule, when set with end, is a second step in the same transaction: the
 	// card ends at rule.To, with a second entry of the cause rule and no run.
 	rule *Rule
+	// sendBack raises the card's number of send-backs by one, and refuses a
+	// card that would end in implement, waiting for a run, at MaxSendBacks or
+	// more; approved sets the number to 0 (ADR 0054).
+	sendBack bool
+	approved bool
 }
 
 // change is the one place every change to a card goes through (ADR 0042). In
@@ -489,6 +516,10 @@ func (s *Store) change(e edit) (Card, error) {
 	if e.rule != nil {
 		final = e.rule.To
 	}
+	if e.sendBack && final == (State{Implement, Run}) && card.SendBacks >= MaxSendBacks {
+		return card, fmt.Errorf("%w: the card was sent back %d times already, and the rule sends a change back %d times at most",
+			ErrRefused, card.SendBacks, MaxSendBacks)
+	}
 	at := time.Now().UTC().Format(time.RFC3339Nano)
 	if e.create {
 		res, err := tx.Exec(`INSERT INTO cards (text, stage, waits_for, since) VALUES (?, ?, ?, ?)`,
@@ -510,6 +541,18 @@ func (s *Store) change(e edit) (Card, error) {
 		}
 	}
 	card.State = final
+	switch {
+	case e.sendBack:
+		if _, err := tx.Exec(`UPDATE cards SET send_backs = send_backs + 1 WHERE id = ?`, id); err != nil {
+			return Card{}, err
+		}
+		card.SendBacks++
+	case e.approved:
+		if _, err := tx.Exec(`UPDATE cards SET send_backs = 0 WHERE id = ?`, id); err != nil {
+			return Card{}, err
+		}
+		card.SendBacks = 0
+	}
 	if e.write != nil {
 		if err := e.write(tx, id); err != nil {
 			return Card{}, err
@@ -737,12 +780,15 @@ func keepDocs(id string, docs []*Doc) ([]Doc, error) {
 }
 
 // Rule is the step of the rule that follows a run's end: the state the card
-// goes on to, the reason on the rule's entry, and whether the card's
-// publication is written, as the move publish writes it without a yes.
+// goes on to, the reason on the rule's entry, whether the card's
+// publication is written, as the move publish writes it without a yes, and
+// whether it is a send-back, which raises the card's number of send-backs by
+// one (ADR 0054).
 type Rule struct {
-	To      State
-	Reason  string
-	Publish bool
+	To       State
+	Reason   string
+	Publish  bool
+	SendBack bool
 }
 
 // EndRunByRule does what EndRun does, and in the same transaction of change
@@ -750,8 +796,11 @@ type Rule struct {
 // rule.Reason; the card's row ends at rule.To. With rule.Publish the card's
 // publication is written anew, with no yes, no commit and no address, and its
 // branch kept. A rule with no reason, or a state that is not a valid pairing,
-// is refused before anything is written. A run that has ended already writes
-// nothing.
+// is refused before anything is written. With rule.SendBack the card's number
+// of send-backs goes up by one in the same transaction; a send-back to
+// implement, waiting for a run, of a card at MaxSendBacks or more is refused
+// with ErrRefused, and so is a send-back that publishes, and nothing is
+// written. A run that has ended already writes nothing.
 func (s *Store) EndRunByRule(id string, ending Ending, reason string, to State, rule Rule, docs ...*Doc) (Card, error) {
 	if ending != Finished && ending != Failed {
 		return Card{}, fmt.Errorf("%q is not an ending of a run (ADR 0043)", ending)
@@ -762,11 +811,14 @@ func (s *Store) EndRunByRule(id string, ending Ending, reason string, to State, 
 	if !valid[rule.To] {
 		return Card{}, fmt.Errorf("a card cannot be in %s waiting for %s (ADR 0043)", rule.To.Stage, rule.To.WaitsFor)
 	}
+	if rule.SendBack && rule.Publish {
+		return Card{}, fmt.Errorf("%w: a send-back does not publish", ErrRefused)
+	}
 	kept, err := keepDocs(id, docs)
 	if err != nil {
 		return Card{}, err
 	}
-	e := edit{next: fixed(to), cause: CauseRun, reason: reason, end: &runEnd{id, ending, kept}, rule: &rule}
+	e := edit{next: fixed(to), cause: CauseRun, reason: reason, end: &runEnd{id, ending, kept}, rule: &rule, sendBack: rule.SendBack}
 	if rule.Publish {
 		e.write = func(tx *sql.Tx, card int64) error { return writePublication(tx, card, "") }
 	}
@@ -852,8 +904,8 @@ func readRun(q querier, id string) (RunRow, error) {
 
 func readCard(q querier, id int64) (Card, error) {
 	c := Card{ID: id}
-	err := q.QueryRow(`SELECT text, stage, waits_for FROM cards WHERE id = ?`, id).
-		Scan(&c.Text, &c.Stage, &c.WaitsFor)
+	err := q.QueryRow(`SELECT text, stage, waits_for, send_backs FROM cards WHERE id = ?`, id).
+		Scan(&c.Text, &c.Stage, &c.WaitsFor, &c.SendBacks)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Card{}, fmt.Errorf("%w %d: %w", ErrNoCard, id, err)
 	}

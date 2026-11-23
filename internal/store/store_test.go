@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 10"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 11"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 10 was opened")
+		t.Fatal("a store of version 11 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 10") || !strings.Contains(msg, "version 9") {
+	if msg := err.Error(); !strings.Contains(msg, "version 11") || !strings.Contains(msg, "version 10") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 10 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 10 and 0", v, tables)
+	if v != 11 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 11 and 0", v, tables)
 	}
 }
 
@@ -728,11 +728,12 @@ func dump(t *testing.T, path string) string {
 	return b.String()
 }
 
-// withoutSince is a line of a dump without the cards' column since, which
-// version 6 added, when the dump is of a store moved forward: a card's row is
-// the only one of five columns there.
+// withoutSince is a line of a dump without the cards' columns since and
+// send_backs, which versions 6 and 10 added, when the dump is of a store moved
+// forward: a card's row is the only one of six columns there that does not
+// start with a run's ID, and its number of send-backs is 0.
 func withoutSince(line string, migrated bool) string {
-	if parts := strings.Split(line, " | "); migrated && len(parts) == 5 {
+	if parts := strings.Split(line, " | "); migrated && len(parts) == 6 && !strings.HasPrefix(parts[0], "ab12cd34-") && parts[5] == "0" {
 		return strings.Join(parts[:4], " | ")
 	}
 	return line
@@ -1156,12 +1157,13 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 9 {
-		t.Fatalf("the store is version %d after Open, want 9", v)
+	if v := userVersion(t, s); v != version || version != 10 {
+		t.Fatalf("the store is version %d after Open, want 10", v)
 	}
-	// What version 1 held is still there, and has no run or reason.
+	// What version 1 held is still there, and has no run or reason, and no
+	// send-back.
 	card, err := s.Card(1)
-	if err != nil || card.Text != "old card" || card.State != (State{Spec, Run}) {
+	if err != nil || card.Text != "old card" || card.State != (State{Spec, Run}) || card.SendBacks != 0 {
 		t.Fatalf("the old card: %+v, %v", card, err)
 	}
 	h := mustHistory(t, s, 1)
@@ -1192,6 +1194,39 @@ func TestMigrate(t *testing.T) {
 	fresh := open(t)
 	if got, want := shape(t, s), shape(t, fresh); !reflect.DeepEqual(got, want) {
 		t.Errorf("a migrated store differs from a new one:\n%v\n%v", got, want)
+	}
+}
+
+// TestMigrateV9 moves a store of version 9 with a card forward: the card has
+// the number of send-backs 0.
+func TestMigrateV9(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create("a card"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Move(1, State{Review, Developer}, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	// Back to version 9: the column did not exist.
+	if _, err := s.db.Exec(`ALTER TABLE cards DROP COLUMN send_backs; PRAGMA user_version = 9`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s = reopen(t, path)
+	if v := userVersion(t, s); v != 10 {
+		t.Fatalf("the store is version %d, want 10", v)
+	}
+	card, err := s.Card(1)
+	if err != nil || card.State != (State{Review, Developer}) || card.SendBacks != 0 {
+		t.Errorf("the card after the move forward: %+v, %v", card, err)
+	}
+	if b, err := s.Board(); err != nil || len(b) != 1 || b[0].SendBacks != 0 {
+		t.Errorf("the board after the move forward: %+v, %v", b, err)
 	}
 }
 
@@ -1300,6 +1335,28 @@ func TestKill(t *testing.T) {
 		if card.State != (State{Spec, Run}) || r.Ending != "" || len(mustHistory(t, s, 1)) != 2 || countRows(t, s, "publishes") != 0 {
 			t.Fatalf("an EndRunByRule killed before the commit left %+v, the run %+v, %d entries and %d publications, want nothing of it",
 				card, r, len(mustHistory(t, s, 1)), countRows(t, s, "publishes"))
+		}
+	})
+	t.Run("a send-back by the rule, at the hook", func(t *testing.T) {
+		path := killAt(t, "endrun-sendback-hook")
+		s := reopen(t, path)
+		card, _ := s.Card(1)
+		r, _ := s.Run("r1")
+		if card.State != (State{Review, Run}) || card.SendBacks != 0 || r.Ending != "" ||
+			len(mustHistory(t, s, 1)) != 2 || countRows(t, s, "specs") != 0 {
+			t.Fatalf("a send-back killed before the commit left %+v, the run %+v, %d entries and %d documents, want nothing of it",
+				card, r, len(mustHistory(t, s, 1)), countRows(t, s, "specs"))
+		}
+		// Repeated, it writes the change once.
+		card, err := s.EndRunByRule("r1", Finished, "goes back", State{Review, Developer}, sendBackRule, reviewDoc())
+		if err != nil || card.State != (State{Implement, Run}) || card.SendBacks != 1 {
+			t.Fatalf("the repeat: %+v, %v", card, err)
+		}
+		if _, err := s.EndRunByRule("r1", Finished, "goes back", State{Review, Developer}, sendBackRule, reviewDoc()); err != nil {
+			t.Fatal(err)
+		}
+		if c, _ := s.Card(1); c.SendBacks != 1 || len(mustHistory(t, s, 1)) != 4 || countRows(t, s, "specs") != 1 {
+			t.Errorf("after two repeats: %+v with %d entries and %d documents", c, len(mustHistory(t, s, 1)), countRows(t, s, "specs"))
 		}
 	})
 	t.Run("ending a run, after the commit", func(t *testing.T) {
@@ -1441,11 +1498,11 @@ func TestKill(t *testing.T) {
 		s := reopen(t, path)
 		card, _ := s.Card(1)
 		sp, err := s.Spec(1)
-		if err != nil || card.State != (State{Spec, Approval}) || sp.Note != "" {
-			t.Fatalf("an approval killed before the commit left %+v and the spec %+v, %v, want the card waiting with no note", card, sp, err)
+		if err != nil || card.State != (State{Spec, Approval}) || sp.Note != "" || card.SendBacks != 2 {
+			t.Fatalf("an approval killed before the commit left %+v and the spec %+v, %v, want the card waiting with no note and its number 2", card, sp, err)
 		}
-		if _, err := s.Decide(1, Approve, "the note"); err != nil {
-			t.Fatal(err)
+		if card, err := s.Decide(1, Approve, "the note"); err != nil || card.SendBacks != 0 {
+			t.Fatalf("the repeated approval: %+v, %v", card, err)
 		}
 		if sp, _ := s.Spec(1); sp.Note != "the note" {
 			t.Errorf("the repeated approval kept the note %q", sp.Note)
@@ -1507,6 +1564,7 @@ func reopen(t *testing.T, path string) *Store {
 //	endrun-after  after EndRun has returned
 //	endrun-spec-hook  as endrun-hook, with a spec given to EndRun
 //	endrun-rule-hook  at the commit of EndRunByRule, with a publication to write
+//	endrun-sendback-hook  at the commit of EndRunByRule with a send-back and a review, from review
 //	approve-hook  at the commit of an approval with a note, after a spec waits for approval
 //	migrate       in the move forward of the store at path, of version 1 or 2
 //	loop    never: it moves card 1 through valid states, printing a line each time
@@ -1574,7 +1632,11 @@ func asChild(mode, path string) {
 			fmt.Println("moved")
 		}
 	}
-	if _, err := s.Move(1, State{Spec, Run}, CauseRule); err != nil {
+	first := State{Spec, Run}
+	if mode == "endrun-sendback-hook" {
+		first = State{Review, Run}
+	}
+	if _, err := s.Move(1, first, CauseRule); err != nil {
 		fail(err)
 	}
 	if strings.HasPrefix(mode, "endrun-") {
@@ -1585,8 +1647,14 @@ func asChild(mode, path string) {
 		if mode == "endrun-spec-hook" {
 			spec = specDoc("the spec")
 		}
-		if mode == "endrun-hook" || mode == "endrun-spec-hook" || mode == "endrun-rule-hook" {
+		if mode == "endrun-hook" || mode == "endrun-spec-hook" || mode == "endrun-rule-hook" || mode == "endrun-sendback-hook" {
 			afterCardWritten = func() error { stop(); return nil }
+		}
+		if mode == "endrun-sendback-hook" {
+			if _, err := s.EndRunByRule("r1", Finished, "goes back", State{Review, Developer}, sendBackRule, reviewDoc()); err != nil {
+				fail(err)
+			}
+			stop()
 		}
 		if mode == "endrun-rule-hook" {
 			rule := Rule{To: State{Review, Host}, Reason: "by the rule", Publish: true}
@@ -1605,6 +1673,10 @@ func asChild(mode, path string) {
 			fail(err)
 		}
 		if _, err := s.EndRun("r1", Finished, "saved", State{Spec, Approval}, specDoc("the spec")); err != nil {
+			fail(err)
+		}
+		// A card sent back twice before, as one sent back to spec is.
+		if _, err := s.db.Exec(`UPDATE cards SET send_backs = 2 WHERE id = 1`); err != nil {
 			fail(err)
 		}
 		afterCardWritten = func() error { stop(); return nil }
@@ -1702,6 +1774,165 @@ func TestEndRunByRule(t *testing.T) {
 		}
 		if run, _ := s.Run("r1"); run.Ending != "" || len(mustHistory(t, s, 1)) != 2 || countRows(t, s, "publishes") != 0 {
 			t.Errorf("something was written: %+v", run)
+		}
+	})
+}
+
+// sendBackRule is the step of the rule after a review that goes back.
+var sendBackRule = Rule{To: State{Implement, Run}, Reason: "sent back by the rule", SendBack: true}
+
+func reviewDoc() *Doc { return &Doc{Kind: KindReview, Text: "Verdict: goes back\n\nA finding.\n"} }
+
+// setSendBacks sets a card's number of send-backs, as the steps that raise it
+// would have.
+func setSendBacks(t *testing.T, s *Store, card int64, n int) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE cards SET send_backs = ? WHERE id = ?`, n, card); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSendBack(t *testing.T) {
+	setup := func(t *testing.T, n int) *Store {
+		s := open(t)
+		mustCreate(t, s, "a card")
+		if _, err := s.Move(1, State{Review, Run}, CauseRule); err != nil {
+			t.Fatal(err)
+		}
+		setSendBacks(t, s, 1, n)
+		mustAddRun(t, s, theRun(1, "r1"))
+		return s
+	}
+	t.Run("the step of a send-back", func(t *testing.T) {
+		s := setup(t, 0)
+		card, err := s.EndRunByRule("r1", Finished, "goes back", State{Review, Developer}, sendBackRule, reviewDoc())
+		if err != nil || card.State != (State{Implement, Run}) || card.SendBacks != 1 {
+			t.Fatalf("EndRunByRule: %+v, %v", card, err)
+		}
+		if got, _ := s.Card(1); got.State != (State{Implement, Run}) || got.SendBacks != 1 {
+			t.Errorf("the card is %+v", got)
+		}
+		if r, _ := s.Run("r1"); r.Ending != Finished {
+			t.Errorf("the run is %+v", r)
+		}
+		h := mustHistory(t, s, 1)
+		if len(h) != 4 {
+			t.Fatalf("history %+v", h)
+		}
+		if a := h[2]; a.Cause != CauseRun || a.State != (State{Review, Developer}) || a.Run != "r1" {
+			t.Errorf("the run's entry is %+v", a)
+		}
+		if b := h[3]; b.Cause != CauseRule || b.State != (State{Implement, Run}) || b.Reason != sendBackRule.Reason || b.Run != "" {
+			t.Errorf("the rule's entry is %+v", b)
+		}
+		// A repeat writes nothing.
+		if _, err := s.EndRunByRule("r1", Finished, "goes back", State{Review, Developer}, sendBackRule, reviewDoc()); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := s.Card(1); got.SendBacks != 1 || len(mustHistory(t, s, 1)) != 4 || countRows(t, s, "specs") != 1 {
+			t.Errorf("a repeat left %+v with %d entries", got, len(mustHistory(t, s, 1)))
+		}
+	})
+	t.Run("refused at two", func(t *testing.T) {
+		s := setup(t, 2)
+		_, err := s.EndRunByRule("r1", Finished, "goes back", State{Review, Developer}, sendBackRule, reviewDoc())
+		if !errors.Is(err, ErrRefused) {
+			t.Fatalf("a third send-back to implement: %v, want ErrRefused", err)
+		}
+		card, _ := s.Card(1)
+		if r, _ := s.Run("r1"); r.Ending != "" || card.State != (State{Review, Run}) || card.SendBacks != 2 ||
+			len(mustHistory(t, s, 1)) != 2 || countRows(t, s, "specs") != 0 {
+			t.Errorf("something was written: the run %+v, the card %+v", r, card)
+		}
+	})
+	t.Run("a stop at two is counted", func(t *testing.T) {
+		s := setup(t, 2)
+		stop := Rule{To: State{Review, Developer}, Reason: "waits for you", SendBack: true}
+		card, err := s.EndRunByRule("r1", Finished, "goes back", State{Review, Developer}, stop, reviewDoc())
+		if err != nil || card.State != (State{Review, Developer}) || card.SendBacks != 3 {
+			t.Fatalf("the stop: %+v, %v", card, err)
+		}
+	})
+	t.Run("a send-back that publishes is refused", func(t *testing.T) {
+		s := setup(t, 0)
+		r := Rule{To: State{Review, Host}, Reason: "x", SendBack: true, Publish: true}
+		if _, err := s.EndRunByRule("r1", Finished, "passes", State{Review, Approval}, r); !errors.Is(err, ErrRefused) {
+			t.Errorf("a send-back that publishes: %v", err)
+		}
+		if c, _ := s.Card(1); c.SendBacks != 0 || len(mustHistory(t, s, 1)) != 2 {
+			t.Errorf("something was written: %+v", c)
+		}
+	})
+	t.Run("MoveSentBack", func(t *testing.T) {
+		s := open(t)
+		mustCreate(t, s, "a card")
+		if _, err := s.Move(1, atHost, CauseDeveloper); err != nil {
+			t.Fatal(err)
+		}
+		card, err := s.MoveSentBack(1, atHost, State{Implement, Run}, "main moved")
+		if err != nil || card.State != (State{Implement, Run}) || card.SendBacks != 1 {
+			t.Fatalf("MoveSentBack: %+v, %v", card, err)
+		}
+		if h := mustHistory(t, s, 1); h[len(h)-1].Cause != CauseRule || h[len(h)-1].Reason != "main moved" {
+			t.Errorf("the entry is %+v", h[len(h)-1])
+		}
+		// From another state it is refused, and the number stays.
+		if _, err := s.MoveSentBack(1, atHost, State{Implement, Run}, "main moved"); !errors.Is(err, ErrRefused) {
+			t.Errorf("a repeat: %v", err)
+		}
+		if c, _ := s.Card(1); c.SendBacks != 1 {
+			t.Errorf("after the repeat the number is %d", c.SendBacks)
+		}
+		// At two, to a run is refused, and to the developer counts.
+		if _, err := s.Move(1, atHost, CauseDeveloper); err != nil {
+			t.Fatal(err)
+		}
+		setSendBacks(t, s, 1, 2)
+		if _, err := s.MoveSentBack(1, atHost, State{Implement, Run}, "main moved"); !errors.Is(err, ErrRefused) {
+			t.Errorf("a third send-back to a run: %v", err)
+		}
+		card, err = s.MoveSentBack(1, atHost, State{Implement, Developer}, "main moved; waits for you")
+		if err != nil || card.State != (State{Implement, Developer}) || card.SendBacks != 3 {
+			t.Errorf("a third send-back to the developer: %+v, %v", card, err)
+		}
+	})
+	t.Run("the developer's moves leave the number", func(t *testing.T) {
+		s := setup(t, 2)
+		stop := Rule{To: State{Review, Developer}, Reason: "waits for you"}
+		if _, err := s.EndRunByRule("r1", Finished, "goes back", State{Review, Developer}, stop, reviewDoc()); err != nil {
+			t.Fatal(err)
+		}
+		card, err := s.Decide(1, SendBack, "")
+		if err != nil || card.State != (State{Implement, Run}) || card.SendBacks != 2 {
+			t.Errorf("the developer's send-back: %+v, %v", card, err)
+		}
+		if c, _ := s.Card(1); c.SendBacks != 2 {
+			t.Errorf("the card is %+v", c)
+		}
+	})
+	t.Run("approval starts the number again", func(t *testing.T) {
+		s := setup(t, 2)
+		stop := Rule{To: State{Review, Developer}, Reason: "waits for you"}
+		if _, err := s.EndRunByRule("r1", Finished, "goes back", State{Review, Developer}, stop, reviewDoc()); err != nil {
+			t.Fatal(err)
+		}
+		card, err := s.Decide(1, ToSpec, "")
+		if err != nil || card.SendBacks != 2 {
+			t.Fatalf("to-spec: %+v, %v", card, err)
+		}
+		mustAddRun(t, s, theRun(1, "r2"))
+		if _, err := s.EndRun("r2", Finished, "a new spec", State{Spec, Approval}, specDoc("the new spec")); err != nil {
+			t.Fatal(err)
+		}
+		if c, _ := s.Card(1); c.SendBacks != 2 {
+			t.Errorf("before the approval the number is %d", c.SendBacks)
+		}
+		card, err = s.Decide(1, Approve, "")
+		if err != nil || card.State != (State{Implement, Run}) || card.SendBacks != 0 {
+			t.Errorf("the approval: %+v, %v", card, err)
+		}
+		if c, _ := s.Card(1); c.SendBacks != 0 {
+			t.Errorf("after the approval the number is %d", c.SendBacks)
 		}
 	})
 }
