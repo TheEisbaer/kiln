@@ -1975,11 +1975,7 @@ func bareRepo(t *testing.T, files map[string]string) (string, string) {
 	dir := t.TempDir()
 	work := filepath.Join(dir, "work")
 	gitIn(t, dir, "init", "--quiet", "--initial-branch=main", work)
-	for name, data := range files {
-		if err := os.WriteFile(filepath.Join(work, name), []byte(data), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	write(t, work, files)
 	gitIn(t, work, "add", "--all")
 	gitIn(t, work, "commit", "--quiet", "--message", "start")
 	bare := filepath.Join(dir, "copy.git")

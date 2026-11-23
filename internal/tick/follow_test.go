@@ -60,12 +60,70 @@ type fakeEngine struct {
 	models     map[string]string    // the model in the inputs of each run's Carry, by the run's ID
 	builds     []seal.Program       // the calls of Build
 	buildFails bool                 // whether a build fails
+	// The images, and the calls on them, of Build ("program <image>") and of
+	// KeepProxy ("keep <image> <its ID>") in the book's events too, in order.
+	book        imageBook
+	imageBuilds []imageBuild    // the calls of BuildImage
+	imageFails  map[string]bool // the names of the images whose builds fail
+}
+
+// imageBuild is a call of BuildImage, with the names in its context.
+type imageBuild struct {
+	seal.Image
+	entries []string
+}
+
+func (e *fakeEngine) BuildImage(_ context.Context, im seal.Image, src io.Reader) error {
+	entries, err := tarEntries(src)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.imageBuilds = append(e.imageBuilds, imageBuild{im, entries})
+	if err != nil {
+		return err
+	}
+	if e.imageFails[im.Name] {
+		e.book.Events = append(e.book.Events, "failed "+im.Name+":"+im.Tag)
+		return errors.New("the image's build failed, as the test has it")
+	}
+	return e.book.build(im, entries)
+}
+
+func (e *fakeEngine) ImageID(_ context.Context, ref string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.book.id(ref), nil
+}
+
+func (e *fakeEngine) TagImage(_ context.Context, src, dst string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.book.tag(src, dst)
+}
+
+func (e *fakeEngine) RemoveImageTag(_ context.Context, ref string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.book.rm(ref)
+}
+
+func (e *fakeEngine) ImageTags(_ context.Context, name string) ([]string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.book.tags(name), nil
+}
+
+// events are the engine's calls on images, programs and the proxy so far.
+func (e *fakeEngine) events() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Clone(e.book.Events)
 }
 
 // Build is standInBuild, counted.
 func (e *fakeEngine) Build(_ context.Context, p seal.Program, src io.Reader, out io.Writer) error {
 	e.mu.Lock()
 	e.builds = append(e.builds, p)
+	e.book.Events = append(e.book.Events, "program "+p.Image)
 	fails := e.buildFails
 	e.mu.Unlock()
 	if fails {
@@ -78,7 +136,7 @@ func (e *fakeEngine) Build(_ context.Context, p seal.Program, src io.Reader, out
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{containers: map[string]string{}, carrying: map[int64]int{}, carried: map[int64]int{},
 		gates: map[string]chan struct{}{}, held: map[string]bool{}, fail: map[int64]bool{}, errOnce: map[int64]bool{},
-		refuse: map[int64]bool{}, inputs: map[int64]run.Inputs{}, firstTick: -1,
+		refuse: map[int64]bool{}, imageFails: map[string]bool{}, inputs: map[int64]run.Inputs{}, firstTick: -1,
 		reviews: map[int64][]string{}, reviewed: map[string]string{}, saves: map[int64]bool{}, models: map[string]string{}}
 }
 
@@ -86,6 +144,7 @@ func (e *fakeEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.keeps = append(e.keeps, p)
+	e.book.Events = append(e.book.Events, "keep "+p.Image+" "+e.book.id(p.Image))
 	return len(e.keeps) > 1, nil
 }
 
