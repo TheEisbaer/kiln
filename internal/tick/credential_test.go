@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -221,7 +222,7 @@ func TestRenewal(t *testing.T) {
 			"the credential command failed: exit status 3: the sign-in has expired", false},
 		{"echo '  '", "the credential command printed nothing", false},
 		// A child left behind, which is ended with the command's process group.
-		{"sleep 30 & echo $! >\"$d/child\"; echo " + secret + "; wait", "the credential command did not end within 300ms", false},
+		{"sleep 120 & echo $! >\"$d/child\"; echo " + secret + "; wait", "the credential command did not end within 300ms", false},
 		{"head -c 70000 /dev/zero | tr '\\000' s", "the credential command printed more than 64 KiB", false},
 		{"echo cred-3", "the credential could not be given to the proxy: the push failed, as the test has it", true},
 	}
@@ -252,7 +253,16 @@ func TestRenewal(t *testing.T) {
 			if _, err := fmt.Sscan(string(data), &pid); err != nil {
 				t.Fatal(err)
 			}
-			waitUntil(t, fmt.Sprintf("the command's child %d to end with its process group", pid), func() bool { return ended(pid) })
+			// The command has ended, so its group has been killed: the child is
+			// gone within moments, not when its sleep is over.
+			deadline := time.Now().Add(3 * time.Second)
+			for !ended(pid) && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+			}
+			if !ended(pid) {
+				syscall.Kill(pid, syscall.SIGKILL)
+				t.Errorf("the command's child %d outlived the command's limit", pid)
+			}
 		}
 	}
 	e.mu.Lock()
@@ -530,11 +540,11 @@ func TestPauseNotWritten(t *testing.T) {
 	e := newFakeEngine()
 	r := b.start(t, e, 3)
 	if d := clk.waiting(t, 1); d != retryEvery {
-		t.Errorf("after a write that failed the renewal waits %s, want %s", d, retryEvery)
+		t.Fatalf("after a write that failed the renewal waits %s, want %s", d, retryEvery)
 	}
 	clk.advance(retryEvery)
 	if d := clk.waiting(t, 2); d != retryEvery {
-		t.Errorf("after a second write that failed the renewal waits %s, want %s", d, retryEvery)
+		t.Fatalf("after a second write that failed the renewal waits %s, want %s", d, retryEvery)
 	}
 	if got := b.paused(t); got != unavailable+"from before" {
 		t.Errorf("the store says paused %q", got)
