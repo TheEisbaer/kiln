@@ -11,6 +11,7 @@ import (
 
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/seal"
+	"github.com/TheEisbaer/kiln/internal/store"
 )
 
 // The proxy and its credential (ADR 0040). The core keeps the proxy at its
@@ -23,15 +24,16 @@ import (
 // replaces the one before, also when it is the same.
 //
 // The credential is unavailable when the command fails, runs out of time or
-// prints nothing, or when the push fails. The instance is then paused
-// (ADR 0016, rule 3): the pause is the instance's state in the store, with
-// its history (ADR 0055), which the tick reads before it starts a run and the
-// board shows, so nothing of it is kept only in memory (ADR 0035). The core
-// says so on its terminal once per reason, starts no run, leaves the runs in
-// flight alone, and tries again every retryEvery; the first success ends the
-// pause. What the core keeps in memory, the times of the renewal and the
-// reason it said last, only times the next attempt and keeps the terminal
-// from saying a reason twice: a core started again renews at its start.
+// prints nothing, or when the push fails or runs out of time. The instance is
+// then paused (ADR 0016, rule 3): the pause is the instance's state in the
+// store, with its history (ADR 0055), which the tick reads before it starts a
+// run and the board shows, so nothing of it is kept only in memory
+// (ADR 0035). The core says so on its terminal when the store's state
+// changes, so once per reason also across a restart, starts no run, leaves
+// the runs in flight alone, and tries again every retryEvery; the first
+// success ends the pause. What the core keeps in memory, the times of the
+// renewal, only times the next attempt: a core started again renews at its
+// start.
 //
 // The command's standard output is the credential: it goes to the proxy and
 // nowhere else, never to the terminal, the board or the store. What is said
@@ -49,6 +51,9 @@ var (
 	refusedEvery = 10 * time.Second
 	// credentialLimit bounds one run of the credential command.
 	credentialLimit = 30 * time.Second
+	// pushLimit bounds one push to the proxy, so that an engine that hangs
+	// holds neither the core's start nor the renewal.
+	pushLimit = 30 * time.Second
 )
 
 // maxCredential is the most the credential command may print, as the proxy
@@ -72,8 +77,7 @@ func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) 
 
 // credentialState is what the renewal keeps in memory, under credMu.
 type credentialState struct {
-	failing   bool      // the last attempt failed
-	said      string    // the reason last said on the terminal, "" after a success
+	failing   bool      // the last attempt failed, or its outcome was not written
 	refusedAt time.Time // when a refused credential last asked for a renewal
 }
 
@@ -146,13 +150,24 @@ func (c *core) credentialRefused() {
 	}
 }
 
-// renew runs the credential command, pushes what it printed to the proxy, and
-// pauses the instance, or ends its pause, by the outcome. An interrupt
-// changes nothing.
+// renew runs the credential command, pushes what it printed to the proxy
+// within pushLimit, and pauses the instance, or ends its pause, by the
+// outcome. The terminal says so only when the store's state changed, so that
+// a reason is said once, also across a restart of the core; a store that
+// cannot be written counts as a failure, and is tried again after
+// retryEvery. An interrupt changes nothing.
 func (c *core) renew(ctx context.Context) {
 	credential, why := c.credential(ctx)
 	if why == "" {
-		if err := c.engine.PushCredential(ctx, c.Proxy, credential); err != nil {
+		pctx, cancel := context.WithTimeout(ctx, pushLimit)
+		err := c.engine.PushCredential(pctx, c.Proxy, credential)
+		timedOut := errors.Is(pctx.Err(), context.DeadlineExceeded)
+		cancel()
+		switch {
+		case err != nil && timedOut && ctx.Err() == nil:
+			// The engine's own text then varies from one attempt to the next.
+			why = fmt.Sprintf("the credential could not be given to the proxy: the push did not end within %s", pushLimit)
+		case err != nil:
 			why = "the credential could not be given to the proxy: " + err.Error()
 		}
 	}
@@ -163,21 +178,23 @@ func (c *core) renew(ctx context.Context) {
 	if why != "" {
 		reason = run.Printable(unavailable + why)
 	}
+	changed, err := setPaused(c.store, reason)
 	c.credMu.Lock()
-	said := c.cred.said
-	c.cred.failing, c.cred.said = reason != "", reason
+	c.cred.failing = reason != "" || err != nil
 	c.credMu.Unlock()
 	switch {
-	case reason != "" && reason != said:
+	case err != nil:
+		fmt.Fprintln(c.errOut, "kiln core: the pause cannot be written, and the credential is renewed again in", retryEvery.String()+":", run.Printable(err.Error()))
+	case changed && reason != "":
 		fmt.Fprintf(c.errOut, "kiln core: paused: %s; no run starts, and the credential command is run again every %s\n", reason, retryEvery)
-	case reason == "" && said != "":
+	case changed:
 		fmt.Fprintln(c.out, "kiln core: the Claude credential is available again; runs start")
-	}
-	if _, err := c.store.SetPaused(reason); err != nil {
-		fmt.Fprintln(c.errOut, "kiln core: the pause:", run.Printable(err.Error()))
 	}
 	at("renewed")
 }
+
+// setPaused writes the instance's pause. Only the test changes it.
+var setPaused = (*store.Store).SetPaused
 
 // credential runs the credential command with sh -c, in the data directory,
 // with no standard input, for at most credentialLimit, its process group

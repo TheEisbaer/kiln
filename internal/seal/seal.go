@@ -21,8 +21,17 @@ const upstreamVar = "KILN_PROXY_UPSTREAM"
 // proxyPort is where the proxy listens (cmd/proxy).
 const proxyPort = "8080"
 
-// proxyLabel marks a proxy container that Kiln made.
-const proxyLabel = "kiln.proxy"
+// proxyLabel marks a proxy container that Kiln made, with proxyVersion as its
+// value for the proxy StartProxy starts now. KeepProxy keeps only a proxy of
+// this version, and replaces any other of Kiln's. The version moves whenever
+// what StartProxy sets for the seal changes, such as the sysctls, the tmpfs
+// of the push socket, the user or how the credential reaches the proxy, so
+// that an older, weaker proxy is never kept. Version 1 took its credential
+// from its environment; version 2 takes it by push.
+const (
+	proxyLabel   = "kiln.proxy"
+	proxyVersion = "2"
+)
 
 // proxyUser is the user the proxy runs as (images/proxy), and pushDir the
 // directory of its push socket (cmd/proxy).
@@ -59,7 +68,7 @@ func StartProxy(ctx context.Context, p Proxy) error {
 	return runDetached(ctx, nil,
 		"--pull", "never", // a missing image is an error, never a download
 		"--name", p.Name,
-		"--label", proxyLabel+"=1",
+		"--label", proxyLabel+"="+proxyVersion,
 		"--network", p.Network,
 		"--sysctl", "net.ipv4.ip_forward=0",
 		"--sysctl", "net.ipv6.conf.all.forwarding=0",
@@ -69,15 +78,15 @@ func StartProxy(ctx context.Context, p Proxy) error {
 }
 
 // KeepProxy makes sure the proxy runs, and reports whether it kept the one
-// that was there. A proxy that runs with the image of that name as it is now
-// and with the same upstream is kept, since replacing it cuts the runs in
+// that was there. A proxy of proxyVersion that runs with the image of that
+// name as it is now and with the same upstream is kept, since replacing it cuts the runs in
 // flight from it; any other is replaced, and a missing one is started. A new
 // proxy holds no credential until PushCredential. Each step can be repeated
 // (ADR 0035):
 //
 //  1. It looks for a container of the proxy's name. One without the label
 //     kiln.proxy was not made by Kiln: it is refused, and nothing is touched.
-//  2. It keeps one that runs with the image and the upstream.
+//  2. It keeps one of proxyVersion that runs with the image and the upstream.
 //  3. It creates the proxy's ordinary network if it is missing.
 //  4. It removes the container found in step 1, by its ID, so that a container
 //     that took the name in between is not touched.
@@ -92,7 +101,7 @@ func KeepProxy(ctx context.Context, p Proxy) (bool, error) {
 	if old != nil && old.label == "" {
 		return false, fmt.Errorf("the container %s has no label %s, so Kiln did not make it; it is left alone", p.Name, proxyLabel)
 	}
-	if old != nil && old.state == "running" {
+	if old != nil && old.state == "running" && old.label == proxyVersion {
 		same, err := sameProxy(ctx, old.id, p)
 		if err != nil || same {
 			return same, err

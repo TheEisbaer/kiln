@@ -184,6 +184,35 @@ func TestSeal(t *testing.T) {
 		testNoPush(t, probe, proxy, proxyURL, credential)
 	})
 
+	// What a run reaches of the proxy: the proxy's network namespace listens
+	// on the API's port and on nothing else, in TCP or UDP and in either
+	// family; the push socket is a file, not an address.
+	t.Run("the proxy listens on its API port and nothing else", func(t *testing.T) {
+		api := false
+		for _, table := range []string{"tcp", "tcp6", "udp", "udp6"} {
+			out := must(t, "run", "--rm", "--network", "container:"+proxy, "--entrypoint", "cat",
+				toolchainImage, "/proc/net/"+table)
+			for _, line := range strings.Split(out, "\n")[1:] {
+				f := strings.Fields(line)
+				if len(f) < 4 {
+					continue
+				}
+				_, port, _ := strings.Cut(f[1], ":")
+				listens := f[3] == "0A" || strings.HasPrefix(table, "udp") // TCP_LISTEN, or a bound UDP socket
+				switch {
+				case !listens:
+				case strings.HasPrefix(table, "tcp") && port == fmt.Sprintf("%04X", 8080):
+					api = true
+				default:
+					t.Errorf("the proxy's namespace listens on %s %s", table, f[1])
+				}
+			}
+		}
+		if !api {
+			t.Error("the proxy's namespace does not list its API port, so this proves nothing")
+		}
+	})
+
 	t.Run("no name resolves", func(t *testing.T) {
 		if out, err := execIn(t, probe, "getent", "hosts", proxy); err != nil {
 			t.Fatalf("the proxy's name does not resolve, so the checks below prove nothing: %v: %s", err, out)
@@ -381,6 +410,11 @@ func assertNoCredential(t *testing.T, probe, proxyURL string) {
 // container and the processes on this machine, and asserts that none of them
 // carries the credential. Then it lets the push end.
 func testPushUnseen(t *testing.T, proxy, credential string) {
+	// A variable of this process, which the docker command inherits, shows
+	// that the environments below are read at all.
+	canary := "kiln-sealtest-canary-" + randomID(t)
+	t.Setenv("KILN_SEALTEST_CANARY", canary)
+	since := time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() { done <- pushFrom(t.Context(), proxy, pr) }()
@@ -399,13 +433,30 @@ func testPushUnseen(t *testing.T, proxy, credential string) {
 		"docker inspect of the proxy":            must(t, "inspect", proxy),
 		"the processes in the proxy's container": must(t, "top", proxy, "-o", "pid,args"),
 	}
-	if out, err := exec.CommandContext(t.Context(), "ps", "-e", "-o", "args").Output(); err != nil {
+	// The arguments and the environments of the processes on this machine,
+	// the docker command's included.
+	if out, err := exec.CommandContext(t.Context(), "ps", "axeww", "-o", "args").Output(); err != nil {
 		t.Errorf("ps: %v", err)
-	} else if !strings.Contains(string(out), "docker exec --interactive") {
-		t.Errorf("ps shows no docker exec, so it proves nothing:\n%s", out)
+	} else if !strings.Contains(string(out), "docker exec --interactive") || !strings.Contains(string(out), canary) {
+		t.Errorf("ps shows no docker exec with its environment, so it proves nothing:\n%s", out)
 	} else {
-		seen["the processes on this machine"] = string(out)
+		seen["the processes on this machine, with their environments"] = string(out)
 	}
+	// The environment of the push in the proxy's container, read from a
+	// container on the proxy's process namespace.
+	environ := must(t, "run", "--rm", "--pid", "container:"+proxy, "--network", "none", "--entrypoint", "sh", toolchainImage, "-c",
+		`for p in /proc/[0-9]*; do if [ "$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null)" = "/proxy push " ]; then tr '\0' '\n' <"$p/environ"; fi; done`)
+	if !strings.Contains(environ, upstreamVar+"=") {
+		t.Errorf("no environment of the push was read, so it proves nothing: %q", environ)
+	}
+	seen["the environment of the push in the proxy's container"] = environ
+	// What the engine records of the exec.
+	events := must(t, "events", "--since", since, "--until", time.Now().UTC().Format(time.RFC3339Nano),
+		"--filter", "container="+proxy, "--filter", "event=exec_create", "--format", "{{json .}}")
+	if !strings.Contains(events, "/proxy push") {
+		t.Errorf("the engine recorded no exec of the push, so it proves nothing: %s", events)
+	}
+	seen["the engine's record of the exec"] = events
 	for what, text := range seen {
 		if strings.Contains(text, credential) {
 			t.Errorf("the credential is in %s", what)

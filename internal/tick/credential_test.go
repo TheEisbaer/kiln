@@ -1,6 +1,7 @@
 package tick
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -181,6 +182,12 @@ func TestRenewal(t *testing.T) {
 	if len(keeps) != 1 || keeps[0] != (seal.Proxy{Name: "kiln-proxy", Image: "kiln-proxy", Network: "kiln", Upstream: b.cfg.Upstream}) {
 		t.Errorf("the proxy kept: %+v", keeps)
 	}
+	e.mu.Lock()
+	firstTick := e.firstTick
+	e.mu.Unlock()
+	if firstTick != 1 {
+		t.Errorf("when the first tick began %d credentials were pushed, want 1", firstTick)
+	}
 	if d := clk.waiting(t, 1); d != renewEvery {
 		t.Fatalf("after the start the renewal waits %s, want %s", d, renewEvery)
 	}
@@ -213,7 +220,8 @@ func TestRenewal(t *testing.T) {
 		{"echo " + secret + "; echo 'the sign-in has expired' >&2; exit 3",
 			"the credential command failed: exit status 3: the sign-in has expired", false},
 		{"echo '  '", "the credential command printed nothing", false},
-		{"echo " + secret + "; sleep 5", "the credential command did not end within 300ms", false},
+		// A child left behind, which is ended with the command's process group.
+		{"sleep 30 & echo $! >\"$d/child\"; echo " + secret + "; wait", "the credential command did not end within 300ms", false},
 		{"head -c 70000 /dev/zero | tr '\\000' s", "the credential command printed more than 64 KiB", false},
 		{"echo cred-3", "the credential could not be given to the proxy: the push failed, as the test has it", true},
 	}
@@ -234,6 +242,17 @@ func TestRenewal(t *testing.T) {
 		}
 		if got, want := b.paused(t), unavailable+step.reason; got != want {
 			t.Errorf("the store says paused %q, want %q", got, want)
+		}
+		if strings.Contains(step.script, "child") {
+			data, err := os.ReadFile(filepath.Join(cmd.dir, "child"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pid int
+			if _, err := fmt.Sscan(string(data), &pid); err != nil {
+				t.Fatal(err)
+			}
+			waitUntil(t, fmt.Sprintf("the command's child %d to end with its process group", pid), func() bool { return ended(pid) })
 		}
 	}
 	e.mu.Lock()
@@ -426,4 +445,154 @@ func TestCredentialRefusedConfig(t *testing.T) {
 			t.Errorf("upstream %q, command %q made the data directory: %v", tc.upstream, tc.command, err)
 		}
 	}
+}
+
+// TestUnavailableAtStart starts a core whose credential command fails: the
+// first tick starts no run, and the card waits until the command succeeds.
+func TestUnavailableAtStart(t *testing.T) {
+	b, clk, cmd := withClock(t, 3)
+	cmd.set(t, "echo 'the sign-in has expired' >&2; exit 1")
+	var card int64
+	b.with(t, func(s *store.Store) { card = b.card(t, s, store.Spec) })
+	e := newFakeEngine()
+	r := b.start(t, e, 3)
+	if d := clk.waiting(t, 1); d != retryEvery {
+		t.Errorf("after a failed start the renewal waits %s, want %s", d, retryEvery)
+	}
+	e.waitTicks(t, 5)
+	if got := e.snapshot().started; len(got) != 0 {
+		t.Fatalf("while paused from the start the runs of %v started", got)
+	}
+	cmd.set(t, "echo cred-1")
+	clk.advance(retryEvery)
+	e.waitStarted(t, group(card))
+	e.open(card, "exit")
+	b.waitEnded(t, e, card)
+	r.stop(t)
+}
+
+// TestPushHangs gives the core an engine whose push never ends: each push is
+// cut at pushLimit, counts as unavailable with a reason that is the same each
+// time, and is said and written once.
+func TestPushHangs(t *testing.T) {
+	was := pushLimit
+	pushLimit = 200 * time.Millisecond
+	t.Cleanup(func() { pushLimit = was })
+	b, clk, _ := withClock(t, 3)
+	e := newFakeEngine()
+	e.pushHangs = true
+	r := b.start(t, e, 3)
+	why := unavailable + "the credential could not be given to the proxy: the push did not end within 200ms"
+	for n := 1; n <= 3; n++ {
+		if d := clk.waiting(t, n); d != retryEvery {
+			t.Errorf("after a push that hung the renewal waits %s, want %s", d, retryEvery)
+		}
+		if got := b.paused(t); got != why {
+			t.Errorf("the store says paused %q, want %q", got, why)
+		}
+		clk.advance(retryEvery)
+	}
+	clk.waiting(t, 4)
+	r.stop(t)
+	if got := strings.Count(r.out.String(), "kiln core: paused: "); got != 1 {
+		t.Errorf("the terminal says paused %d times, want once:\n%s", got, r.out.String())
+	}
+	b.with(t, func(s *store.Store) {
+		if h, err := s.InstanceHistory(); err != nil || len(h) != 1 {
+			t.Errorf("the instance's history is %+v, %v; want one entry", h, err)
+		}
+	})
+}
+
+// TestPauseNotWritten fails the store's write of the outcome: it counts as a
+// failure, tried again after retryEvery, and the terminal says nothing of a
+// pause or its end until the write has succeeded.
+func TestPauseNotWritten(t *testing.T) {
+	var mu sync.Mutex
+	fails := 2
+	was := setPaused
+	setPaused = func(s *store.Store, reason string) (bool, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if fails > 0 {
+			fails--
+			return false, errors.New("the store is busy, as the test has it")
+		}
+		return s.SetPaused(reason)
+	}
+	t.Cleanup(func() { setPaused = was })
+	b, clk, cmd := withClock(t, 3)
+	b.with(t, func(s *store.Store) {
+		if _, err := s.SetPaused(unavailable + "from before"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e := newFakeEngine()
+	r := b.start(t, e, 3)
+	if d := clk.waiting(t, 1); d != retryEvery {
+		t.Errorf("after a write that failed the renewal waits %s, want %s", d, retryEvery)
+	}
+	clk.advance(retryEvery)
+	if d := clk.waiting(t, 2); d != retryEvery {
+		t.Errorf("after a second write that failed the renewal waits %s, want %s", d, retryEvery)
+	}
+	if got := b.paused(t); got != unavailable+"from before" {
+		t.Errorf("the store says paused %q", got)
+	}
+	clk.advance(retryEvery)
+	if d := clk.waiting(t, 3); d != renewEvery {
+		t.Errorf("after the write the renewal waits %s, want %s", d, renewEvery)
+	}
+	r.stop(t)
+	out := r.out.String()
+	if got := strings.Count(out, "kiln core: the pause cannot be written"); got != 2 {
+		t.Errorf("the terminal says %d times that the pause cannot be written:\n%s", got, out)
+	}
+	if got := strings.Count(out, "available again"); got != 1 {
+		t.Errorf("the terminal says %d times that the pause ended:\n%s", got, out)
+	}
+	if cmd.runs(t) != 3 {
+		t.Errorf("the command ran %d times, want 3", cmd.runs(t))
+	}
+}
+
+// TestStartedWhilePaused starts a core on a store that is paused for the
+// reason the command still fails with, with a run in flight: the run is
+// carried to its end, no other run starts, and the terminal does not say the
+// reason again, since the store's state did not change.
+func TestStartedWhilePaused(t *testing.T) {
+	b, clk, cmd := withClock(t, 3)
+	cmd.set(t, "echo 'the sign-in has expired' >&2; exit 1")
+	why := unavailable + "the credential command failed: exit status 1: the sign-in has expired"
+	var flying, waits int64
+	b.with(t, func(s *store.Store) {
+		flying, waits = b.card(t, s, store.Spec), b.card(t, s, store.Spec)
+		if err := s.AddRun(store.RunRow{ID: fmt.Sprintf("%s-%d-1", b.instance, flying), Card: flying, Commit: b.commit,
+			Model: b.cfg.Model, Effort: "high"}, MaxRuns); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SetPaused(why); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e := newFakeEngine()
+	e.set(fmt.Sprintf("%s-%d-1", b.instance, flying), "running")
+	r := b.start(t, e, 3)
+	clk.waiting(t, 1)
+	waitUntil(t, "the run in flight to be carried", func() bool { return e.snapshot().carried[flying] > 0 })
+	e.open(flying, "exit")
+	b.waitEnded(t, e, flying)
+	e.waitTicks(t, 5)
+	if got := e.snapshot().carried[waits]; got != 0 {
+		t.Errorf("while paused the waiting card's run was carried %d times", got)
+	}
+	r.stop(t)
+	if out := r.out.String(); strings.Contains(out, "kiln core: paused: ") {
+		t.Errorf("a core started on the same pause says it again:\n%s", out)
+	}
+	b.with(t, func(s *store.Store) {
+		if h, err := s.InstanceHistory(); err != nil || len(h) != 1 {
+			t.Errorf("the instance's history is %+v, %v; want the one entry from before", h, err)
+		}
+	})
 }

@@ -332,6 +332,47 @@ func TestRun(t *testing.T) {
 			t.Fatal(err)
 		}
 
+		// A proxy of Kiln's that runs with the same image and upstream, but was
+		// started the old way, with its credential in its environment and the
+		// label's version 1, is replaced; so is one whose image changed.
+		t.Run("an older proxy, and a changed image", func(t *testing.T) {
+			p := Proxy{Name: name("proxy-old"), Image: proxyImage, Network: ordinary, Upstream: proxy.Upstream}
+			cleanup(t, "rm", "--force", p.Name)
+			must(t, "run", "--detach", "--name", p.Name, "--label", proxyLabel+"=1", "--network", ordinary,
+				"--tmpfs", pushDir+":rw,uid="+proxyUser+",gid="+proxyUser+",mode=0700",
+				"--env", upstreamVar+"="+p.Upstream, "--env", "KILN_PROXY_CREDENTIAL=old-"+id, proxyImage)
+			older := containerID(t, p.Name)
+			if kept, err := KeepProxy(t.Context(), p); err != nil || kept {
+				t.Errorf("with a proxy of version 1: kept %v, %v", kept, err)
+			}
+			if got := containerID(t, p.Name); got == older || got == "" {
+				t.Errorf("the proxy of version 1 is still there: %q", got)
+			}
+			if got := must(t, "inspect", "--format", `{{index .Config.Labels "`+proxyLabel+`"}}`, p.Name); got != proxyVersion {
+				t.Errorf("the new proxy has %s=%q, want %q", proxyLabel, got, proxyVersion)
+			}
+			if inspect := must(t, "inspect", p.Name); strings.Contains(inspect, "KILN_PROXY_CREDENTIAL") {
+				t.Error("the new proxy has a credential in its environment")
+			}
+
+			// A tag of the proxy's image, which then names another image.
+			tag := name("proxy-tag")
+			cleanup(t, "rmi", tag)
+			must(t, "tag", proxyImage, tag)
+			p.Image = tag
+			if kept, err := KeepProxy(t.Context(), p); err != nil || !kept {
+				t.Errorf("with the same image under another name: kept %v, %v", kept, err)
+			}
+			before := containerID(t, p.Name)
+			must(t, "tag", upstreamImage, tag)
+			if kept, err := KeepProxy(t.Context(), p); err != nil || kept {
+				t.Errorf("with the image changed: kept %v, %v", kept, err)
+			}
+			if got := containerID(t, p.Name); got == before || got == "" {
+				t.Errorf("the proxy of the old image is still there: %q", got)
+			}
+		})
+
 		foreign := name("foreign")
 		must(t, "create", "--name", foreign, "--network", "none", upstreamImage)
 		cleanup(t, "rm", "--force", foreign)

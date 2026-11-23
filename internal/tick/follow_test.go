@@ -48,13 +48,15 @@ type fakeEngine struct {
 	keeps      []seal.Proxy         // the calls of KeepProxy
 	pushes     []string             // the credentials pushed, in order
 	pushFails  bool                 // whether a push fails
+	pushHangs  bool                 // whether a push hangs until its context ends
+	firstTick  int                  // the pushes when the first tick began, -1 before it
 	inputs     map[int64]run.Inputs // the inputs of each card's last Carry
 }
 
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{containers: map[string]string{}, carrying: map[int64]int{}, carried: map[int64]int{},
 		gates: map[string]chan struct{}{}, held: map[string]bool{}, fail: map[int64]bool{}, errOnce: map[int64]bool{},
-		refuse: map[int64]bool{}, inputs: map[int64]run.Inputs{}}
+		refuse: map[int64]bool{}, inputs: map[int64]run.Inputs{}, firstTick: -1}
 }
 
 func (e *fakeEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {
@@ -64,7 +66,14 @@ func (e *fakeEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {
 	return len(e.keeps) > 1, nil
 }
 
-func (e *fakeEngine) PushCredential(_ context.Context, _, credential string) error {
+func (e *fakeEngine) PushCredential(ctx context.Context, _, credential string) error {
+	e.mu.Lock()
+	hangs := e.pushHangs
+	e.mu.Unlock()
+	if hangs {
+		<-ctx.Done()
+		return fmt.Errorf("docker exec: %v at %s", ctx.Err(), time.Now().Format(time.RFC3339Nano))
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.pushFails {
@@ -131,6 +140,9 @@ func (e *fakeEngine) wait(ctx context.Context, card int64, point string) error {
 func (e *fakeEngine) ListRuns(_ context.Context, instance string) ([]string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.lists == 0 {
+		e.firstTick = len(e.pushes)
+	}
 	e.lists++
 	var ids []string
 	for id := range e.containers {
