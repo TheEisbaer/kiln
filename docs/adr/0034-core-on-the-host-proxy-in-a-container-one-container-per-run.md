@@ -19,4 +19,4 @@ The proxy is not part of the core because a sealed run could not reach it there.
 
 - Two things have to be started and kept alive, the core and the proxy.
 - The Claude credential has to get from the developer's machine into a container; how is its own decision.
-- The proxy restarts only when its own code has changed. A short restart during a run is survivable, by the measurement above.
+- The proxy restarts only when its image is built again: by hand, or by an update whose images' files changed. A rebuild gives a new image even when every step comes from the engine's cache (measured on 2026-11-23), so such a rebuild restarts the proxy too. A short restart during a run is survivable, by the measurement above.
