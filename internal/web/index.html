@@ -258,6 +258,7 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .tile .foot { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .tile .foot .badge { flex: none; }
+.round { flex: none; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .tile .docs { margin-left: auto; min-width: 0; font-size: 11px; color: var(--faint); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .badge {
   display: inline-flex;
@@ -705,6 +706,15 @@ function badge(c) {
   return b;
 }
 
+// roundOf is the label of a card in implement or review that review sent
+// back: the round it is in, of the three the rule makes at most, or past
+// them, how often it was sent back; null for a card not sent back.
+function roundOf(c) {
+  const n = c.send_backs;
+  if (!n || (c.stage !== "implement" && c.stage !== "review")) return null;
+  return el("span", "round", n <= 2 ? "round " + (n + 1) + " of 3" : "sent back " + n + " times");
+}
+
 function elapsed(since) {
   const s = Math.max(0, Math.floor((Date.now() + skew - Date.parse(since)) / 1000));
   if (s < 60) return s + "s";
@@ -768,6 +778,8 @@ function tileOf(c) {
   // In the column done, a finished card shows no badge, and a dropped or a
   // merged one says so.
   if (c.stage !== "done" || c.dropped || c.merged) foot.append(badge(c));
+  const round = roundOf(c);
+  if (round) foot.append(round);
   if (c.documents.length) foot.append(el("span", "docs", c.documents.join(" · ")));
   t.append(foot);
   t.addEventListener("click", () => openCard(c.id));
@@ -781,7 +793,8 @@ function renderBoard(b) {
   $("repo").title = b.repo;
   const m = b.models;
   $("meta").textContent = "instance " + b.instance + " · " + "spec on " + m.spec +
-    " · implement on the model its spec names, else " + m.implement + " · review on " + m.review +
+    " · implement on the model its spec names, else " + m.implement + ", and on " + m.sent_back + " after a send-back" +
+    " · review on " + m.review +
     " · " + (b.runs === 1 ? "one run at a time" : "up to " + b.runs + " runs at once");
   $("meta").title = $("meta").textContent;
   // A paused instance starts no run; the reason says why.
@@ -1091,10 +1104,12 @@ function part(name, value, render) {
 
 function renderCard(c) {
   skew = Date.parse(c.now) - Date.now();
-  part("head", [c.id, c.title, c.stage, c.waits_for, !!c.run, c.run && c.run.since], () => {
+  part("head", [c.id, c.title, c.stage, c.waits_for, !!c.run, c.run && c.run.since, c.send_backs], () => {
     $("p-id").textContent = "#" + c.id;
     const st = $("p-state");
     st.replaceChildren(el("span", "dot " + c.stage), el("span", null, STAGE_NAME[c.stage]), badge(c));
+    const round = roundOf(c);
+    if (round) st.append(round);
     $("p-title").textContent = c.title || "(no title)";
   });
   const last = c.history[c.history.length - 1];

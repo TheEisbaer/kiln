@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/TheEisbaer/kiln/instructions"
+	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/seal"
 	"github.com/TheEisbaer/kiln/internal/store"
 )
@@ -47,7 +48,9 @@ const (
 	longSpecWord = "kiln-stand-in-longspec"
 	escapeWord   = "kiln-stand-in-escape"
 	goesBackWord = "kiln-stand-in-goesback"
-	noChangeWord = "kiln-stand-in-nochange"
+	// alwaysBackWord makes every review of the card go back.
+	alwaysBackWord = "kiln-stand-in-alwaysback"
+	noChangeWord   = "kiln-stand-in-nochange"
 )
 
 // The spec the stand-in writes with kiln-stand-in-escape.
@@ -793,32 +796,36 @@ echo "https://git.example/pull/$KILN_CARD"`
 		}
 	})
 
-	// A review that sends the change back stops the card; after the
-	// developer's move "send back" a second implement run is told the review,
-	// starts from the branch's tip and saves a second commit.
+	// A review that sends the change back sends the card to implement by the
+	// rule, on one core: a second implement run is told the review, runs on
+	// the stronger model, starts from the branch's tip and saves a second
+	// commit, which the next review passes.
 	t.Run("a review that sends the change back", func(t *testing.T) {
 		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. kiln-case-back "+goesBackWord)
 		f.specAndApprove(t, c)
 		core, done := f.core(t, c, "")
-		f.waitState(t, c, reviewNeedsYou, 3)
-		f.stop(t, core, done)
-		e := f.lastEntry(t, c)
-		if !strings.HasPrefix(e.Reason, "the review sends the change back; exit 0, ") || e.Run != c.runOf(3) {
-			t.Errorf("the entry is %+v, want the review sending the change back", e)
-		}
-		first := gitIn(t, c.repo, "rev-parse", "refs/heads/kiln/card-1")
-
-		f.move(t, c, store.State{Stage: store.Implement, WaitsFor: store.Run}) // send back
-		core, done = f.core(t, c, "")
 		f.waitState(t, c, reviewPassed, 5)
 		f.stop(t, core, done)
 
 		tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/developer by run",
-			"implement/run by developer", "review/run by run", "review/approval by run"},
+			"implement/run by rule", "review/run by run", "review/approval by run"},
 			[]string{"spec 1", "report 2", "pull-request 2", "review 3", "report 4", "pull-request 4", "review 5"})
-		f.assertRun(t, c, 4, implementModel, "medium", first, store.Finished)
+		first := gitIn(t, c.repo, "rev-parse", tip+"^")
+		f.assertRun(t, c, 4, run.SentBackModel, "medium", first, store.Finished)
+		s := f.open(t, c)
+		h, err := s.History(1)
+		s.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e := h[len(h)-4]; !strings.HasPrefix(e.Reason, "the review sends the change back; exit 0, ") || e.Run != c.runOf(3) {
+			t.Errorf("the review's entry is %+v, want the review sending the change back", e)
+		}
+		if e := h[len(h)-3]; e.Reason != "the review sent the change back; implement runs again by the rule, send-back 1 of 2" {
+			t.Errorf("the rule's entry is %+v", e)
+		}
 		if n := gitIn(t, c.repo, "rev-list", "--count", c.commit+".."+tip); n != "2" {
 			t.Errorf("%s commits on the branch, want 2", n)
 		}
@@ -846,11 +853,15 @@ echo "https://git.example/pull/$KILN_CARD"`
 	t.Run("sent back to spec with a branch", func(t *testing.T) {
 		t.Parallel()
 		c := f.newCase(t, f.standIn)
-		f.card(t, c, "Add a line to NOTES.md. kiln-case-tospec "+goesBackWord)
+		f.card(t, c, "Add a line to NOTES.md. kiln-case-tospec "+alwaysBackWord)
 		f.specAndApprove(t, c)
 		core, done := f.core(t, c, "")
-		f.waitState(t, c, reviewNeedsYou, 3)
+		// Two send-backs by the rule, and the third review stops the card.
+		f.waitState(t, c, reviewNeedsYou, 7)
 		f.stop(t, core, done)
+		if e := f.lastEntry(t, c); e.Reason != "the review sent the change back a third time; the rule sends a change back twice at most, so it waits for you" {
+			t.Errorf("the last entry is %+v, want the rule's stop", e)
+		}
 		branch := gitIn(t, c.repo, "rev-parse", "refs/heads/kiln/card-1")
 
 		s := f.open(t, c)
@@ -860,11 +871,11 @@ echo "https://git.example/pull/$KILN_CARD"`
 			t.Fatal(err)
 		}
 		core, done = f.core(t, c, "")
-		f.waitState(t, c, finished, 4)
+		f.waitState(t, c, finished, 8)
 		f.stop(t, core, done)
-		f.assertRun(t, c, 4, model, "high", c.commit, store.Finished)
-		if !strings.HasPrefix(f.document(t, c, 4), "# Spec kiln-case-tospec") {
-			t.Errorf("the new spec is %q", f.document(t, c, 4))
+		f.assertRun(t, c, 8, model, "high", c.commit, store.Finished)
+		if !strings.HasPrefix(f.document(t, c, 8), "# Spec kiln-case-tospec") {
+			t.Errorf("the new spec is %q", f.document(t, c, 8))
 		}
 		if got := gitIn(t, c.repo, "rev-parse", "refs/heads/kiln/card-1"); got != branch {
 			t.Errorf("the branch is at %s, and was at %s", got, branch)

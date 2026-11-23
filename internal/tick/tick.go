@@ -122,9 +122,14 @@ func (c Config) model(s store.Stage) string {
 }
 
 // modelOf is the model of the run that starts for the card: for an implement
-// card the model its approved spec names, if it names one of run.ImplementModels,
-// else the stage's flag. It is kept in the run's row, so a run in flight keeps it.
+// card that was sent back, run.SentBackModel (ADR 0030, rule 3); for another
+// implement card the model its approved spec names, if it names one of
+// run.ImplementModels, else the stage's flag. It is kept in the run's row, so
+// a run in flight keeps it.
 func (c *core) modelOf(card store.Card) (string, error) {
+	if card.Stage == store.Implement && card.SendBacks > 0 {
+		return run.SentBackModel, nil
+	}
 	if card.Stage == store.Implement {
 		spec, err := c.store.Spec(card.ID)
 		if err != nil {
@@ -825,6 +830,9 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 			return fmt.Errorf("the branch of run %s: %w; it is read again on the next tick", row.ID, err)
 		}
 	}
+	if f.card.Stage == store.Review && d.ending == store.Finished && d.doc != nil && verdictLine(d.doc.Text) == goesBack {
+		rule = sentBackRule(f.card.SendBacks)
+	}
 
 	f.mark("before-end")
 	if rule != nil {
@@ -871,6 +879,24 @@ func (c *core) passedRule(ctx context.Context, id int64) (*store.Rule, error) {
 			"the review passed; the change touches workflow files and waits for your yes before it is published: " + fileNames(files))}, nil
 	}
 	return &store.Rule{To: atHost, Reason: "the review passed; the core publishes the change by the rule", Publish: true}, nil
+}
+
+// sentBackRule is the rule's step for a card whose review sent the change
+// back, from n, the card's number of send-backs when its review run started:
+// below store.MaxSendBacks the card goes to implement, waiting for a run;
+// at it or above, the card stays under "needs you" (ADR 0015, ADR 0054).
+// Either way the number goes up by one.
+func sentBackRule(n int) *store.Rule {
+	switch {
+	case n < store.MaxSendBacks:
+		return &store.Rule{To: implementWaits, SendBack: true, Reason: fmt.Sprintf(
+			"the review sent the change back; implement runs again by the rule, send-back %d of %d", n+1, store.MaxSendBacks)}
+	case n == store.MaxSendBacks:
+		return &store.Rule{To: reviewNeedsYou, SendBack: true,
+			Reason: "the review sent the change back a third time; the rule sends a change back twice at most, so it waits for you"}
+	}
+	return &store.Rule{To: reviewNeedsYou, SendBack: true, Reason: fmt.Sprintf(
+		"the review sent the change back again, send-back %d; the rule sends a change back twice at most, so it waits for you", n+1)}
 }
 
 // hold stops a card that waits for a run, before the run is in the store: the

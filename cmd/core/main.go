@@ -86,7 +86,7 @@ func coreCommand(args []string, getenv func(string) string, stdout, stderr io.Wr
 	fs.StringVar(&cfg.Data, "data", "", "the instance's data directory")
 	fs.StringVar(&cfg.Repo, "repo", "", "the instance's copy of the repo, a bare repo")
 	fs.StringVar(&cfg.Model, "model", "", "the model of the spec runs it starts, an exact identifier; the effort is high")
-	fs.StringVar(&cfg.ImplementModel, "implement-model", "", "the model of the implement runs whose approved spec names none of claude-opus-5-5, claude-sonnet-5-5 and claude-haiku-5-5, --model by default; the effort is medium")
+	fs.StringVar(&cfg.ImplementModel, "implement-model", "", "the model of the implement runs whose approved spec names none of claude-opus-5-5, claude-sonnet-5-5 and claude-haiku-5-5, --model by default; after a send-back an implement run uses claude-opus-5-5; the effort is medium")
 	fs.StringVar(&cfg.ReviewModel, "review-model", "", "the model of the review runs it starts, --model by default; the effort is high")
 	fs.StringVar(&cfg.Image, "image", "kiln-run", "the run image")
 	fs.StringVar(&cfg.Proxy, "proxy", proxyName, "the proxy container, which the core keeps")

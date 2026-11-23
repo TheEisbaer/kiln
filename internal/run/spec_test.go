@@ -311,3 +311,9 @@ func TestImplementModelsAreTheInstructions(t *testing.T) {
 		t.Errorf("the line names %q, ImplementModels is %q", got, ImplementModels)
 	}
 }
+
+func TestSentBackModelIsAnImplementModel(t *testing.T) {
+	if !slices.Contains(ImplementModels, SentBackModel) {
+		t.Errorf("SentBackModel %q is not one of ImplementModels %q", SentBackModel, ImplementModels)
+	}
+}

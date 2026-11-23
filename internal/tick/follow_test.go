@@ -51,12 +51,17 @@ type fakeEngine struct {
 	pushHangs  bool                 // whether a push hangs until its context ends
 	firstTick  int                  // the pushes when the first tick began, -1 before it
 	inputs     map[int64]run.Inputs // the inputs of each card's last Carry
+	reviews    map[int64][]string   // the first lines of a card's reviews, taken in order; then Verdict: passes
+	reviewed   map[string]string    // the review each review run was given, by the run's ID
+	saves      map[int64]bool       // the cards whose implement runs save a commit
+	models     map[string]string    // the model in the inputs of each run's Carry, by the run's ID
 }
 
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{containers: map[string]string{}, carrying: map[int64]int{}, carried: map[int64]int{},
 		gates: map[string]chan struct{}{}, held: map[string]bool{}, fail: map[int64]bool{}, errOnce: map[int64]bool{},
-		refuse: map[int64]bool{}, inputs: map[int64]run.Inputs{}, firstTick: -1}
+		refuse: map[int64]bool{}, inputs: map[int64]run.Inputs{}, firstTick: -1,
+		reviews: map[int64][]string{}, reviewed: map[string]string{}, saves: map[int64]bool{}, models: map[string]string{}}
 }
 
 func (e *fakeEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {
@@ -178,8 +183,28 @@ func (e *fakeEngine) Remove(_ context.Context, in run.Inputs) error {
 	return nil
 }
 
+// ReadDocument gives a run's document. A review run's first line is the next
+// of its card's reviews, Verdict: passes when there are none left, the same
+// for every read of one run; a review that goes back has a finding.
 func (e *fakeEngine) ReadDocument(_, id, kind string) (run.Document, error) {
 	text := map[string]string{store.KindSpec: "# Spec\n", store.KindReport: "# Report\n", store.KindReview: "Verdict: passes\n"}[kind]
+	if kind == store.KindReview {
+		e.mu.Lock()
+		review, ok := e.reviewed[id]
+		if !ok {
+			review = text
+			if lines := e.reviews[cardOf(id)]; len(lines) > 0 {
+				review = lines[0] + "\n"
+				if lines[0] == goesBack {
+					review += "\n- A finding of " + id + ": the change does not do what the spec says.\n"
+				}
+				e.reviews[cardOf(id)] = lines[1:]
+			}
+			e.reviewed[id] = review
+		}
+		e.mu.Unlock()
+		text = review
+	}
 	return run.Document{Text: []byte(text + id + "\n")}, nil
 }
 
@@ -201,6 +226,7 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 	e.carrying[card]++
 	e.carried[card]++
 	e.inputs[card] = in
+	e.models[in.ID] = in.Model
 	if e.carrying[card] > 1 {
 		e.twice = append(e.twice, card)
 	}
@@ -272,12 +298,15 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 
 // verdict is how a run of the fake ends: failed for a card the test fails,
 // and finished otherwise, with the web for a spec run and no change for an
-// implement run.
+// implement run, or a saved commit for one of a card that saves.
 func (e *fakeEngine) verdict(in run.Inputs) run.Verdict {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.fail[cardOf(in.ID)] {
 		return run.Verdict{Reason: "exit 1, no result, not saved", Saved: "not saved"}
+	}
+	if !in.SkipSave && e.saves[cardOf(in.ID)] {
+		return run.Verdict{Finished: true, Reason: "exit 0, result success, 1 turns, $0.0001, saved", Saved: "5a7ed" + in.ID}
 	}
 	return run.Verdict{Finished: true, Reason: "exit 0, result success, 1 turns, $0.0001, no change", Hosts: in.Hosts, Saved: "no change"}
 }

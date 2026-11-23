@@ -289,6 +289,9 @@ type (
 		Spec      string `json:"spec"`
 		Implement string `json:"implement"`
 		Review    string `json:"review"`
+		// SentBack is the model of an implement run after a send-back
+		// (ADR 0030, rule 3).
+		SentBack string `json:"sent_back"`
 	}
 	tileJSON struct {
 		ID        int64          `json:"id"`
@@ -301,6 +304,9 @@ type (
 		Merged    bool           `json:"merged"`
 		Run       *flightJSON    `json:"run"`
 		Documents []string       `json:"documents"`
+		// SendBacks is the card's number of send-backs since its spec was
+		// approved (ADR 0054).
+		SendBacks int `json:"send_backs"`
 	}
 	flightJSON struct {
 		ID    string     `json:"id"`
@@ -450,7 +456,7 @@ func started(t time.Time) *time.Time {
 
 func tile(s store.Summary) tileJSON {
 	t := tileJSON{ID: s.ID, Title: title(s.Text), Headline: headline(title(s.Text)), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
-		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds}
+		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds, SendBacks: s.SendBacks}
 	if t.Documents == nil {
 		t.Documents = []string{}
 	}
@@ -481,7 +487,7 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 
 // models are the models of the three stages; an empty one is the spec's.
 func (h *handler) models() modelsJSON {
-	m := modelsJSON{Spec: h.info.Model, Implement: h.info.ImplementModel, Review: h.info.ReviewModel}
+	m := modelsJSON{Spec: h.info.Model, Implement: h.info.ImplementModel, Review: h.info.ReviewModel, SentBack: run.SentBackModel}
 	if m.Implement == "" {
 		m.Implement = m.Spec
 	}

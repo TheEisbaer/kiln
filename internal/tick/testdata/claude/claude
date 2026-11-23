@@ -15,7 +15,8 @@
 #   /kiln/out/pull-request.md;
 # - review: it writes /kiln/out/review.md, whose first line is "Verdict: goes
 #   back" for a card with kiln-stand-in-goesback whose change has no fix yet,
-#   and "Verdict: passes" otherwise, and appends a line to NOTES.md, which a
+#   and always for a card with kiln-stand-in-alwaysback, and "Verdict: passes"
+#   otherwise, and appends a line to NOTES.md, which a
 #   review run must not save.
 #
 # A word in the instruction, which comes on standard input, changes that:
@@ -57,6 +58,7 @@ case "$instruction" in
         printf 'Adds a line to NOTES.md (%s).\n\nChecked by reading NOTES.md.\n' "$word" > /kiln/out/pull-request.md ;;
     "# Review a change"*)
         case "$instruction" in
+            *kiln-stand-in-alwaysback*) printf 'Verdict: goes back\n\n1. The spec: NOTES.md lacks the fix.\n' ;;
             *"A fix after the review."*) printf 'Verdict: passes\n\nThe fix is in.\n' ;;
             *kiln-stand-in-goesback*) printf 'Verdict: goes back\n\n1. The spec: NOTES.md lacks the fix.\n' ;;
             *) printf 'Verdict: passes\n\nNo findings.\n' ;;

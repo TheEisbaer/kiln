@@ -160,6 +160,11 @@ func headLine(line string) (string, bool) {
 // three that instructions/spec.md allows, which a test keeps equal.
 var ImplementModels = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}
 
+// SentBackModel is the stronger model an implement run starts on after a
+// send-back, whatever its spec names (ADR 0030, rule 3); a test keeps it one
+// of ImplementModels.
+const SentBackModel = "claude-opus-5-5"
+
 // modelLine is how the line that names the implement model starts.
 const modelLine = "Model for implement:"
 
