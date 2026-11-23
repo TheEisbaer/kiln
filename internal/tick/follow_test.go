@@ -52,6 +52,7 @@ type fakeEngine struct {
 	pushFails  bool                 // whether a push fails
 	pushHangs  bool                 // whether a push hangs until its context ends
 	firstTick  int                  // the pushes when the first tick began, -1 before it
+	keptAtList int                  // the calls of KeepProxy when ListRuns was last called
 	inputs     map[int64]run.Inputs // the inputs of each card's last Carry
 	reviews    map[int64][]string   // the first lines of a card's reviews, taken in order; then Verdict: passes
 	reviewed   map[string]string    // the review each review run was given, by the run's ID
@@ -167,6 +168,7 @@ func (e *fakeEngine) ListRuns(_ context.Context, instance string) ([]string, err
 	if e.firstTick < 0 && len(e.keeps) > 0 {
 		e.firstTick = len(e.pushes)
 	}
+	e.keptAtList = len(e.keeps)
 	e.lists++
 	if e.listFails > 0 {
 		e.listFails--
@@ -364,7 +366,22 @@ func cloned[K comparable, V any](m map[K]V) map[K]V {
 	return out
 }
 
-// waitTicks waits until the core has ticked n more times.
+// waitFirstTick waits for the first tick of a core started when the proxy had
+// been kept kept times: the first list of the runs after the core's own keep.
+// The comparison before the report lists the runs too, before the keep, so a
+// count of lists alone can end before the proxy and the first push.
+func (e *fakeEngine) waitFirstTick(t *testing.T, kept int) {
+	t.Helper()
+	waitUntil(t, "the first tick after the report", func() bool {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return e.keptAtList > kept
+	})
+}
+
+// waitTicks waits until the core has ticked n more times. It counts the core's
+// ticks only after its first tick, which bench.start and waitFirstTick wait
+// for; before it, the comparison's lists count too.
 func (e *fakeEngine) waitTicks(t *testing.T, n int) {
 	t.Helper()
 	from := e.snapshot().lists
@@ -488,8 +505,11 @@ func (b *bench) start(t *testing.T, e *fakeEngine, runs int) *running {
 	r := &running{cancel: cancel, done: make(chan error, 1), out: &bytes.Buffer{}}
 	cfg := b.cfg
 	cfg.Runs = runs
+	e.mu.Lock()
+	kept := len(e.keeps)
+	e.mu.Unlock()
 	go func() { r.done <- runCore(ctx, cfg, r.out, r.out, e, 5*time.Millisecond, b.clock, nil) }()
-	e.waitTicks(t, 1) // a core that cannot start says so here, not in a wait for its runs
+	e.waitFirstTick(t, kept) // a core that cannot start says so here, not in a wait for its runs
 	t.Cleanup(func() {
 		cancel()
 		<-r.done

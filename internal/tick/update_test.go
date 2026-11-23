@@ -330,7 +330,7 @@ func TestUpdateWithoutLauncher(t *testing.T) {
 	k.twoCards(t)
 	e := newFakeEngine()
 	h := startHanding(t, k.cfg, e, false)
-	e.waitTicks(t, 1)
+	e.waitFirstTick(t, 0)
 	b := k.move(t, "", map[string]string{"NOTES.md": "# Notes\nMoved.\n"})
 	waitRounds(t, e, 10)
 	k.move(t, "", map[string]string{"NOTES.md": "# Notes\nMoved again.\n"})
