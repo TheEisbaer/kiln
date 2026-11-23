@@ -41,16 +41,37 @@ type fakeEngine struct {
 	removed    []string          // the runs RemoveRun removed
 	lists      int               // the calls of ListRuns, one per tick
 	gates      map[string]chan struct{}
-	held       map[string]bool // the points that hold a card's run, as <card>/<point>
-	fail       map[int64]bool  // the cards whose runs fail
-	errOnce    map[int64]bool  // the cards whose first Carry fails once its run is in the store
-	refuse     map[int64]bool  // the cards whose Carry always fails before starting
+	held       map[string]bool      // the points that hold a card's run, as <card>/<point>
+	fail       map[int64]bool       // the cards whose runs fail
+	errOnce    map[int64]bool       // the cards whose first Carry fails once its run is in the store
+	refuse     map[int64]bool       // the cards whose Carry always fails before starting
+	keeps      []seal.Proxy         // the calls of KeepProxy
+	pushes     []string             // the credentials pushed, in order
+	pushFails  bool                 // whether a push fails
+	inputs     map[int64]run.Inputs // the inputs of each card's last Carry
 }
 
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{containers: map[string]string{}, carrying: map[int64]int{}, carried: map[int64]int{},
 		gates: map[string]chan struct{}{}, held: map[string]bool{}, fail: map[int64]bool{}, errOnce: map[int64]bool{},
-		refuse: map[int64]bool{}}
+		refuse: map[int64]bool{}, inputs: map[int64]run.Inputs{}}
+}
+
+func (e *fakeEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.keeps = append(e.keeps, p)
+	return len(e.keeps) > 1, nil
+}
+
+func (e *fakeEngine) PushCredential(_ context.Context, _, credential string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pushFails {
+		return errors.New("the push failed, as the test has it")
+	}
+	e.pushes = append(e.pushes, credential)
+	return nil
 }
 
 // cardOf is the card of a run's ID, <instance>-<card>-<number>.
@@ -167,6 +188,7 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 	e.mu.Lock()
 	e.carrying[card]++
 	e.carried[card]++
+	e.inputs[card] = in
 	if e.carrying[card] > 1 {
 		e.twice = append(e.twice, card)
 	}
@@ -284,11 +306,13 @@ func (e *fakeEngine) waitTicks(t *testing.T, n int) {
 	waitUntil(t, fmt.Sprintf("%d more ticks", n), func() bool { return e.snapshot().lists >= from+n })
 }
 
-// bench is a data directory and a repo for cores on the fake engine.
+// bench is a data directory and a repo for cores on the fake engine, whose
+// renewal of the credential runs on the bench's clock.
 type bench struct {
 	cfg      Config
 	instance string
 	commit   string // main's head
+	clock    clock
 }
 
 // newBench makes a data directory with its store, and a repo whose main is at
@@ -299,7 +323,10 @@ func newBench(t *testing.T, runs int) *bench {
 	repo, commit := bareRepo(t, map[string]string{"NOTES.md": "# Notes\n"})
 	b.cfg = Config{Data: filepath.Join(t.TempDir(), "data"), Repo: repo, Model: "claude-opus-5-5",
 		ImplementModel: "claude-sonnet-5-5", ReviewModel: "claude-opus-5-5", Image: "kiln-run", Proxy: "kiln-proxy",
-		Hosts: []string{"go.dev"}, Runs: runs}
+		Hosts: []string{"go.dev"}, Runs: runs,
+		ProxyImage: "kiln-proxy", ProxyNetwork: "kiln", Upstream: "http://upstream.kiln-test.example",
+		CredentialCommand: "echo stand-in-credential"}
+	b.clock = realClock{}
 	b.commit = commit
 	b.with(t, func(s *store.Store) {
 		var err error
@@ -396,7 +423,7 @@ func (b *bench) start(t *testing.T, e *fakeEngine, runs int) *running {
 	r := &running{cancel: cancel, done: make(chan error, 1), out: &bytes.Buffer{}}
 	cfg := b.cfg
 	cfg.Runs = runs
-	go func() { r.done <- runCore(ctx, cfg, r.out, r.out, e, 5*time.Millisecond) }()
+	go func() { r.done <- runCore(ctx, cfg, r.out, r.out, e, 5*time.Millisecond, b.clock) }()
 	e.waitTicks(t, 1) // a core that cannot start says so here, not in a wait for its runs
 	t.Cleanup(func() {
 		cancel()
@@ -739,7 +766,7 @@ func TestFollowersRefusedStart(t *testing.T) {
 func TestRunsRefused(t *testing.T) {
 	for _, n := range []int{0, -1, MaxRuns + 1} {
 		data := filepath.Join(t.TempDir(), "data")
-		err := runCore(t.Context(), Config{Data: data, Repo: "/repo.git", Model: "m", Runs: n}, io.Discard, io.Discard, newFakeEngine(), time.Millisecond)
+		err := runCore(t.Context(), Config{Data: data, Repo: "/repo.git", Model: "m", Runs: n}, io.Discard, io.Discard, newFakeEngine(), time.Millisecond, realClock{})
 		if err == nil || !strings.Contains(err.Error(), "--runs") {
 			t.Errorf("--runs %d: %v", n, err)
 		}

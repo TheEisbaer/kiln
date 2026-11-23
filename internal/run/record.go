@@ -107,14 +107,20 @@ func (rec *record) status() int {
 }
 
 // reason is the verdict's line: the container's ending, the result's subtype,
-// turns and cost, and the saved commit, "no change" or "not saved".
+// turns and cost, and the saved commit, "no change" or "not saved". A run that
+// ended because the upstream refused the credential says so in words in place
+// of the ending and the subtype.
 func (rec *record) reason() string {
 	ending := fmt.Sprintf("exit %d", rec.Ending.ExitCode)
 	if rec.Ending.OOMKilled {
 		ending += ", killed for memory"
 	}
 	result := "no result"
-	if rec.Result != nil {
+	switch {
+	case rec.Result != nil && rec.Result.APIErrorStatus == refusedStatus:
+		ending = "the upstream refused the Claude credential (401)"
+		result = fmt.Sprintf("%d turns, $%.4f", rec.Result.NumTurns, rec.Result.TotalCostUSD)
+	case rec.Result != nil:
 		result = fmt.Sprintf("result %s, %d turns, $%.4f", printable(rec.Result.Subtype), rec.Result.NumTurns, rec.Result.TotalCostUSD)
 	}
 	saved := rec.Saved

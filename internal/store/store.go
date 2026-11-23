@@ -21,7 +21,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 8
+const version = 9
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -249,6 +249,18 @@ CREATE TABLE publishes (
 		// The developer's note on approving a spec, kept on that spec's row;
 		// NULL on every other row.
 		_, err := tx.Exec(`ALTER TABLE specs ADD COLUMN note TEXT`)
+		return err
+	},
+	func(tx *sql.Tx) error {
+		// The instance's state, whether it is paused and why, and its history,
+		// one entry per change, written together (ADR 0055).
+		_, err := tx.Exec(`
+ALTER TABLE instance ADD COLUMN paused TEXT;
+CREATE TABLE instance_entries (
+	number INTEGER PRIMARY KEY,
+	at TEXT NOT NULL,
+	paused TEXT
+) STRICT;`)
 		return err
 	},
 }

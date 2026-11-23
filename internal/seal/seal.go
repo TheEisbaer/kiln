@@ -6,26 +6,30 @@ package seal
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
-// The names of the variables the proxy starts from (cmd/proxy).
-const (
-	upstreamVar   = "KILN_PROXY_UPSTREAM"
-	credentialVar = "KILN_PROXY_CREDENTIAL"
-)
+// upstreamVar is the variable the proxy reads its upstream from (cmd/proxy).
+const upstreamVar = "KILN_PROXY_UPSTREAM"
 
 // proxyPort is where the proxy listens (cmd/proxy).
 const proxyPort = "8080"
 
 // proxyLabel marks a proxy container that Kiln made.
 const proxyLabel = "kiln.proxy"
+
+// proxyUser is the user the proxy runs as (images/proxy), and pushDir the
+// directory of its push socket (cmd/proxy).
+const (
+	proxyUser = "65532"
+	pushDir   = "/run/kiln"
+)
 
 // Proxy is a proxy container.
 type Proxy struct {
@@ -35,83 +39,137 @@ type Proxy struct {
 	Upstream string // the URL every request is forwarded to
 }
 
-// StartProxy starts the proxy on its ordinary network with packet forwarding
-// switched off in both families, so that it cannot be used as a router between
-// networks (ADR 0041, point 4). IPv6 forwarding is off by default; it is set
-// anyway, so that the seal does not rest on a default. The credential reaches docker by the name of a variable and
-// not as an argument, where `ps` would show it. The container carries the label
-// kiln.proxy, by which ReplaceProxy knows it as Kiln's. The image is never
-// pulled: one that is not there locally is an error. On failure nothing is left
-// behind.
-func StartProxy(ctx context.Context, p Proxy, credential string) error {
-	return runDetached(ctx, []string{credentialVar + "=" + credential},
+// StartProxy starts the proxy on its ordinary network, with no credential:
+// PushCredential gives it one (ADR 0040). Packet forwarding is switched off in
+// both families, so that it cannot be used as a router between networks
+// (ADR 0041, point 4). IPv6 forwarding is off by default; it is set anyway, so
+// that the seal does not rest on a default.
+//
+// The directory of the push socket is a tmpfs of the proxy's user with the
+// mode 0700, so that only that user, in the proxy's own container, reaches
+// the socket. A path in the container's own mounts is used, and not an
+// abstract socket, because an abstract socket belongs to the network
+// namespace, which another container can join (`--network container:`), and
+// has no permissions at all.
+//
+// The container carries the label kiln.proxy, by which KeepProxy knows it as
+// Kiln's. The image is never pulled: one that is not there locally is an
+// error. On failure nothing is left behind.
+func StartProxy(ctx context.Context, p Proxy) error {
+	return runDetached(ctx, nil,
 		"--pull", "never", // a missing image is an error, never a download
 		"--name", p.Name,
 		"--label", proxyLabel+"=1",
 		"--network", p.Network,
 		"--sysctl", "net.ipv4.ip_forward=0",
 		"--sysctl", "net.ipv6.conf.all.forwarding=0",
+		"--tmpfs", pushDir+":rw,noexec,nosuid,size=64k,uid="+proxyUser+",gid="+proxyUser+",mode=0700",
 		"--env", upstreamVar+"="+p.Upstream,
-		"--env", credentialVar,
 		p.Image)
 }
 
-// ReplaceProxy starts the proxy with a fresh credential from the instance's
-// credential command (ADR 0040), replacing the proxy of that name if there is
-// one. Each step can be repeated (ADR 0035):
+// KeepProxy makes sure the proxy runs, and reports whether it kept the one
+// that was there. A proxy that runs with the image of that name as it is now
+// and with the same upstream is kept, since replacing it cuts the runs in
+// flight from it; any other is replaced, and a missing one is started. A new
+// proxy holds no credential until PushCredential. Each step can be repeated
+// (ADR 0035):
 //
 //  1. It looks for a container of the proxy's name. One without the label
 //     kiln.proxy was not made by Kiln: it is refused, and nothing is touched.
-//  2. It runs the command with `sh -c` and takes its standard output, trimmed. A
-//     failure or an empty output means the credential is unavailable; the error
-//     does not carry the output, and nothing is touched.
+//  2. It keeps one that runs with the image and the upstream.
 //  3. It creates the proxy's ordinary network if it is missing.
 //  4. It removes the container found in step 1, by its ID, so that a container
 //     that took the name in between is not touched.
 //  5. It starts the proxy with StartProxy.
 //
 // A replaced proxy is no longer attached to the run networks of earlier runs.
-func ReplaceProxy(ctx context.Context, p Proxy, credentialCommand string) error {
+func KeepProxy(ctx context.Context, p Proxy) (bool, error) {
 	old, err := findContainer(ctx, p.Name, proxyLabel)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if old != nil && old.label == "" {
-		return fmt.Errorf("the container %s has no label %s, so Kiln did not make it; it is left alone", p.Name, proxyLabel)
+		return false, fmt.Errorf("the container %s has no label %s, so Kiln did not make it; it is left alone", p.Name, proxyLabel)
 	}
-
-	credential, err := runCredentialCommand(ctx, credentialCommand)
-	if err != nil {
-		return err
+	if old != nil && old.state == "running" {
+		same, err := sameProxy(ctx, old.id, p)
+		if err != nil || same {
+			return same, err
+		}
 	}
 
 	exists, err := networkExists(ctx, p.Network)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !exists {
 		if _, err := docker(ctx, nil, "network", "create", p.Network); err != nil {
-			return err
+			return false, err
 		}
 	}
 
 	if old != nil {
-		// --force, since the old proxy runs; docker answers a container that is
+		// --force, since the old proxy may run; docker answers a container that is
 		// already gone with success.
 		if _, err := docker(ctx, nil, "rm", "--force", old.id); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return StartProxy(ctx, p, credential)
+	return false, StartProxy(ctx, p)
+}
+
+// sameProxy reports whether a proxy container was made from the image of the
+// proxy's name as it is now, and forwards to its upstream.
+func sameProxy(ctx context.Context, id string, p Proxy) (bool, error) {
+	image, err := docker(ctx, nil, "image", "inspect", "--format", "{{.Id}}", p.Image)
+	if err != nil {
+		return false, err
+	}
+	out, err := docker(ctx, nil, "inspect", "--type", "container", "--format", "{{json .Image}}\t{{json .Config.Env}}", id)
+	if err != nil {
+		return false, err
+	}
+	imageJSON, envJSON, _ := strings.Cut(out, "\t")
+	var got string
+	var env []string
+	if err := json.Unmarshal([]byte(imageJSON), &got); err != nil {
+		return false, fmt.Errorf("the image of %s: %w", p.Name, err)
+	}
+	if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+		return false, fmt.Errorf("the environment of %s: %w", p.Name, err)
+	}
+	return got == image && slices.Contains(env, upstreamVar+"="+p.Upstream), nil
+}
+
+// PushCredential gives the running proxy a credential, which replaces the one
+// it holds (ADR 0040). The seal runs the proxy's own program in the proxy's
+// container, `docker exec --interactive <proxy> /proxy push`, with the
+// credential on its standard input; that program hands it to the proxy over
+// the push socket (cmd/proxy). So the credential is never an argument, never
+// in an environment and never in a file, and nothing outside the proxy's
+// container can push one. A proxy without the label kiln.proxy is refused.
+// An error never carries the credential.
+func PushCredential(ctx context.Context, proxy, credential string) error {
+	return pushFrom(ctx, proxy, strings.NewReader(credential))
+}
+
+// pushFrom is PushCredential with the credential read from r.
+func pushFrom(ctx context.Context, proxy string, r io.Reader) error {
+	p, err := kilnProxy(ctx, proxy)
+	if err != nil {
+		return err
+	}
+	// By ID, so that a container that took the name in between gets nothing.
+	return dockerIO(ctx, r, nil, "exec", "--interactive", p.id, "/proxy", "push")
 }
 
 // dirKey is the key of the directory InDir puts in a context.
 type dirKey struct{}
 
-// InDir is a context under which every command the seal runs, docker and the
-// credential command, runs in dir, a directory its caller owns, and not in the
-// directory the process was started in, which may have been removed since
-// (card 16).
+// InDir is a context under which every docker command the seal runs runs in
+// dir, a directory its caller owns, and not in the directory the process was
+// started in, which may have been removed since (card 16).
 func InDir(ctx context.Context, dir string) context.Context {
 	return context.WithValue(ctx, dirKey{}, dir)
 }
@@ -124,23 +182,6 @@ func commandIn(ctx context.Context, name string, args ...string) *exec.Cmd {
 		cmd.Dir = dir
 	}
 	return cmd
-}
-
-// runCredentialCommand runs the instance's credential command (ADR 0040) and
-// returns what it printed to standard output, trimmed. Its standard error is
-// discarded, and an error never carries what the command printed.
-func runCredentialCommand(ctx context.Context, command string) (string, error) {
-	out, err := commandIn(ctx, "sh", "-c", command).Output()
-	if err != nil {
-		// The text of an exit error is the exit status alone; Output keeps the
-		// standard error in a field that is not part of it.
-		return "", fmt.Errorf("credential unavailable: the credential command failed: %v", err)
-	}
-	credential := strings.TrimSpace(string(out))
-	if credential == "" {
-		return "", errors.New("credential unavailable: the credential command printed nothing")
-	}
-	return credential, nil
 }
 
 // runDetached runs `docker run --detach` with the given arguments, through

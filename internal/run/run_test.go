@@ -124,15 +124,15 @@ func TestSteps(t *testing.T) {
 	build(t, f.runImage, "images/run/Dockerfile")
 
 	// The proxy and the upstream on the ordinary network, which the test
-	// makes, so that ReplaceProxy finds it; TestRun of internal/seal has
-	// ReplaceProxy make one.
+	// makes, so that KeepProxy finds it; TestRun of internal/seal has
+	// KeepProxy make one.
 	ordinary := name("ordinary")
 	testNetwork(t, ordinary)
 	f.upstream = name("upstream")
 	f.proxy = seal.Proxy{Name: name("proxy"), Image: f.proxyImage, Network: ordinary,
 		Upstream: "http://" + f.upstream + ":" + upstreamPort}
 	t.Cleanup(func() { dockerQuiet("rm", "--force", f.proxy.Name) })
-	if err := seal.ReplaceProxy(t.Context(), f.proxy, "echo "+f.credential); err != nil {
+	if err := replaceProxy(t, f.proxy, f.credential); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { dockerQuiet("rm", "--force", f.upstream) })
@@ -225,7 +225,7 @@ func TestSteps(t *testing.T) {
 						proxy := f.proxy
 						proxy.Name = name("proxy-" + c.name)
 						t.Cleanup(func() { dockerQuiet("rm", "--force", proxy.Name) })
-						if err := seal.ReplaceProxy(t.Context(), proxy, "echo "+f.credential); err != nil {
+						if err := replaceProxy(t, proxy, f.credential); err != nil {
 							t.Fatal(err)
 						}
 						c.in.Proxy = proxy.Name
@@ -233,7 +233,7 @@ func TestSteps(t *testing.T) {
 						f.waitAtGate(t, c)
 						cmd.Process.Kill()
 						<-done
-						if err := seal.ReplaceProxy(t.Context(), proxy, "echo "+f.credential); err != nil {
+						if err := replaceProxy(t, proxy, f.credential); err != nil {
 							t.Fatal(err)
 						}
 					} else if code, out, errOut := f.kiln(t, c, step+":exit", true); code != exitAfterStep {
@@ -944,4 +944,15 @@ func build(t *testing.T, tag, dockerfile string) {
 	t.Helper()
 	t.Cleanup(func() { dockerQuiet("rmi", tag) })
 	must(t, "build", "--quiet", "--tag", tag, "--file", "../../"+dockerfile, "../..")
+}
+
+// replaceProxy starts the proxy, removing one of its name that is there, and
+// pushes the credential to it, as a core does at its start.
+func replaceProxy(t *testing.T, p seal.Proxy, credential string) error {
+	t.Helper()
+	dockerQuiet("rm", "--force", p.Name)
+	if _, err := seal.KeepProxy(t.Context(), p); err != nil {
+		return err
+	}
+	return seal.PushCredential(t.Context(), p.Name, credential)
 }

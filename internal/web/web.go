@@ -280,7 +280,10 @@ type (
 		Models   modelsJSON `json:"models"`
 		Runs     int        `json:"runs"`
 		Now      time.Time  `json:"now"`
-		Cards    []tileJSON `json:"cards"`
+		// Paused is why the instance is paused, empty when it is not: then
+		// no run starts (ADR 0016, ADR 0055).
+		Paused string     `json:"paused"`
+		Cards  []tileJSON `json:"cards"`
 	}
 	modelsJSON struct {
 		Spec      string `json:"spec"`
@@ -463,8 +466,13 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	paused, err := h.store.Paused()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Repo: h.info.Repo, Models: h.models(), Runs: h.info.Runs, Now: time.Now().UTC(),
-		Cards: []tileJSON{}}
+		Paused: paused, Cards: []tileJSON{}}
 	for _, c := range cards {
 		b.Cards = append(b.Cards, tile(c))
 	}

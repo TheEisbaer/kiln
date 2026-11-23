@@ -155,15 +155,15 @@ func TestTick(t *testing.T) {
 	t.Cleanup(func() { dockerQuiet("network", "rm", f.outward) })
 
 	// The proxy and the upstream on the ordinary network, which the test
-	// makes, so that ReplaceProxy finds it; TestRun of internal/seal has
-	// ReplaceProxy make one.
+	// makes, so that KeepProxy finds it; TestRun of internal/seal has
+	// KeepProxy make one.
 	ordinary := name("ordinary")
 	testNetwork(t, ordinary)
 	f.upstream = name("upstream")
 	f.proxy = seal.Proxy{Name: name("proxy"), Image: f.proxyImage, Network: ordinary,
 		Upstream: "http://" + f.upstream + ":" + upstreamPort}
 	t.Cleanup(func() { dockerQuiet("rm", "--force", f.proxy.Name) })
-	if err := seal.ReplaceProxy(t.Context(), f.proxy, "echo fake-credential-"+f.id); err != nil {
+	if err := replaceProxy(t, f.proxy, "fake-credential-"+f.id); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { dockerQuiet("rm", "--force", f.upstream) })
@@ -441,7 +441,7 @@ func TestTick(t *testing.T) {
 		proxy := f.proxy
 		proxy.Name = name("proxy-replaced")
 		t.Cleanup(func() { dockerQuiet("rm", "--force", proxy.Name) })
-		if err := seal.ReplaceProxy(t.Context(), proxy, "echo fake-credential-"+f.id); err != nil {
+		if err := replaceProxy(t, proxy, "fake-credential-"+f.id); err != nil {
 			t.Fatal(err)
 		}
 		c.proxy = proxy.Name
@@ -450,7 +450,7 @@ func TestTick(t *testing.T) {
 		if code := <-done; code != exitAtPoint {
 			t.Fatalf("the first core exited with %d, want %d after AddRun", code, exitAtPoint)
 		}
-		if err := seal.ReplaceProxy(t.Context(), proxy, "echo fake-credential-"+f.id); err != nil {
+		if err := replaceProxy(t, proxy, "fake-credential-"+f.id); err != nil {
 			t.Fatal(err)
 		}
 		if proxyOn(t, proxy.Name, "kiln-run-"+c.run) {
@@ -1143,8 +1143,10 @@ type testCase struct {
 	noHosts  bool   // the core has no list of hosts
 	listen   string // the address its core serves the screen on, if any
 	proxy    string // the proxy of its core, when it is not the test's
-	starts   *lines // the names of the instance's containers, once per start
-	saves    *lines // the names of the run's containers, its save's included, once per start
+	// The credential command of its core, when it is not the test's echo.
+	credentialCommand string
+	starts            *lines // the names of the instance's containers, once per start
+	saves             *lines // the names of the run's containers, its save's included, once per start
 	// What the instance's copy holds before the run: its refs and its objects.
 	refs, objects string
 }
@@ -1373,7 +1375,9 @@ func copyHolds(t *testing.T, repo string) (refs, objects string) {
 // config is the configuration of a case's core.
 func (f *fixture) config(c *testCase) Config {
 	cfg := Config{Data: c.data, Repo: c.repo, Model: model, ImplementModel: implementModel, ReviewModel: reviewModel,
-		Image: c.image, Proxy: cmp.Or(c.proxy, f.proxy.Name), Listen: c.listen, Runs: DefaultRuns}
+		Image: c.image, Proxy: cmp.Or(c.proxy, f.proxy.Name), ProxyImage: f.proxy.Image, ProxyNetwork: f.proxy.Network,
+		Upstream: f.proxy.Upstream, CredentialCommand: cmp.Or(c.credentialCommand, "echo fake-credential-"+f.id),
+		Listen: c.listen, Runs: DefaultRuns}
 	if !c.noHosts {
 		cfg.Hosts, cfg.WayOutImage, cfg.WayOutNetwork = hosts, f.wayOutImage, f.outward
 	}
@@ -1990,4 +1994,15 @@ func build(t *testing.T, tag, context, dockerfile string, args ...string) {
 	t.Helper()
 	t.Cleanup(func() { dockerQuiet("rmi", tag) })
 	must(t, append(append([]string{"build", "--quiet", "--tag", tag, "--file", "../../" + dockerfile}, args...), context)...)
+}
+
+// replaceProxy starts the proxy, removing one of its name that is there, and
+// pushes the credential to it, as a core does at its start.
+func replaceProxy(t *testing.T, p seal.Proxy, credential string) error {
+	t.Helper()
+	dockerQuiet("rm", "--force", p.Name)
+	if _, err := seal.KeepProxy(t.Context(), p); err != nil {
+		return err
+	}
+	return seal.PushCredential(t.Context(), p.Name, credential)
 }

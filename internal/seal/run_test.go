@@ -102,7 +102,10 @@ func TestRun(t *testing.T) {
 	proxy := Proxy{Name: name("proxy"), Image: proxyImage, Network: ordinary,
 		Upstream: "http://" + upstream + ":" + upstreamPort}
 	cleanup(t, "rm", "--force", proxy.Name)
-	if err := ReplaceProxy(t.Context(), proxy, "echo "+credential1); err != nil {
+	if kept, err := KeepProxy(t.Context(), proxy); err != nil || kept {
+		t.Fatalf("KeepProxy with no proxy: kept %v, %v", kept, err)
+	}
+	if err := PushCredential(t.Context(), proxy.Name, credential1); err != nil {
 		t.Fatal(err)
 	}
 	start(t, upstream, ordinary, upstreamImage)
@@ -283,26 +286,31 @@ func TestRun(t *testing.T) {
 		}
 	})
 
-	t.Run("ReplaceProxy", func(t *testing.T) {
+	t.Run("KeepProxy", func(t *testing.T) {
 		before := containerID(t, proxy.Name)
-
-		for _, command := range []string{"echo leaked-" + id + "; exit 1", "true"} {
-			err := ReplaceProxy(t.Context(), proxy, command)
-			if err == nil {
-				t.Errorf("with %q: no error", command)
-			} else if strings.Contains(err.Error(), "leaked") {
-				t.Errorf("with %q: the error carries the output: %v", command, err)
-			}
-			if got := containerID(t, proxy.Name); got != before {
-				t.Errorf("with %q: the proxy is %s, was %s", command, got, before)
-			}
+		if kept, err := KeepProxy(t.Context(), proxy); err != nil || !kept {
+			t.Errorf("with the proxy running: kept %v, %v", kept, err)
+		}
+		if got := containerID(t, proxy.Name); got != before {
+			t.Errorf("with the proxy running: it is %s, was %s", got, before)
 		}
 
-		if err := ReplaceProxy(t.Context(), proxy, "echo "+credential2); err != nil {
-			t.Fatal(err)
+		// Another upstream replaces the proxy; the upstream that the test's
+		// runs reach replaces it again. Each new proxy holds no credential
+		// until the push.
+		elsewhere := proxy
+		elsewhere.Upstream = "http://elsewhere.kiln-test.example:" + upstreamPort
+		if kept, err := KeepProxy(t.Context(), elsewhere); err != nil || kept {
+			t.Errorf("with another upstream: kept %v, %v", kept, err)
 		}
 		if got := containerID(t, proxy.Name); got == before || got == "" {
-			t.Errorf("the proxy is %q, was %s: not replaced", got, before)
+			t.Errorf("with another upstream: the proxy is %q, was %s: not replaced", got, before)
+		}
+		if kept, err := KeepProxy(t.Context(), proxy); err != nil || kept {
+			t.Errorf("with the upstream back: kept %v, %v", kept, err)
+		}
+		if err := PushCredential(t.Context(), proxy.Name, credential2); err != nil {
+			t.Fatal(err)
 		}
 		createRun(t, Run{ID: runID("probe2"), Image: runImage, Proxy: proxy.Name,
 			Command: []string{probePath, probeConfigPath}})
@@ -314,24 +322,25 @@ func TestRun(t *testing.T) {
 
 		// As after a kill between removing the old proxy and starting the new.
 		must(t, "rm", "--force", proxy.Name)
-		if err := ReplaceProxy(t.Context(), proxy, "echo "+credential2); err != nil {
-			t.Errorf("with no proxy: %v", err)
+		if kept, err := KeepProxy(t.Context(), proxy); err != nil || kept {
+			t.Errorf("with no proxy: kept %v, %v", kept, err)
 		}
 		if got := must(t, "inspect", "--format", "{{.State.Status}}", proxy.Name); got != "running" {
 			t.Errorf("with no proxy: the proxy is %s", got)
+		}
+		if err := PushCredential(t.Context(), proxy.Name, credential2); err != nil {
+			t.Fatal(err)
 		}
 
 		foreign := name("foreign")
 		must(t, "create", "--name", foreign, "--network", "none", upstreamImage)
 		cleanup(t, "rm", "--force", foreign)
 		foreignID := containerID(t, foreign)
-		marker := filepath.Join(t.TempDir(), "ran")
-		if err := ReplaceProxy(t.Context(), Proxy{Name: foreign, Image: proxyImage, Network: ordinary, Upstream: proxy.Upstream},
-			"touch "+marker+"; echo "+credential2); err == nil {
-			t.Error("with a container that lacks kiln.proxy: no error")
+		if _, err := KeepProxy(t.Context(), Proxy{Name: foreign, Image: proxyImage, Network: ordinary, Upstream: proxy.Upstream}); err == nil {
+			t.Error("KeepProxy with a container that lacks kiln.proxy: no error")
 		}
-		if _, err := os.Stat(marker); err == nil {
-			t.Error("with a container that lacks kiln.proxy: the credential command ran")
+		if err := PushCredential(t.Context(), foreign, credential2); err == nil {
+			t.Error("PushCredential to a container that lacks kiln.proxy: no error")
 		}
 		if got := containerID(t, foreign); got != foreignID {
 			t.Errorf("with a container that lacks kiln.proxy: it is %q, was %s", got, foreignID)
@@ -340,7 +349,7 @@ func TestRun(t *testing.T) {
 
 	// The cases from here on, but the last, make runs, networks and
 	// containers of names of their own, and only read the proxy and the probe
-	// run, which nothing changes after ReplaceProxy: they run side by side,
+	// run, which nothing changes after KeepProxy: they run side by side,
 	// once the cases that do not are done.
 	t.Run("CreateRun", func(t *testing.T) {
 		t.Parallel()
@@ -509,7 +518,14 @@ func TestRun(t *testing.T) {
 		}
 		real := Proxy{Name: name("claude-proxy"), Image: proxyImage, Network: ordinary, Upstream: claudeUpstream}
 		cleanup(t, "rm", "--force", real.Name)
-		if err := ReplaceProxy(t.Context(), real, command); err != nil {
+		if _, err := KeepProxy(t.Context(), real); err != nil {
+			t.Fatal(err)
+		}
+		printed, err := exec.CommandContext(t.Context(), "sh", "-c", command).Output() // ADR 0040
+		if err != nil {
+			t.Fatalf("the credential command failed: %v", err)
+		}
+		if err := PushCredential(t.Context(), real.Name, strings.TrimSpace(string(printed))); err != nil {
 			t.Fatal(err)
 		}
 		createRun(t, Run{ID: runID("claude"), Image: runImage, Proxy: real.Name, Command: []string{

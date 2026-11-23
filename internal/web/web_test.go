@@ -153,6 +153,34 @@ func TestBoard(t *testing.T) {
 	}
 }
 
+// TestBoardPaused checks that the board says why the instance is paused, and
+// says nothing once the pause has ended, and that the page shows it in one
+// line at the top.
+func TestBoardPaused(t *testing.T) {
+	f := newFixture(t)
+	if b := decode[boardJSON](t, f.do(t, "GET", "/api/board", "")); b.Paused != "" {
+		t.Errorf("a new instance is paused: %q", b.Paused)
+	}
+	const why = "the Claude credential is unavailable: the credential command printed nothing"
+	if _, err := f.store.SetPaused(why); err != nil {
+		t.Fatal(err)
+	}
+	if b := decode[boardJSON](t, f.do(t, "GET", "/api/board", "")); b.Paused != why {
+		t.Errorf("the board says paused %q, want %q", b.Paused, why)
+	}
+	if _, err := f.store.SetPaused(""); err != nil {
+		t.Fatal(err)
+	}
+	if b := decode[boardJSON](t, f.do(t, "GET", "/api/board", "")); b.Paused != "" {
+		t.Errorf("after the pause the board says %q", b.Paused)
+	}
+	for _, want := range []string{`<div id="paused" class="offline" role="status" hidden></div>`, `"Paused: " + b.paused`} {
+		if !strings.Contains(string(page), want) {
+			t.Errorf("the page lacks %s", want)
+		}
+	}
+}
+
 // longTitle is a first line written as one long paragraph, and longHeadline
 // what the strip shows of it.
 const (

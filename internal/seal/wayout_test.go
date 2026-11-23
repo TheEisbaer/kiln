@@ -130,6 +130,7 @@ func testWayOut(t *testing.T, f fixture, credentials []string, published, other 
 		targets[i] = w.target
 	}
 	report, _, _ := runProbe(t, f.probe, webID, probeConfig{
+		HTTP:    []string{"http://" + hp(f.proxy.Name, proxyPort) + "/hello"},
 		Connect: targets,
 		Dial:    append(slices.Clone(noConnection), hp(publicIP, "443")),
 		Lookup:  []string{f.proxy.Name, publicHost, privateHost},
@@ -137,6 +138,12 @@ func testWayOut(t *testing.T, f fixture, credentials []string, published, other 
 
 	t.Run("what the way out lets through and refuses", func(t *testing.T) {
 		assertConnect(t, report, wants)
+	})
+
+	// It reaches the proxy's API, with the credential pushed last; the way out
+	// refuses the proxy above, and the push has no address.
+	t.Run("the run reaches the proxy's API", func(t *testing.T) {
+		assertCredential(t, report, credentials[len(credentials)-1])
 	})
 
 	t.Run("the run itself reaches nothing but the proxy and its way out", func(t *testing.T) {

@@ -29,18 +29,35 @@ type event struct {
 		} `json:"content"`
 	} `json:"message"`
 
+	// system/api_retry: the status of the answer Claude Code retries after
+	ErrorStatus int `json:"error_status"`
+
 	// result
-	IsError      bool    `json:"is_error"`
-	NumTurns     int     `json:"num_turns"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
+	IsError        bool    `json:"is_error"`
+	NumTurns       int     `json:"num_turns"`
+	TotalCostUSD   float64 `json:"total_cost_usd"`
+	APIErrorStatus int     `json:"api_error_status"`
 }
 
-// Result is what the record keeps of the last result event.
+// refusedStatus is the status of an answer that refuses the credential.
+const refusedStatus = 401
+
+// refused reports whether an event says that the upstream refused the
+// credential: Claude Code retries a request after an answer of 401, and says
+// so with an event system/api_retry before each try, up to ten over about
+// three minutes, before it gives up.
+func (e event) refused() bool {
+	return e.Type == "system" && e.Subtype == "api_retry" && e.ErrorStatus == refusedStatus
+}
+
+// Result is what the record keeps of the last result event. APIErrorStatus is
+// the status of the answer that ended the run, if an error of the API did.
 type Result struct {
-	Subtype      string  `json:"subtype"`
-	IsError      bool    `json:"is_error"`
-	NumTurns     int     `json:"num_turns"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
+	Subtype        string  `json:"subtype"`
+	IsError        bool    `json:"is_error"`
+	NumTurns       int     `json:"num_turns"`
+	TotalCostUSD   float64 `json:"total_cost_usd"`
+	APIErrorStatus int     `json:"api_error_status,omitempty"`
 }
 
 // summary is what a run's output says: the model system/init names, the last
@@ -96,7 +113,8 @@ func readEventsUpTo(r io.Reader, see func(event), limit int) (summary, error) {
 				case e.Type == "system" && e.Subtype == "init" && s.model == "":
 					s.model = e.Model
 				case e.Type == "result":
-					s.result = &Result{Subtype: e.Subtype, IsError: e.IsError, NumTurns: e.NumTurns, TotalCostUSD: e.TotalCostUSD}
+					s.result = &Result{Subtype: e.Subtype, IsError: e.IsError, NumTurns: e.NumTurns, TotalCostUSD: e.TotalCostUSD,
+						APIErrorStatus: e.APIErrorStatus}
 				}
 				if see != nil {
 					see(e)
@@ -227,17 +245,22 @@ func firstLine(s string) string {
 }
 
 // follower prints the events of a run as they come, hands their activities to
-// activity, when it is set, and calls mismatch once when system/init names
-// another model than the one asked for.
+// activity, when it is set, calls refused, when it is set, for every event
+// that says the credential was refused, and calls mismatch once when
+// system/init names another model than the one asked for.
 type follower struct {
 	out      io.Writer
 	model    string
 	mismatch func(seen string)
 	activity func(Activity)
+	refused  func()
 	stopped  bool
 }
 
 func (f *follower) see(e event) {
+	if f.refused != nil && e.refused() {
+		f.refused()
+	}
 	for _, line := range describe(e) {
 		fmt.Fprintln(f.out, printable(line))
 	}

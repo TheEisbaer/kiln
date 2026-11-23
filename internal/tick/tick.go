@@ -54,7 +54,17 @@ type Config struct {
 	ImplementModel string
 	ReviewModel    string
 	Image          string // the run image
-	Proxy          string // the proxy container's name
+	// The proxy that the core keeps (ADR 0034): its container's name, its
+	// image, the ordinary network it reaches its upstream on, and the
+	// upstream, an http or https URL.
+	Proxy        string
+	ProxyImage   string
+	ProxyNetwork string
+	Upstream     string
+	// The developer's command that prints a Claude credential, run with sh -c
+	// (ADR 0040, see credential.go). The core gives what it prints to the
+	// proxy and renews it.
+	CredentialCommand string
 	// The list of hosts of a spec run (ADR 0059), and its way out's image and
 	// outward network. An empty list seals a spec run as before; implement and
 	// review runs have no list.
@@ -220,19 +230,22 @@ func AddCard(dir, text string) (int64, error) {
 	return c.ID, nil
 }
 
-// Core is `kiln core`: under the lock, it opens the store, serves the screen
-// on cfg.Listen, if it is set, and ticks every interval until the context is
-// cancelled, with a follower beside the tick for every run in flight. A step
+// Core is `kiln core`: under the lock, it opens the store, keeps the proxy and
+// gives it a credential (credential.go), serves the screen on cfg.Listen, if
+// it is set, and ticks every interval until the context is cancelled, with a
+// follower beside the tick for every run in flight and the renewal of the
+// credential beside it as well. A step
 // that fails prints its error, changes nothing, and is tried again on the
 // next tick. The screen's handlers and the followers share the store with the
 // tick (see store.Store). Once the context is cancelled, Core returns when
 // every follower has returned; the runs go on in their containers.
 func Core(ctx context.Context, cfg Config, out, errOut io.Writer) error {
-	return runCore(ctx, cfg, out, errOut, sealed{}, interval)
+	return runCore(ctx, cfg, out, errOut, sealed{}, interval, realClock{})
 }
 
-// runCore is Core on an engine, with a tick every interval.
-func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine, every time.Duration) error {
+// runCore is Core on an engine, with a tick every interval, and the renewal
+// of the credential on a clock.
+func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine, every time.Duration, clk clock) error {
 	// Nothing the core does depends on the directory it was started in, which
 	// may be removed while it runs: its paths are made absolute while that
 	// directory is there, and every command it runs, through the seal, runs in
@@ -265,6 +278,9 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	if cfg.Runs < 1 || cfg.Runs > MaxRuns {
 		return fmt.Errorf("--runs is %d; it is from 1 to %d", cfg.Runs, MaxRuns)
 	}
+	if err := checkCredential(cfg); err != nil {
+		return err
+	}
 	s, lock, err := openStore(cfg.Data)
 	if err != nil {
 		return err
@@ -280,10 +296,15 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	var mu sync.Mutex
 	out, errOut = lockedWriter{&mu, out}, lockedWriter{&mu, errOut}
 	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity(),
-		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}, publishing: map[int64]bool{}}
+		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}, publishing: map[int64]bool{},
+		clock: clk, renewNow: make(chan struct{}, 1)}
 	fmt.Fprintf(out, "kiln core: instance %s, data %s, up to %d runs at once\n", instance, cfg.Data, cfg.Runs)
 	if cfg.PublishCommand != "" {
 		fmt.Fprintln(out, "kiln core: a card is published with the publish command")
+	}
+	// The proxy, with a credential before the first tick.
+	if err := c.keepProxy(ctx); err != nil {
+		return err
 	}
 	if cfg.Listen != "" {
 		stop, err := c.serve()
@@ -294,6 +315,11 @@ func runCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng engine,
 	}
 	// The followers end with the context, and the store is closed after them.
 	defer c.followers.Wait()
+	c.followers.Add(1)
+	go func() {
+		defer c.followers.Done()
+		c.renewal(ctx)
+	}()
 	for {
 		if err := c.tick(ctx); err != nil {
 			if ctx.Err() != nil {
@@ -353,6 +379,13 @@ type core struct {
 	fetchMu sync.Mutex
 	main    mainState
 	checked int
+
+	// The renewal of the credential (credential.go): its clock, a renewal
+	// asked for at once, and credMu, which guards cred.
+	clock    clock
+	renewNow chan struct{}
+	credMu   sync.Mutex
+	cred     credentialState
 }
 
 // b2i is 1 for true and 0 for false.
@@ -372,10 +405,20 @@ type engine interface {
 	Carry(ctx context.Context, in run.Inputs, starting func() error, notes io.Writer) (run.Verdict, error)
 	Remove(ctx context.Context, in run.Inputs) error
 	ReadDocument(runs, id, kind string) (run.Document, error)
+	KeepProxy(ctx context.Context, p seal.Proxy) (bool, error)
+	PushCredential(ctx context.Context, proxy, credential string) error
 }
 
 // sealed is the engine of a core: the seal and internal/run.
 type sealed struct{}
+
+func (sealed) KeepProxy(ctx context.Context, p seal.Proxy) (bool, error) {
+	return seal.KeepProxy(ctx, p)
+}
+
+func (sealed) PushCredential(ctx context.Context, proxy, credential string) error {
+	return seal.PushCredential(ctx, proxy, credential)
+}
 
 func (sealed) ListRuns(ctx context.Context, instance string) ([]string, error) {
 	return seal.ListRuns(ctx, instance)
@@ -450,8 +493,10 @@ func (c *core) serve() (func(), error) {
 // starting on every tick. A card whose run is followed is left alone. A card
 // with a run in flight in the store gets a follower, also when more than
 // Runs are in flight, as after a restart; a run is started only while fewer
-// than Runs are in flight. An error of one card is printed and the next card
-// is taken; an error of the sweep, or an interrupt, ends the tick.
+// than Runs are in flight, and the instance is not paused (ADR 0016, rule 3):
+// a paused instance leaves its runs in flight alone and starts none. An error
+// of one card is printed and the next card is taken; an error of the sweep,
+// or an interrupt, ends the tick.
 func (c *core) tick(ctx context.Context) error {
 	if err := c.sweep(ctx); err != nil {
 		return fmt.Errorf("the sweep: %w", err)
@@ -464,11 +509,15 @@ func (c *core) tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	paused, err := c.store.Paused()
+	if err != nil {
+		return err
+	}
 	// Runs start from main as origin has it (card 19).
 	starts := false
 	for _, id := range cards {
 		_, ok := inFlight[id]
-		starts = starts || !ok
+		starts = starts || (!ok && paused == "")
 	}
 	if err := c.atHostRound(ctx, starts); err != nil {
 		if ctx.Err() != nil {
@@ -500,7 +549,7 @@ func (c *core) tick(ctx context.Context) error {
 		if c.follows(id) {
 			continue
 		}
-		f, err := c.card(ctx, id, busy[id] || len(busy) < c.Runs)
+		f, err := c.card(ctx, id, paused == "" && (busy[id] || len(busy) < c.Runs))
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -745,6 +794,7 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 	// starts again with every Carry.
 	c.activity.Drop(row.ID)
 	in.Activity = func(a run.Activity) { c.activity.Add(row.ID, a) }
+	in.Refused = c.credentialRefused
 	verdict, err := c.engine.Carry(ctx, in, f.starting, c.errOut)
 	switch {
 	case errors.Is(err, run.ErrGone):

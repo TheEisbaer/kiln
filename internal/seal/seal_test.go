@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -61,12 +62,12 @@ func TestSeal(t *testing.T) {
 	start(t, published, ordinary, upstreamImage, "--publish", upstreamPort)
 	hostPort := lastField(must(t, "port", published, upstreamPort+"/tcp"), ":")
 
-	// The proxy, and two run networks.
+	// The proxy, which holds no credential until the push, and two run
+	// networks.
 	proxy := name("proxy")
-	if err := StartProxy(t.Context(), Proxy{
-		Name: proxy, Image: proxyImage, Network: ordinary,
-		Upstream: "http://" + upstream + ":" + upstreamPort,
-	}, credential); err != nil {
+	proxyConfig := Proxy{Name: proxy, Image: proxyImage, Network: ordinary,
+		Upstream: "http://" + upstream + ":" + upstreamPort}
+	if err := StartProxy(t.Context(), proxyConfig); err != nil {
 		t.Fatal(err)
 	}
 	cleanup(t, "rm", "--force", proxy)
@@ -80,6 +81,14 @@ func TestSeal(t *testing.T) {
 	start(t, other, run2, upstreamImage)
 
 	proxyURL := "http://" + proxy + ":" + proxyPort
+
+	t.Run("no credential before the first push", func(t *testing.T) {
+		assertNoCredential(t, probe, proxyURL)
+	})
+
+	t.Run("the push is in no inspect and in no ps line", func(t *testing.T) {
+		testPushUnseen(t, proxy, credential)
+	})
 
 	t.Run("through the proxy", func(t *testing.T) {
 		for _, target := range []struct{ what, host string }{
@@ -167,6 +176,12 @@ func TestSeal(t *testing.T) {
 		t.Run("the container on the second run network at its IPv6 address", func(t *testing.T) {
 			noConnection(t, ip6On(t, other, run2), upstreamPort)
 		})
+	})
+
+	// The push has no address: a run cannot push or read a credential, and
+	// the socket is reached by none but the proxy's user in its container.
+	t.Run("no push from outside the proxy", func(t *testing.T) {
+		testNoPush(t, probe, proxy, proxyURL, credential)
 	})
 
 	t.Run("no name resolves", func(t *testing.T) {
@@ -264,6 +279,31 @@ func TestSeal(t *testing.T) {
 		}
 	})
 
+	// Last, since it replaces the proxy that the cases above use.
+	t.Run("a replaced proxy has no credential until the next push", func(t *testing.T) {
+		if kept, err := KeepProxy(t.Context(), proxyConfig); err != nil || !kept {
+			t.Fatalf("KeepProxy of the proxy that runs: kept %v, %v", kept, err)
+		}
+		before := must(t, "inspect", "--format", "{{.Id}}", proxy)
+		must(t, "stop", proxy)
+		if kept, err := KeepProxy(t.Context(), proxyConfig); err != nil || kept {
+			t.Fatalf("KeepProxy of a stopped proxy: kept %v, %v", kept, err)
+		}
+		if got := must(t, "inspect", "--format", "{{.Id}}", proxy); got == before {
+			t.Fatal("the stopped proxy was not replaced")
+		}
+		if err := AttachProxy(t.Context(), runID("run1"), proxy); err != nil {
+			t.Fatal(err)
+		}
+		assertNoCredential(t, probe, proxyURL)
+		if err := PushCredential(t.Context(), proxy, credential+"-again"); err != nil {
+			t.Fatal(err)
+		}
+		if got := seenKey(t, probe, proxyURL); got != credential+"-again" {
+			t.Errorf("after the push the upstream saw %q", got)
+		}
+	})
+
 	// Needs the developer's credential, so it is run by hand (ADR 0049).
 	t.Run("Claude answers through the proxy", func(t *testing.T) {
 		claudeUpstream, command := os.Getenv("KILN_CLAUDE_UPSTREAM"), os.Getenv("KILN_CLAUDE_CREDENTIAL_COMMAND")
@@ -276,11 +316,13 @@ func TestSeal(t *testing.T) {
 		}
 
 		real := name("claude-proxy")
-		if err := StartProxy(t.Context(), Proxy{Name: real, Image: proxyImage, Network: ordinary, Upstream: claudeUpstream},
-			strings.TrimSpace(string(out))); err != nil {
+		if err := StartProxy(t.Context(), Proxy{Name: real, Image: proxyImage, Network: ordinary, Upstream: claudeUpstream}); err != nil {
 			t.Fatal(err)
 		}
 		cleanup(t, "rm", "--force", real)
+		if err := PushCredential(t.Context(), real, strings.TrimSpace(string(out))); err != nil {
+			t.Fatal(err)
+		}
 		run3 := runNetwork(t, runID("run3"), real)
 		probe3 := name("probe3")
 		start(t, probe3, run3, toolchainImage, "--entrypoint", "sleep", "--", "infinity")
@@ -299,6 +341,137 @@ func TestSeal(t *testing.T) {
 			t.Errorf("Claude answered: %s", status)
 		}
 	})
+}
+
+// seenKey is the X-Api-Key the upstream saw on a request of the probe's
+// through the proxy, tried for a while for a proxy that has only just
+// started.
+func seenKey(t *testing.T, probe, proxyURL string) string {
+	t.Helper()
+	var got map[string]string
+	eventually(t, func() error {
+		out, err := execIn(t, probe, "curl", "--silent", "--show-error", "--fail", "--max-time", "5", proxyURL+"/hello")
+		if err != nil {
+			return errors.New(out)
+		}
+		return json.Unmarshal([]byte(out), &got)
+	})
+	return got["x-api-key"]
+}
+
+// assertNoCredential asserts that the proxy answers the probe's request with
+// its own 503, which names the cause, and forwards nothing: the upstream
+// would answer 200 with what it saw.
+func assertNoCredential(t *testing.T, probe, proxyURL string) {
+	t.Helper()
+	var out string
+	eventually(t, func() error {
+		var err error
+		out, err = execIn(t, probe, "curl", "--silent", "--show-error", "--max-time", "5",
+			"--write-out", "\n%{http_code}", proxyURL+"/hello")
+		return err
+	})
+	if !strings.HasSuffix(out, "\n503") || !strings.Contains(out, "holds no Claude credential") {
+		t.Errorf("want the proxy's own 503, got %s", out)
+	}
+}
+
+// testPushUnseen pushes a credential from a pipe that it holds open while it
+// reads every docker inspect of the proxy, the processes in the proxy's
+// container and the processes on this machine, and asserts that none of them
+// carries the credential. Then it lets the push end.
+func testPushUnseen(t *testing.T, proxy, credential string) {
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- pushFrom(t.Context(), proxy, pr) }()
+	if _, err := io.WriteString(pw, credential); err != nil {
+		t.Fatal(err)
+	}
+	// The push is under way: `proxy push` runs in the container, waiting for
+	// the end of its standard input.
+	eventually(t, func() error {
+		if top := must(t, "top", proxy, "-o", "pid,args"); !strings.Contains(top, "/proxy push") {
+			return fmt.Errorf("no push in the proxy's container yet:\n%s", top)
+		}
+		return nil
+	})
+	seen := map[string]string{
+		"docker inspect of the proxy":            must(t, "inspect", proxy),
+		"the processes in the proxy's container": must(t, "top", proxy, "-o", "pid,args"),
+	}
+	if out, err := exec.CommandContext(t.Context(), "ps", "-e", "-o", "args").Output(); err != nil {
+		t.Errorf("ps: %v", err)
+	} else if !strings.Contains(string(out), "docker exec --interactive") {
+		t.Errorf("ps shows no docker exec, so it proves nothing:\n%s", out)
+	} else {
+		seen["the processes on this machine"] = string(out)
+	}
+	for what, text := range seen {
+		if strings.Contains(text, credential) {
+			t.Errorf("the credential is in %s", what)
+		}
+	}
+	pw.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if inspect := must(t, "inspect", proxy); strings.Contains(inspect, credential) {
+		t.Error("the credential is in docker inspect of the proxy after the push")
+	}
+}
+
+// testNoPush asserts that the probe, a run on its sealed network, reaches the
+// proxy's API and cannot push or read a credential; that a container on the
+// proxy's own network namespace does not see the push socket; and that
+// another user in the proxy's container cannot push.
+func testNoPush(t *testing.T, probe, proxy, proxyURL, credential string) {
+	t.Run("a run reaches the API and pushes nothing", func(t *testing.T) {
+		for _, path := range []string{"/push", "/run/kiln/push.sock", "/credential"} {
+			out, err := execIn(t, probe, "curl", "--silent", "--show-error", "--max-time", "5",
+				"--data", "pushed-by-a-run", "--dump-header", "/dev/stdout", proxyURL+path)
+			if err != nil {
+				t.Fatalf("%s: %v: %s", path, err, out)
+			}
+			// The fake upstream echoes the headers it saw in its body; the
+			// proxy itself adds none to an answer.
+			head, _, _ := strings.Cut(out, "\r\n\r\n")
+			if strings.Contains(head, credential) {
+				t.Errorf("%s: the proxy's answer carries the credential in its headers:\n%s", path, head)
+			}
+		}
+		if got := seenKey(t, probe, proxyURL); got != credential {
+			t.Errorf("after the run's requests the upstream saw %q, want the credential pushed", got)
+		}
+		if out, err := execIn(t, probe, "ls", "-a", "/run/kiln"); err == nil {
+			t.Errorf("the run has /run/kiln: %s", out)
+		}
+	})
+
+	t.Run("a container on the proxy's network namespace", func(t *testing.T) {
+		out, err := docker(t.Context(), nil, "run", "--rm", "--network", "container:"+proxy, "--entrypoint", "sh",
+			toolchainImage, "-c", "ls -a /run/kiln; cat /proc/net/unix")
+		if err == nil || strings.Contains(out, "push.sock") {
+			t.Errorf("it sees the push socket: %v: %s", err, out)
+		}
+	})
+
+	t.Run("another user in the proxy's container", func(t *testing.T) {
+		_, err := dockerIOString(t, "pushed-by-another-user", "exec", "--interactive", "--user", "1000", proxy, "/proxy", "push")
+		if err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("want the push refused for want of permission, got %v", err)
+		}
+		if got := seenKey(t, probe, proxyURL); got != credential {
+			t.Errorf("after the other user's push the upstream saw %q", got)
+		}
+	})
+}
+
+// dockerIOString runs docker with stdin and returns what it printed.
+func dockerIOString(t *testing.T, stdin string, args ...string) (string, error) {
+	t.Helper()
+	var out strings.Builder
+	err := dockerIO(t.Context(), strings.NewReader(stdin), &out, args...)
+	return out.String(), err
 }
 
 func randomID(t *testing.T) string {
