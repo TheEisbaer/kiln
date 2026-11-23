@@ -141,6 +141,7 @@ func (c *core) credentialRefused() {
 	c.cred.refusedAt = now
 	select {
 	case c.renewNow <- struct{}{}:
+		fmt.Fprintln(c.out, "kiln core: the upstream refused the Claude credential in a run; it is renewed now")
 	default: // one is asked for already
 	}
 }

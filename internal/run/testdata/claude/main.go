@@ -6,8 +6,12 @@
 // WebFetch's own call, a request without tools that holds the page, which is
 // the page's marker, and "Done." once two tool results have come. The case
 // kiln-case-tick-spec has three steps: the Bash call, then a Write of the spec
-// to /kiln/out/spec.md, then "Done.". Its data follows the Claude Code version
-// pinned in images/run/Dockerfile; the card that changes the pin updates it.
+// to /kiln/out/spec.md, then "Done.". The case kiln-case-tick-refused has the
+// same three steps, and refuses the credential after the case's first answer:
+// a Messages request whose x-api-key ends in -refused gets 401, as Claude's
+// API answers a credential it does not take, until the core has pushed
+// another (ADR 0040). Its data follows the Claude Code version pinned in
+// images/run/Dockerfile; the card that changes the pin updates it.
 //
 // For each request it writes one line of JSON to standard output: the model,
 // output_config.effort, the x-api-key header, whether the marker given as its
@@ -30,6 +34,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -74,8 +79,18 @@ type logLine struct {
 	Marker     bool   `json:"marker"`
 	Case       string `json:"case"`
 	ToolResult bool   `json:"tool_result"`
-	Answer     string `json:"answer"` // the step of the script: bash, webfetch, page, write or done
+	Answer     string `json:"answer"` // the step of the script: bash, webfetch, page, write, done or refused
 }
+
+// refusedCase is the case whose credential is refused after its first
+// answer, and refusedKey the end of the credential that is refused.
+const (
+	refusedCase = "kiln-case-tick-refused"
+	refusedKey  = "-refused"
+)
+
+// refusedBody is the answer to a refused credential, as Claude's API gives it.
+const refusedBody = `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`
 
 func main() {
 	if len(os.Args) != 2 || os.Args[1] == "" {
@@ -83,6 +98,8 @@ func main() {
 	}
 	marker := os.Args[1]
 	out := json.NewEncoder(os.Stdout)
+	var mu sync.Mutex
+	answered := map[string]bool{} // the cases with a Messages request answered
 	log.Fatal(http.ListenAndServe(port, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req request
@@ -92,6 +109,16 @@ func main() {
 		start := time.Now()
 		caseName := caseWord.FindString(string(body))
 		block, stop, step := script(req, string(body), caseName, results)
+		refuse := false
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/messages" && caseName == refusedCase {
+			mu.Lock()
+			refuse = answered[caseName] && strings.HasSuffix(r.Header.Get("X-Api-Key"), refusedKey)
+			answered[caseName] = true
+			mu.Unlock()
+		}
+		if refuse {
+			step = "refused"
+		}
 		out.Encode(logLine{
 			Kind:       "request",
 			Time:       start.UTC().Format(time.RFC3339Nano),
@@ -117,6 +144,9 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		var err error
 		switch {
+		case refuse:
+			w.WriteHeader(http.StatusUnauthorized)
+			_, err = w.Write([]byte(refusedBody))
 		case r.Method != http.MethodPost:
 			_, err = w.Write([]byte("{}"))
 		case strings.HasSuffix(r.URL.Path, "/count_tokens"):
@@ -175,7 +205,7 @@ var pageMarker = regexp.MustCompile(`kiln-page-[a-z0-9-]+`)
 func script(req request, body, caseName string, results int) (map[string]any, string, string) {
 	bash := map[string]any{"type": "tool_use", "id": "toolu_kiln_1", "name": "Bash", "input": json.RawMessage(bashInput)}
 	done := map[string]any{"type": "text", "text": doneText}
-	if caseName == "kiln-case-tick-spec" {
+	if caseName == "kiln-case-tick-spec" || caseName == refusedCase {
 		switch results {
 		case 0:
 			return bash, "tool_use", "bash"

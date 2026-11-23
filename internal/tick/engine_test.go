@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1077,6 +1078,11 @@ echo "https://git.example/pull/$KILN_CARD"`
 		}
 	})
 
+	t.Run("a refused credential is renewed, and the run goes on", func(t *testing.T) {
+		t.Parallel()
+		testRefused(t, f, name)
+	})
+
 	t.Run("one run of the real Claude Code", func(t *testing.T) {
 		t.Parallel()
 		if f.standInOutput == nil {
@@ -1128,6 +1134,72 @@ echo "https://git.example/pull/$KILN_CARD"`
 			}
 		}
 	})
+}
+
+// testRefused is the whole path of a refused credential (ADR 0040), with the
+// real Claude Code, a proxy that the case's core starts, and a stand-in
+// credential command that prints a first credential, which the scripted
+// upstream refuses after the run's first request, and a second one from then
+// on. The run ends finished after its retries, with one push at the core's
+// start and one after the refusal.
+func testRefused(t *testing.T, f *fixture, name func(string) string) {
+	proxy := name("proxy-refused")
+	t.Cleanup(func() { dockerQuiet("rm", "--force", proxy) })
+	c := f.newCase(t, f.runImage)
+	c.proxy = proxy
+	dir := t.TempDir()
+	command := filepath.Join(dir, "credential.sh")
+	refused, renewed := "fake-credential-"+f.id+"-refused", "fake-credential-"+f.id+"-renewed"
+	if err := os.WriteFile(command, []byte(`d=$(dirname "$0")
+echo run >>"$d/runs"
+if [ "$(grep -c run "$d/runs")" -eq 1 ]; then echo `+refused+`; else echo `+renewed+`; fi
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.credentialCommand = "sh " + shellWord(command)
+
+	f.card(t, c, "Run sh run.sh, then write the spec. kiln-case-tick-refused")
+	core, done := f.core(t, c, "")
+	f.waitEnded(t, c)
+	f.stop(t, core, done)
+	spec := scriptedSpec
+	f.assertEndedAt(t, c, store.Finished, store.Approval, &spec)
+
+	if got := strings.Count(string(readFile(t, filepath.Join(dir, "runs"))), "run\n"); got != 2 {
+		t.Errorf("the credential command ran %d times, want 2: at the start and after the refusal", got)
+	}
+	retries := 0
+	for _, e := range readEvents(t, readFile(t, filepath.Join(c.data, "runs", c.run, "output.jsonl"))) {
+		if e["type"] == "system" && e["subtype"] == "api_retry" && e["error_status"] == float64(401) {
+			retries++
+		}
+	}
+	if retries == 0 {
+		t.Error("the run's output has no retry after a 401, so the test proves nothing")
+	}
+	var answers []string
+	for _, line := range strings.Split(must(t, "logs", f.upstream), "\n") {
+		var r map[string]any
+		if json.Unmarshal([]byte(line), &r) == nil && r["kind"] == "request" && r["case"] == "kiln-case-tick-refused" {
+			key, _ := r["x_api_key"].(string)
+			answers = append(answers, fmt.Sprint(r["answer"], " ", strings.TrimPrefix(key, "fake-credential-"+f.id)))
+		}
+	}
+	// The first answer with the first credential, then refusals of it, and
+	// from the second credential on none.
+	first := slices.Index(answers, "refused -refused")
+	renewedAt := slices.IndexFunc(answers, func(a string) bool { return strings.HasSuffix(a, " -renewed") })
+	if len(answers) == 0 || answers[0] != "bash -refused" || first < 0 || renewedAt < first ||
+		slices.Contains(answers[renewedAt:], "refused -renewed") || answers[len(answers)-1] != "done -renewed" {
+		t.Errorf("the upstream answered %q, want bash, then refusals, then the rest with the second credential", answers)
+	}
+	if out := core.Stdout.(*bytes.Buffer).String() + core.Stderr.(*bytes.Buffer).String(); strings.Contains(out, refused) ||
+		strings.Contains(out, renewed) {
+		t.Errorf("the core printed the credential:\n%s", out)
+	}
+	if inspect := must(t, "inspect", proxy); strings.Contains(inspect, refused) || strings.Contains(inspect, renewed) {
+		t.Error("the credential is in docker inspect of the proxy")
+	}
 }
 
 // testCase is one case: its data directory, instance, repo and image, and the

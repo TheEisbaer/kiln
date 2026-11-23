@@ -447,11 +447,19 @@ func testNoPush(t *testing.T, probe, proxy, proxyURL, credential string) {
 		}
 	})
 
+	// The namespace's /proc/net/unix lists the socket by its path, so an
+	// abstract socket would be reached from here; a path in the proxy's own
+	// mounts is not there at all.
 	t.Run("a container on the proxy's network namespace", func(t *testing.T) {
-		out, err := docker(t.Context(), nil, "run", "--rm", "--network", "container:"+proxy, "--entrypoint", "sh",
-			toolchainImage, "-c", "ls -a /run/kiln; cat /proc/net/unix")
-		if err == nil || strings.Contains(out, "push.sock") {
-			t.Errorf("it sees the push socket: %v: %s", err, out)
+		listed := must(t, "run", "--rm", "--network", "container:"+proxy, "--entrypoint", "cat",
+			toolchainImage, "/proc/net/unix")
+		if !strings.Contains(listed, pushDir+"/push.sock") {
+			t.Fatalf("the namespace lists no push socket, so the check below proves nothing:\n%s", listed)
+		}
+		out, err := docker(t.Context(), nil, "run", "--rm", "--network", "container:"+proxy, "--entrypoint", "ls",
+			toolchainImage, "-a", pushDir)
+		if err == nil {
+			t.Errorf("it has the push socket's directory: %s", out)
 		}
 	})
 
