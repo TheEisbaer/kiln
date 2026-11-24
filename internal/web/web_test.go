@@ -113,6 +113,15 @@ func TestPage(t *testing.T) {
 	}
 }
 
+// TestPageCheckFailed holds the page's word for a failed check on the Git
+// host to the store's, by which the page splits off the check's output.
+func TestPageCheckFailed(t *testing.T) {
+	f := newFixture(t)
+	if w := f.do(t, "GET", "/", ""); !strings.Contains(w.Body.String(), `const CHECK_FAILED = "`+store.CheckFailedReason+`";`) {
+		t.Errorf("the page does not split the reason of a failed check by %q", store.CheckFailedReason)
+	}
+}
+
 func TestBoard(t *testing.T) {
 	f := newFixture(t)
 	if b := decode[boardJSON](t, f.do(t, "GET", "/api/board", "")); b.Instance != "ab12cd34" || b.Repo != "/data/repo.git" ||

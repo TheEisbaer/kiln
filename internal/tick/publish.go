@@ -214,7 +214,8 @@ func detach(cmd *exec.Cmd) {
 // brought up to date when a run may start or a card waits for the Git host,
 // and on every tick under a launcher, and after each round every card with a
 // pull request whose change is in main is closed, and the update looks at
-// main (update.go); then a publisher is started for every card the core
+// main (update.go); then a checker is started for every card at the Git host
+// whose check is due (checkresult.go), and a publisher for every card the core
 // publishes.
 //
 // The tick waits for a fetch at most fetchWait, so that a slow origin holds
@@ -254,6 +255,7 @@ func (c *core) atHostRound(ctx context.Context, starts bool) error {
 			}
 		}
 	}
+	c.startCheckers(ctx, published)
 	c.checkUpdate(ctx, moved)
 	return c.startPublishers(ctx, toPublish)
 }

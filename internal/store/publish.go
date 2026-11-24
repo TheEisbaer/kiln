@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Publication is what the store keeps of a card's publishing (card 19): the
@@ -186,4 +187,71 @@ func (s *Store) KeepPullRequest(card int64, commit, address string) (Card, error
 				ON CONFLICT (card) DO UPDATE SET commit_id = excluded.commit_id, address = excluded.address`, card, commit, address)
 			return err
 		}})
+}
+
+// CheckFailedReason begins the reason of the rule's entry that moves a card at
+// the Git host to implement because the check failed for its published commit,
+// followed by " for " and the commit, the rest of the sentence and, after an
+// empty line, the check's output as a fenced block, if it printed any.
+const CheckFailedReason = "the check failed on the Git host"
+
+// CheckFailed moves a card that waits for the Git host to the state to, by the
+// rule, because the check failed for the commit, with the reason: as
+// MoveSentBack, its number of send-backs goes up by one in the same
+// transaction, and a move to implement, waiting for a run, at MaxSendBacks or
+// more is refused. In the same transaction the card's publication must still
+// have the commit and an address; a card that is no longer at the Git host, or
+// whose publication has another commit or none, is refused with ErrRefused,
+// nothing is written, and the card is returned as it is.
+func (s *Store) CheckFailed(card int64, commit string, to State, reason string) (Card, error) {
+	if commit == "" || !strings.HasPrefix(reason, CheckFailedReason) {
+		return Card{}, errors.New("a failed check needs a commit and a reason of a failed check")
+	}
+	c, err := s.change(edit{id: card, next: atHost.only(to), cause: CauseRule, reason: reason, sendBack: true,
+		write: func(tx *sql.Tx, card int64) error {
+			p, err := readPublication(tx, card)
+			if err != nil {
+				return err
+			}
+			if p.Commit != commit || p.Address == "" {
+				return fmt.Errorf("%w: card %d is published as %q, not as %s with an address", ErrRefused, card, p.Commit, commit)
+			}
+			return nil
+		}})
+	if errors.Is(err, ErrRefused) && c.ID == 0 {
+		// The refusal came from the write, which rolled everything back.
+		if cur, cerr := s.Card(card); cerr == nil {
+			c = cur
+		}
+	}
+	return c, err
+}
+
+// FailedCheck finds the card's newest entry of the rule whose reason begins
+// with CheckFailedReason, when it is newer than every entry that ended a run
+// which wrote a spec or a review: the failed check that the card's implement
+// runs are told until a newer spec or review exists. A retry, or a run after
+// the developer's again, still finds it.
+func (s *Store) FailedCheck(card int64) (Entry, bool, error) {
+	e := Entry{Card: card}
+	var at string
+	var run sql.NullString
+	err := s.db.QueryRow(`SELECT number, at, cause, stage, waits_for, run, reason FROM entries
+		WHERE card = ? AND cause = ? AND substr(reason, 1, ?) = ?
+		AND number > (SELECT COALESCE(MAX(entries.number), 0) FROM entries JOIN specs ON specs.run = entries.run
+			WHERE entries.card = ? AND specs.kind IN (?, ?))
+		ORDER BY number DESC LIMIT 1`,
+		card, CauseRule, len(CheckFailedReason), CheckFailedReason, card, KindSpec, KindReview).
+		Scan(&e.Number, &at, &e.Cause, &e.Stage, &e.WaitsFor, &run, &e.Reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Entry{}, false, nil
+	}
+	if err != nil {
+		return Entry{}, false, err
+	}
+	e.Run = run.String
+	if e.At, err = time.Parse(time.RFC3339Nano, at); err != nil {
+		return Entry{}, false, fmt.Errorf("entry %d: %w", e.Number, err)
+	}
+	return e, true, nil
 }

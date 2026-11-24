@@ -305,3 +305,108 @@ func other0(t *testing.T, s *Store) int64 {
 	t.Helper()
 	return mustCreate(t, s, "never published").ID
 }
+
+// TestCheckFailed moves a card at the Git host to implement for a failed check
+// of its published commit, as a send-back, and refuses a check of another
+// commit, of a card without an address, and of one no longer at the Git host,
+// writing nothing.
+func TestCheckFailed(t *testing.T) {
+	s := open(t)
+	const a, b = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	reason := CheckFailedReason + " for " + a + "; implement runs again by the rule, send-back 1 of 2\n\n```text\nFAIL\n```\n"
+	card := mustCreate(t, s, "a card")
+	if _, err := s.Move(card.ID, passed, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DecideWith(card.ID, Publish, "", Options{Publishing: true}); err != nil {
+		t.Fatal(err)
+	}
+	unchanged := func(what string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrRefused) {
+			t.Errorf("%s: %v, want ErrRefused", what, err)
+		}
+		c, err := s.Card(card.ID)
+		h, herr := s.History(card.ID)
+		if err != nil || herr != nil || c.State != atTheHost || c.SendBacks != 0 || strings.HasPrefix(h[len(h)-1].Reason, CheckFailedReason) {
+			t.Errorf("%s: the card is %+v (%v), its last entry %+v (%v)", what, c, err, h[len(h)-1], herr)
+		}
+	}
+	// No address yet.
+	_, err := s.CheckFailed(card.ID, a, State{Implement, Run}, reason)
+	unchanged("a card without an address", err)
+	if _, err := s.KeepPullRequest(card.ID, b, "https://git.example/pull/1"); err != nil {
+		t.Fatal(err)
+	}
+	// Another commit than the published one.
+	got, err := s.CheckFailed(card.ID, a, State{Implement, Run}, reason)
+	unchanged("an older commit", err)
+	if got.ID != card.ID || got.State != atTheHost {
+		t.Errorf("an older commit returns %+v", got)
+	}
+
+	reason = strings.ReplaceAll(reason, a, b)
+	got, err = s.CheckFailed(card.ID, b, State{Implement, Run}, reason)
+	if err != nil || got.State != (State{Implement, Run}) || got.SendBacks != 1 {
+		t.Fatalf("the published commit: %+v, %v", got, err)
+	}
+	h, err := s.History(card.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := h[len(h)-1]; last.Cause != CauseRule || last.Reason != reason || last.Run != "" {
+		t.Errorf("the entry is %+v", last)
+	}
+	if p, err := s.Publication(card.ID); err != nil || p.Commit != b || p.Address == "" {
+		t.Errorf("the publication is %+v (%v)", p, err)
+	}
+	// A repeat is refused: the card is no longer at the Git host.
+	if _, err := s.CheckFailed(card.ID, b, State{Implement, Run}, reason); !errors.Is(err, ErrRefused) {
+		t.Errorf("a repeat: %v", err)
+	}
+	if c, _ := s.Card(card.ID); c.SendBacks != 1 {
+		t.Errorf("a repeat leaves %d send-backs", c.SendBacks)
+	}
+}
+
+// TestFailedCheck finds the newest failed check until a newer spec or review,
+// also past a run's end and the developer's again in between.
+func TestFailedCheck(t *testing.T) {
+	s := open(t)
+	card := mustCreate(t, s, "a card")
+	if _, found, err := s.FailedCheck(card.ID); err != nil || found {
+		t.Fatalf("a card without a check: %v, %v", found, err)
+	}
+	for _, step := range []func() error{
+		func() error { _, err := s.Move(card.ID, atTheHost, CauseRule); return err },
+		func() error {
+			_, err := s.change(edit{id: card.ID, next: fixed(State{Implement, Run}), cause: CauseRule, reason: CheckFailedReason + " for x; first"})
+			return err
+		},
+		func() error {
+			return s.AddRun(RunRow{ID: "r1", Card: card.ID, Commit: "c", Model: "m", Effort: "medium"}, 8)
+		},
+		func() error {
+			_, err := s.EndRun("r1", Failed, "exit 1", State{Implement, Developer}, Cost{}, &Doc{Kind: KindReport, Text: "# Report"})
+			return err
+		},
+		func() error { _, err := s.Decide(card.ID, Again, "a note"); return err },
+	} {
+		if err := step(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if e, found, err := s.FailedCheck(card.ID); err != nil || !found || e.Reason != CheckFailedReason+" for x; first" || e.Cause != CauseRule {
+		t.Errorf("past a run and again: %+v, %v, %v", e, found, err)
+	}
+	// A review written after it ends it.
+	if err := s.AddRun(RunRow{ID: "r2", Card: card.ID, Commit: "c", Model: "m", Effort: "high"}, 8); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EndRun("r2", Finished, "exit 0", State{Review, Approval}, Cost{}, &Doc{Kind: KindReview, Text: "Verdict: passes"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := s.FailedCheck(card.ID); err != nil || found {
+		t.Errorf("after a review: %v, %v", found, err)
+	}
+}

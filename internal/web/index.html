@@ -459,6 +459,11 @@ dialog .names { margin: 0 0 14px; color: var(--text); font-size: 13px; }
 .timeline .by { font-size: 12px; color: var(--muted); }
 .timeline .when { margin-left: auto; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .timeline .why { font-size: 12.5px; color: var(--text-2); margin-top: 2px; overflow-wrap: anywhere; }
+pre.output {
+  margin: 6px 0 0; padding: 8px 10px; max-height: 18em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.45; color: var(--text);
+  background: var(--surface); border: 1px solid var(--line-soft); border-radius: 8px;
+}
 .timeline .run { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
 .timeline .words { font-size: 12.5px; color: var(--text-2); margin-top: 4px; padding-left: 10px; border-left: 2px solid color-mix(in srgb, var(--accent) 45%, var(--line)); }
 
@@ -639,8 +644,20 @@ function needsYou(c) { return c.waits_for === "developer" && c.stage !== "backlo
 // as a sentence; the run's line becomes small facts beside it.
 const RUN_LINE = /(?:^|; )exit (\d+)(, killed for memory)?, (?:no result|result (\S+), (\d+) turns, \$([\d.]+)), (?:saved (\S+)|no change|not saved)$/;
 
+// A failed check on the Git host keeps the check's output after an empty line,
+// as a fenced block: the part before it is the sentence, and the block without
+// its fence's first and last line is the output. It matches the store's
+// CheckFailedReason.
+const CHECK_FAILED = "the check failed on the Git host";
+
 function reasonParts(reason) {
   reason = reason || "";
+  if (reason.startsWith(CHECK_FAILED)) {
+    const at = reason.indexOf("\n\n");
+    if (at < 0) return { sentence: sentence(reason), facts: [], failed: false, output: "" };
+    const lines = reason.slice(at + 2).replace(/\n$/, "").split("\n");
+    return { sentence: sentence(reason.slice(0, at)), facts: [], failed: false, output: lines.slice(1, -1).join("\n") };
+  }
   const m = reason.match(RUN_LINE);
   if (!m) return { sentence: sentence(reason), facts: [], failed: false };
   const [, exit, oom, subtype, turns, cost, saved] = m;
@@ -672,12 +689,14 @@ function factsOf(facts) {
 }
 
 // reasonInto puts a reason in an element: its sentence, or the fallback when
-// it has none, and the facts of its run.
-function reasonInto(parent, reason, fallback) {
+// it has none, and the facts of its run; with full, a failed check's output
+// below it, as text.
+function reasonInto(parent, reason, fallback, full) {
   const r = reasonParts(reason);
   const text = r.sentence || (typeof fallback === "function" ? fallback(r) : fallback) || "";
   if (text) parent.append(el("span", "said", text));
   if (r.facts.length) parent.append(factsOf(r.facts));
+  if (full && r.output) parent.append(el("pre", "output", r.output));
 }
 
 // stopped is what a card that waits says when its last reason has only its
@@ -1151,7 +1170,7 @@ function renderCard(c) {
     if (c.run || c.note || (!c.reason && !needsYou(c))) return;
     const r = el("div", "reason" + (needsYou(c) ? " needs" : ""));
     if (needsYou(c)) r.append(el("b", null, "Needs you. "));
-    reasonInto(r, c.reason, stopped(c));
+    reasonInto(r, c.reason, stopped(c), true);
     box.append(r);
   });
   shownCard = c;
@@ -1633,7 +1652,7 @@ function renderHistory(history) {
     li.append(mark, l1);
     // The developer's note is their words, as they wrote them.
     if (e.cause === "developer") { if (e.note) li.append(el("div", "words", e.note)); }
-    else if (e.reason) { const w = el("div", "why"); reasonInto(w, e.reason, ""); li.append(w); }
+    else if (e.reason) { const w = el("div", "why"); reasonInto(w, e.reason, "", true); li.append(w); }
     if (e.run) li.append(el("div", "run", e.run));
     ol.append(li);
   }
