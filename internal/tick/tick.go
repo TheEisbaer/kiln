@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TheEisbaer/kiln/instructions"
 	"github.com/TheEisbaer/kiln/internal/launcher"
@@ -392,7 +393,7 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 		}()
 	}
 	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity(),
-		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}, publishing: map[int64]bool{},
+		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}, stuck: map[string]stuckNote{}, publishing: map[int64]bool{},
 		checking: map[int64]*checkState{}, clock: clk, renewNow: make(chan struct{}, 1)}
 	c.update.launched, c.update.built = l != nil, make(chan string, 1)
 	fmt.Fprintf(out, "kiln core: instance %s, data %s, up to %d runs at once\n", instance, cfg.Data, cfg.Runs)
@@ -502,6 +503,11 @@ type core struct {
 	// the store, such as one whose branch Carry refuses; the tick takes them
 	// after the other cards. Like followed, it is only kept in memory.
 	refused map[int64]bool
+	// stuck are the runs in flight with no record that the tick saw in a
+	// state they cannot leave by themselves (stuckState), by the run's ID,
+	// guarded by mu. Like followed, it is only kept in memory: a core started
+	// again notes them from its first tick, which only delays their end.
+	stuck map[string]stuckNote
 	// publishing are the cards a publisher publishes, from before it starts
 	// until it has returned, a guard like followed (publish.go).
 	publishing map[int64]bool
@@ -762,7 +768,8 @@ func (c *core) followsRun(id string) bool {
 // flight in the store: one the store does not know, which never started, and
 // one that has ended there (ADR 0035, rule 4). A run that a follower carries
 // is left alone: it is placed before it is in the store, and removed by its
-// follower once it has ended.
+// follower once it has ended. A removal that fails is printed with the run's
+// ID, and the sweep goes on; it is tried again on the next tick.
 func (c *core) sweep(ctx context.Context) error {
 	ids, err := c.engine.ListRuns(ctx, c.instance)
 	if err != nil {
@@ -780,8 +787,14 @@ func (c *core) sweep(ctx context.Context) error {
 		case r.Ending == "":
 			continue // in flight
 		}
+		// A run whose removal fails, such as a dead container the engine
+		// cannot remove, keeps no other run from its removal and the tick
+		// from the cards.
 		if err := c.engine.RemoveRun(ctx, id, c.Proxy); err != nil {
-			return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			fmt.Fprintf(c.errOut, "kiln core: the sweep: run %s: %s\n", id, run.Printable(err.Error()))
 		}
 	}
 	return nil
@@ -817,6 +830,104 @@ func decide(inFlight bool, container string, recorded bool) action {
 	}
 }
 
+// stuckFor is how long a run in flight with no record may be seen in one
+// state that it cannot leave by itself before the rule ends it as failed,
+// on the core's clock; stuckWords says it in the reasons.
+const stuckFor = 5 * time.Minute
+
+var stuckWords = fmt.Sprintf("%d minutes", int(stuckFor/time.Minute))
+
+// maxLast is the most bytes of a follower's last error that a note keeps.
+const maxLast = 300
+
+// stuckState reports whether a run's container in an Engine API status stays
+// there without Kiln: created, which a run in the store is only until its
+// start, unless the engine refuses it; paused and restarting, which Kiln
+// never does to a run; and removing and dead, which Kiln begins only after
+// the run has ended. Running, exited and no container at all are not.
+func stuckState(status string) bool {
+	switch status {
+	case "created", "paused", "restarting", "removing", "dead":
+		return true
+	}
+	return false
+}
+
+// stuckNote is what the core noted of a run seen in a stuck state: the state,
+// when this core first saw the run in it, and the last error of a follower
+// that tried to carry the run on.
+type stuckNote struct {
+	status string
+	since  time.Time
+	last   string
+}
+
+// judge is the tick's note of a run in flight in the store, from its
+// container's status, "" for none, and whether it is recorded. A run with no
+// record in a stuck state is noted when it is first seen in that state, and
+// once this core has seen it so for stuckFor, judge returns the reason the
+// rule ends it with as failed. A run seen in any other state, or recorded,
+// has its note dropped. judge returns "" for every run it does not end.
+func (c *core) judge(id, status string, recorded bool) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if recorded || !stuckState(status) {
+		delete(c.stuck, id)
+		return ""
+	}
+	now := c.clock.Now()
+	note, ok := c.stuck[id]
+	if !ok || note.status != status {
+		note = stuckNote{status: status, since: now}
+		c.stuck[id] = note
+	}
+	if now.Sub(note.since) < stuckFor {
+		return ""
+	}
+	return stuckReason(id, note)
+}
+
+// stuckReason is the reason a run stuck for stuckFor is ended with: what
+// was wrong, and what the developer can do.
+func stuckReason(id string, note stuckNote) string {
+	name := "its container kiln-run-" + id
+	switch note.status {
+	case "created":
+		last := note.last
+		if last == "" {
+			last = "none seen"
+		}
+		return run.Printable(fmt.Sprintf("%s never started in %s of tries; the last try: %s; the engine refused the start, "+
+			"or the run's network or way out is gone: look at the run image (--image) and the engine's limits", name, stuckWords, last))
+	case "paused":
+		return fmt.Sprintf("%s was paused for %s; Kiln never pauses a run, so something else did: "+
+			"unpause a run's container within %s, or leave it alone", name, stuckWords, stuckWords)
+	case "restarting":
+		return fmt.Sprintf("%s was restarting for %s; Kiln gives a run no restart policy, "+
+			"so one was set outside Kiln (docker update --restart)", name, stuckWords)
+	case "removing":
+		return fmt.Sprintf("%s was being removed for %s; Kiln removes a run only after it has ended, "+
+			"so something else began it: look at the engine", name, stuckWords)
+	}
+	return fmt.Sprintf("%s was dead for %s, which the engine leaves when a removal failed halfway: "+
+		"look at the engine, which may need a restart; the sweep tries the removal again on every tick", name, stuckWords)
+}
+
+// cut is s cut to at most n bytes, at the start of a character.
+func cut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// errNotWrittenAgain is inputs' answer for a run in flight whose instruction
+// is missing and cannot be written again, since its change is now held.
+var errNotWrittenAgain = errors.New("the instruction cannot be written again")
+
 // follower is what a follower carries a card's run on with, as the tick
 // decided it.
 type follower struct {
@@ -827,6 +938,10 @@ type follower struct {
 	starting func() error // nil for a run in the store
 	added    bool         // set by starting once the run is in the store
 	mark     func(point string)
+	// ended is the reason of a run in flight that the rule ends as failed
+	// without asking the engine: one stuck for stuckFor, or one whose
+	// instruction cannot be written again. Empty for any other run.
+	ended string
 }
 
 // card decides, by the table, what is done for one card that waits for a run,
@@ -879,6 +994,13 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 			Commit: commit, Model: model, Effort: st.effort}
 	}
 	in, held, err := c.inputs(ctx, *row, card, inFlight)
+	if errors.Is(err, errNotWrittenAgain) {
+		// Remove reads no more of the inputs than these.
+		in := run.Inputs{ID: row.ID, Proxy: c.Proxy, Runs: filepath.Join(c.Data, "runs"), Instance: c.instance}
+		reason := run.Printable(fmt.Sprintf("its instruction %s was removed while the run was in flight and cannot be written again: %s",
+			filepath.Join(c.Data, "instructions", row.ID+".md"), held))
+		return &follower{card: card, stage: st, row: *row, in: in, mark: mark, ended: reason}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -903,6 +1025,11 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 	}
 
 	f := &follower{card: card, stage: st, row: *row, in: in, mark: mark}
+	if inFlight {
+		if f.ended = c.judge(row.ID, container, recorded); f.ended != "" {
+			return f, nil
+		}
+	}
 	switch decide(inFlight, container, recorded) {
 	case start:
 		f.starting = func() error {
@@ -920,7 +1047,8 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 	case gone:
 		// Carry, with starting nil, refuses to start it a second time.
 	case leave:
-		return nil, fmt.Errorf("the container kiln-run-%s is %s; it is left alone", row.ID, container)
+		return nil, fmt.Errorf("the container kiln-run-%s is %s; it is left alone; the rule ends the run as failed once it has been so for %s",
+			row.ID, container, stuckWords)
 	}
 	return f, nil
 }
@@ -946,6 +1074,11 @@ func (c *core) follow(ctx context.Context, f *follower) {
 			at("followed")
 		}
 		c.mu.Lock()
+		if note, ok := c.stuck[f.row.ID]; ok && err != nil && (f.starting == nil || f.added) {
+			// The reason it goes into is one line.
+			note.last = cut(strings.ReplaceAll(run.Printable(err.Error()), "\n", " "), maxLast)
+			c.stuck[f.row.ID] = note
+		}
 		delete(c.followed, id)
 		if err != nil && f.starting != nil && !f.added {
 			c.refused[id] = true
@@ -967,10 +1100,22 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 	c.activity.Drop(row.ID)
 	in.Activity = func(a run.Activity) { c.activity.Add(row.ID, a) }
 	in.Refused = c.credentialRefused
-	verdict, err := c.engine.Carry(ctx, in, f.starting, c.errOut)
+	var verdict run.Verdict
+	var err error
+	if f.ended == "" {
+		verdict, err = c.engine.Carry(ctx, in, f.starting, c.errOut)
+	}
 	switch {
+	case f.ended != "":
+		verdict = run.Verdict{Reason: f.ended}
 	case errors.Is(err, run.ErrGone):
 		verdict = run.Verdict{Reason: run.ErrGone.Error()}
+	case errors.Is(err, run.ErrOtherInstruction) && f.starting == nil:
+		// Its instruction was removed by hand and written again with
+		// another text, which Carry refuses on every tick.
+		verdict = run.Verdict{Reason: run.Printable(fmt.Sprintf(
+			"its instruction %s was removed or changed while the run was in flight, and the run was started with another; "+
+				"leave the files under %s alone while their runs are in flight", in.Instruction, filepath.Dir(in.Instruction)))}
 	case err != nil:
 		return err
 	}
@@ -981,6 +1126,14 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 		if readErr == nil && f.card.Stage == store.Implement {
 			text, readErr = c.engine.ReadDocument(in.Runs, row.ID, store.KindPullRequest)
 		}
+	}
+	if readErr != nil {
+		// A record whose documents.tar cannot be read was touched by a hand:
+		// the run wrote it before its result.json. Reading it again would
+		// fail on every tick, so the run is failed, with its cost.
+		verdict = run.Verdict{Reason: run.Printable(fmt.Sprintf("its record %s cannot be read: %s; leave the files under %s alone",
+			filepath.Join(in.Runs, row.ID, "documents.tar"), readErr, in.Runs)), Cost: verdict.Cost, Session: verdict.Session}
+		doc, text, readErr = run.Document{}, run.Document{}, nil
 	}
 	d, err := destination(f.card.Stage, verdict, doc, readErr)
 	if err != nil {
@@ -1019,6 +1172,9 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 		return err
 	}
 	f.mark("after-end")
+	c.mu.Lock()
+	delete(c.stuck, row.ID)
+	c.mu.Unlock()
 	c.activity.Drop(row.ID)
 	fmt.Fprintf(c.out, "card %d: run %s %s: %s\n", id, row.ID, d.ending, d.reason)
 	if rule != nil {
@@ -1265,7 +1421,9 @@ func laterDestination(s store.Stage, v run.Verdict, doc run.Document) end {
 // started with, which is written again only when it is missing: a core rebuilt
 // with another instruction would otherwise write another text, which the run's
 // label kiln.instruction would refuse for ever. A review run whose change is
-// too large is not started: held says why.
+// too large is not started: held says why. For a run in flight whose
+// instruction cannot be written again for that reason, the error is
+// errNotWrittenAgain, with held saying why.
 func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, inFlight bool) (in run.Inputs, held string, err error) {
 	st := stages[card.Stage]
 	instruction := filepath.Join(c.Data, "instructions", row.ID+".md")
@@ -1284,7 +1442,7 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 		}
 		if held != "" {
 			if inFlight {
-				return run.Inputs{}, "", fmt.Errorf("the instruction of run %s cannot be written again: %s", row.ID, held)
+				return run.Inputs{}, held, errNotWrittenAgain
 			}
 			return run.Inputs{}, held, nil
 		}
