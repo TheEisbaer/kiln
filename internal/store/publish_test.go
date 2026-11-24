@@ -410,3 +410,84 @@ func TestFailedCheck(t *testing.T) {
 		t.Errorf("after a review: %v, %v", found, err)
 	}
 }
+
+// TestPublishAgainOnce clears the publication of a card at the Git host whose
+// published commit no longer merges, keeping its branch and the yes, so that
+// the core publishes it again, and moves no card twice with CheckFailed:
+// whichever comes second is refused and writes nothing.
+func TestPublishAgainOnce(t *testing.T) {
+	s := open(t)
+	const p = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	failed := CheckFailedReason + " for " + p + "; implement runs again by the rule, send-back 1 of 2"
+	again := "main moved, and the published commit " + p + " no longer merges onto it: NOTES.md; the core publishes the change again"
+	published := func(text string) int64 {
+		t.Helper()
+		card := mustCreate(t, s, text)
+		if _, err := s.Move(card.ID, passed, CauseRun); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DecideWith(card.ID, Publish, "", Options{Publishing: true, WorkflowYes: "c0ffee"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.PublishBranch(card.ID, "card/1-kept"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.KeepPullRequest(card.ID, p, "https://git.example/pull/1"); err != nil {
+			t.Fatal(err)
+		}
+		return card.ID
+	}
+	entries := func(card int64) int {
+		t.Helper()
+		h, err := s.History(card)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(h)
+	}
+	if _, err := s.PublishAgain(1, "", again); err == nil {
+		t.Error("PublishAgain without a commit is no error")
+	}
+
+	// The check first: publishing again is refused.
+	a := published("checked first")
+	if _, err := s.CheckFailed(a, p, State{Implement, Run}, failed); err != nil {
+		t.Fatal(err)
+	}
+	n := entries(a)
+	got, err := s.PublishAgain(a, p, again)
+	if !errors.Is(err, ErrRefused) || got.State != (State{Implement, Run}) || got.SendBacks != 1 || entries(a) != n {
+		t.Errorf("PublishAgain after CheckFailed: %+v, %v, %d entries, want %d", got, err, entries(a), n)
+	}
+
+	// Publishing again first: the check and a repeat are refused.
+	b := published("published again first")
+	got, err = s.PublishAgain(b, p, again)
+	if err != nil || got.State != atTheHost || got.SendBacks != 0 {
+		t.Fatalf("PublishAgain: %+v, %v", got, err)
+	}
+	h, err := s.History(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := h[len(h)-1]; last.Cause != CauseRule || last.Reason != again || last.State != atTheHost || last.Run != "" {
+		t.Errorf("the entry is %+v", last)
+	}
+	n = entries(b)
+	got, err = s.CheckFailed(b, p, State{Implement, Run}, failed)
+	if !errors.Is(err, ErrRefused) || got.State != atTheHost || got.SendBacks != 0 {
+		t.Errorf("CheckFailed after PublishAgain: %+v, %v", got, err)
+	}
+	if _, err := s.PublishAgain(b, p, again); !errors.Is(err, ErrRefused) || entries(b) != n {
+		t.Errorf("a repeat: %v, %d entries, want %d", err, entries(b), n)
+	}
+	if pub, err := s.Publication(b); err != nil || pub != (Publication{WorkflowYes: "c0ffee", Branch: "card/1-kept"}) {
+		t.Errorf("the publication is %+v (%v)", pub, err)
+	}
+	if ids, err := s.Publishing(); err != nil || len(ids) != 1 || ids[0] != b {
+		t.Errorf("Publishing lists %v (%v), want %d", ids, err, b)
+	}
+	if at, err := s.AtHost(); err != nil || len(at) != 0 {
+		t.Errorf("AtHost lists %v (%v)", at, err)
+	}
+}

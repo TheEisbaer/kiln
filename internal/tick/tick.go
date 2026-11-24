@@ -394,7 +394,7 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 	}
 	c := &core{Config: cfg, store: s, instance: instance, out: out, errOut: errOut, activity: web.NewActivity(),
 		engine: eng, followed: map[int64]string{}, refused: map[int64]bool{}, stuck: map[string]stuckNote{}, publishing: map[int64]bool{},
-		checking: map[int64]*checkState{}, clock: clk, renewNow: make(chan struct{}, 1)}
+		checking: map[int64]*checkState{}, tested: map[int64]hostTest{}, clock: clk, renewNow: make(chan struct{}, 1)}
 	c.update.launched, c.update.built = l != nil, make(chan string, 1)
 	fmt.Fprintf(out, "kiln core: instance %s, data %s, up to %d runs at once\n", instance, cfg.Data, cfg.Runs)
 	if cfg.PublishCommand != "" {
@@ -520,6 +520,9 @@ type core struct {
 	fetchMu sync.Mutex
 	main    mainState
 	checked int
+	// tested is what each card at the Git host was last tested with, read
+	// and written by the tick only, like checked (publish.go).
+	tested map[int64]hostTest
 
 	// update is the core's update to a newer version (update.go).
 	update updateState
