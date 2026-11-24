@@ -6,7 +6,17 @@ Kiln is still being built; what it has to do first is the POC list in [docs/phas
 
 ## Starting it
 
-Kiln needs a container engine with the `docker` command, and Git. The commands run from the repo's root.
+`scripts/kiln-up` does steps 1 to 4 and opens the screen; `scripts/kiln-down` stops the proxy. Run it from a terminal of your own: it refuses to run inside a Claude Code session. It builds each image, and the program, only when its files changed, makes the copy once and fetches its `main`, and prints neither the upstream nor the credential command. It needs `docker`, `git` and `shasum`, and `jq` when it reads `~/.claude/settings.json`. Its variables:
+
+- `KILN_DATA`: the data directory, `~/kiln-live/data` by default. The program is `kiln` in it.
+- `KILN_SOURCE`: the checkout that is built, `~/work/kiln` by default. From a checkout with uncommitted changes the program is built without a version.
+- `KILN_REPO`: the instance's copy, `~/kiln-live/repo.git` by default.
+- `KILN_ORIGIN`: what the copy is cloned from when it is missing, `https://github.com/TheEisbaer/kiln.git` by default.
+- `KILN_MODEL`: `claude-opus-5-5` by default. `KILN_IMPLEMENT_MODEL`: none by default.
+- `KILN_CLAUDE_UPSTREAM` and `KILN_CLAUDE_CREDENTIAL_COMMAND`: else `.env.ANTHROPIC_BASE_URL` and `.apiKeyHelper` of `~/.claude/settings.json`.
+- `KILN_PUBLISH_COMMAND` and `KILN_CHECK_RESULT_COMMAND`: the commands of `--publish-command` and `--check-result-command`, none by default.
+
+The steps below are what the script does, and how to do it by hand. Kiln needs a container engine with the `docker` command, and Git. The commands run from the repo's root.
 
 1. Build the images. The toolchain image comes first, since the others are built on it. Building the run image downloads the pinned Claude Code. The way out is needed only with `--spec-hosts`.
 

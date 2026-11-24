@@ -51,6 +51,7 @@ var steps = []step{
 	{"test", func() error { return run(nil, "go", "test", "./...") }},
 	{"dependencies", dependencies},
 	{dockerStep, func() error { return dockerOnlyInSeal(os.DirFS(".")) }},
+	{"the scripts parse", func() error { return scriptsParse(scriptsDir) }},
 }
 
 // run runs a command with the given extra environment, showing its output.

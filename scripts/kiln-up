@@ -1,0 +1,253 @@
+#!/bin/sh
+# Starts Kiln on the developer's machine (ADR 0037, ADR 0052): builds the
+# images and the program when their files changed, makes the instance's copy
+# of the repo once and brings its main up to date, and runs `kiln launch`.
+# Run it from a terminal of your own, not from a Claude Code session.
+#
+# Variables, each with its default:
+#   KILN_DATA          $HOME/kiln-live/data, the data directory; the program
+#                      is $KILN_DATA/kiln
+#   KILN_SOURCE        $HOME/work/kiln, the checkout that is built
+#   KILN_REPO          $HOME/kiln-live/repo.git, the instance's copy
+#   KILN_ORIGIN        https://github.com/TheEisbaer/kiln.git, cloned once
+#                      when the copy is missing
+#   KILN_MODEL         claude-opus-5-5
+#   KILN_IMPLEMENT_MODEL               none: the core falls back to --model
+#   KILN_CLAUDE_UPSTREAM, KILN_CLAUDE_CREDENTIAL_COMMAND
+#                      else .env.ANTHROPIC_BASE_URL and .apiKeyHelper of
+#                      ~/.claude/settings.json; neither value is ever printed
+#   KILN_PUBLISH_COMMAND, KILN_CHECK_RESULT_COMMAND
+#                      none: no card is published and no check is read
+#
+# Every step can fail or be killed and the script be run again: what it writes
+# is written beside its place and renamed only once whole.
+set -eu
+
+# First of all, and before anything is read: inside a Claude Code session the
+# core would run with that session's environment.
+if [ -n "${CLAUDECODE-}" ]; then
+    echo "kiln-up: refusing to start inside a Claude Code session (CLAUDECODE is set); start it from a terminal of your own" >&2
+    exit 2
+fi
+
+die() {
+    echo "kiln-up: $*" >&2
+    exit 2
+}
+
+data=${KILN_DATA:-$HOME/kiln-live/data}
+src=${KILN_SOURCE:-$HOME/work/kiln}
+repo=${KILN_REPO:-$HOME/kiln-live/repo.git}
+origin=${KILN_ORIGIN:-https://github.com/TheEisbaer/kiln.git}
+model=${KILN_MODEL:-claude-opus-5-5}
+implement_model=${KILN_IMPLEMENT_MODEL-}
+cache=${XDG_CACHE_HOME:-$HOME/.cache}/kiln
+
+[ -f "$src/go.mod" ] && [ -d "$src/cmd/core" ] ||
+    die "$src is not Kiln's source (no go.mod or no cmd/core); set KILN_SOURCE"
+
+# The tools.
+for tool in docker git shasum; do
+    command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH"
+done
+docker version --format '{{.Server.Version}}' >/dev/null 2>&1 ||
+    die "the container engine does not answer (docker version)"
+
+# The upstream and the credential command, each from its variable or else from
+# Claude Code's settings. Neither value is printed, here or below.
+settings=$HOME/.claude/settings.json
+setting() {
+    command -v jq >/dev/null 2>&1 || die "jq is not on PATH, and is needed to read $settings"
+    jq -r "$1 // empty" "$settings" 2>/dev/null || :
+}
+if [ -z "${KILN_CLAUDE_UPSTREAM-}" ]; then
+    KILN_CLAUDE_UPSTREAM=$(setting .env.ANTHROPIC_BASE_URL)
+    [ -n "$KILN_CLAUDE_UPSTREAM" ] ||
+        die "no upstream: set KILN_CLAUDE_UPSTREAM, or .env.ANTHROPIC_BASE_URL in $settings"
+fi
+if [ -z "${KILN_CLAUDE_CREDENTIAL_COMMAND-}" ]; then
+    KILN_CLAUDE_CREDENTIAL_COMMAND=$(setting .apiKeyHelper)
+    [ -n "$KILN_CLAUDE_CREDENTIAL_COMMAND" ] ||
+        die "no credential command: set KILN_CLAUDE_CREDENTIAL_COMMAND, or .apiKeyHelper in $settings"
+fi
+export KILN_CLAUDE_UPSTREAM KILN_CLAUDE_CREDENTIAL_COMMAND
+
+mkdir -p "$cache" "$data"
+
+# digest prints the SHA-256 of the files under the given paths of the source,
+# by name, and of what comes on standard input, which is empty or the digest
+# of the image it is built from. For the toolchain's three files it is the
+# same as check/in-image's label kiln.context.
+digest() {
+    d=$(
+        cd "$src" &&
+            { find "$@" -type f -exec shasum -a 256 {} + | LC_ALL=C sort -k2 && cat; } |
+            shasum -a 256 | cut -c1-64
+    ) || d=
+    case "$d" in
+        "" | *[!0-9a-f]*) die "cannot take the digest of $*" ;;
+    esac
+    [ "${#d}" -eq 64 ] || die "cannot take the digest of $*"
+    echo "$d"
+}
+
+# image builds an image with the rest of its arguments, run in the source,
+# when its digest differs from the one kept for it, or the engine has no
+# image of that name. The files of each image are the ones its Dockerfile
+# copies: a Dockerfile that copies more needs its list below changed too.
+image() {
+    name=$1 d=$2
+    shift 2
+    if [ -n "$(docker image inspect --format '{{.Id}}' "$name" 2>/dev/null || :)" ] &&
+        [ "$(cat "$cache/$name.sha256" 2>/dev/null || :)" = "$d" ]; then
+        echo "$name: unchanged"
+        return
+    fi
+    (cd "$src" && "$@") || die "building $name failed"
+    echo "$d" >"$cache/$name.sha256.new"
+    mv "$cache/$name.sha256.new" "$cache/$name.sha256"
+    echo "$name: built"
+}
+
+toolchain=$(digest go.mod go.sum images/toolchain/Dockerfile </dev/null)
+# The label is check/in-image's, which then does not build the image again. An
+# image of the name with another label, as one check/in-image built from
+# another checkout, is built again.
+if [ "$(docker image inspect --format '{{index .Config.Labels "kiln.context"}}' kiln-toolchain 2>/dev/null || :)" != "$toolchain" ]; then
+    rm -f "$cache/kiln-toolchain.sha256"
+fi
+image kiln-toolchain "$toolchain" sh -c '
+    tar -cf - go.mod go.sum images/toolchain/Dockerfile |
+        docker build --label "kiln.context=$1" --tag kiln-toolchain --file images/toolchain/Dockerfile -' sh "$toolchain"
+# Each digest is taken first, so that a digest that fails stops the script.
+# The proxy and the way out only compile from the toolchain's module cache,
+# so they are built with no network, as the core's update builds them.
+proxy=$(echo "$toolchain" | digest go.mod images/proxy/Dockerfile cmd/proxy)
+wayout=$(echo "$toolchain" | digest go.mod images/wayout/Dockerfile cmd/wayout)
+run=$(echo "$toolchain" | digest images/run)
+image kiln-proxy "$proxy" docker build --network none --tag kiln-proxy --file images/proxy/Dockerfile .
+image kiln-wayout "$wayout" docker build --network none --tag kiln-wayout --file images/wayout/Dockerfile .
+image kiln-run "$run" docker build --tag kiln-run images/run
+
+# The program, built in the toolchain image with no network, as the update
+# builds it (ADR 0037), for this machine. Its version is the source's head; a
+# source with uncommitted changes is built without one, and then updates
+# itself only once one of its cards has merged (ADR 0019).
+case "$(uname -s)" in
+    Darwin) goos=darwin ;;
+    Linux) goos=linux ;;
+    *) die "unsupported system $(uname -s)" ;;
+esac
+case "$(uname -m)" in
+    arm64 | aarch64) goarch=arm64 ;;
+    x86_64) goarch=amd64 ;;
+    *) die "unsupported machine $(uname -m)" ;;
+esac
+
+version=$(git -C "$src" rev-parse --verify --quiet HEAD 2>/dev/null) || version=
+if [ -z "$version" ]; then
+    echo "kiln-up: the source is not a Git checkout with a commit, so the program is built without a version"
+elif [ -n "$(git --no-optional-locks -C "$src" status --porcelain 2>/dev/null || echo unknown)" ]; then
+    version=
+    echo "kiln-up: the source has uncommitted changes, so the program is built without a version; it updates itself only once one of its cards has merged"
+fi
+
+key="$version $toolchain $goos/$goarch"
+if [ -n "$version" ] && [ -x "$data/kiln" ] && [ "$(cat "$cache/kiln.key" 2>/dev/null || :)" = "$key" ]; then
+    echo "program: unchanged $version"
+else
+    # The version goes in as an argument, never into the command's text.
+    if docker run --rm --network none --volume "$src:/src:ro" --workdir /src \
+        --env "GOOS=$goos" --env "GOARCH=$goarch" --env CGO_ENABLED=0 \
+        kiln-toolchain sh -c 'go build -trimpath -ldflags "-X main.version=$1" -o /tmp/kiln ./cmd/core && cat /tmp/kiln' sh "$version" \
+        >"$data/kiln.new" && chmod +x "$data/kiln.new"; then
+        # A new file, so that a kiln that is running is not written into.
+        mv "$data/kiln.new" "$data/kiln"
+    else
+        rm -f "$data/kiln.new"
+        die "building the program failed"
+    fi
+    if [ -n "$version" ]; then
+        echo "$key" >"$cache/kiln.key.new"
+        mv "$cache/kiln.key.new" "$cache/kiln.key"
+        echo "program: built $version"
+    else
+        rm -f "$cache/kiln.key"
+        echo "program: built without a version"
+    fi
+fi
+
+# The instance's copy: cloned once, beside its place, and renamed whole. A
+# copy that is there is used as it is; one that is not bare is not touched.
+if [ ! -e "$repo" ]; then
+    rm -rf "$repo.new"
+    git clone --bare "$origin" "$repo.new" || die "cloning $origin failed"
+    mv "$repo.new" "$repo"
+elif [ "$(git -C "$repo" rev-parse --is-bare-repository 2>/dev/null || :)" != true ]; then
+    die "$repo is there and is not a bare repository; it is left as it is (set KILN_REPO)"
+fi
+# A fetch that fails is said, and the main that is there is used, as the core
+# does.
+GIT_TERMINAL_PROMPT=0 git -C "$repo" fetch --quiet origin +refs/heads/main:refs/heads/main ||
+    echo "kiln-up: fetching main into $repo failed; the main that is there is used" >&2
+
+# The flags this program has, from its usage, so that an older Kiln starts too.
+usage=$("$data/kiln" 2>&1 || :)
+has() {
+    case "$usage" in
+        *"$1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+set -- launch --data "$data" --repo "$repo" --model "$model"
+if [ -z "$implement_model" ]; then
+    :
+elif has --implement-model; then
+    set -- "$@" --implement-model "$implement_model"
+else
+    echo "kiln-up: KILN_IMPLEMENT_MODEL is set, but this program has no --implement-model, so it is not given"
+fi
+has --spec-hosts && set -- "$@" --spec-hosts '*'
+
+# The developer's commands, which live outside the repo (ADR 0052). Their
+# values are not printed.
+unset_parts=
+lacking=
+if [ -z "${KILN_PUBLISH_COMMAND-}" ]; then
+    unset_parts="KILN_PUBLISH_COMMAND is not set, so no card is published"
+elif has --publish-command; then
+    set -- "$@" --publish-command "$KILN_PUBLISH_COMMAND"
+else
+    lacking=KILN_PUBLISH_COMMAND
+fi
+if [ -z "${KILN_CHECK_RESULT_COMMAND-}" ]; then
+    unset_parts="${unset_parts:+$unset_parts; }KILN_CHECK_RESULT_COMMAND is not set, so no check is read"
+elif has --check-result-command; then
+    set -- "$@" --check-result-command "$KILN_CHECK_RESULT_COMMAND"
+else
+    lacking="${lacking:+$lacking and }KILN_CHECK_RESULT_COMMAND"
+fi
+[ -z "$unset_parts" ] || echo "kiln-up: $unset_parts"
+[ -z "$lacking" ] || echo "kiln-up: $lacking is set, but this program has no flag for it, so it is not given"
+
+# The screen, once it answers, or after 60 seconds; without curl after 3.
+(
+    url=http://127.0.0.1:4747/
+    if command -v curl >/dev/null 2>&1; then
+        end=$(($(date +%s) + 60))
+        until curl --silent --fail --max-time 1 --output /dev/null "$url"; do
+            [ "$(date +%s)" -lt "$end" ] || break
+            sleep 1
+        done
+    else
+        sleep 3
+    fi
+    if command -v open >/dev/null 2>&1; then
+        open "$url"
+    elif command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$url"
+    fi
+) </dev/null >/dev/null 2>&1 &
+
+exec "$data/kiln" "$@"

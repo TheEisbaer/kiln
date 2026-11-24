@@ -1,0 +1,26 @@
+#!/bin/sh
+# Stops Kiln's proxy, the container kiln-proxy. Runs in flight have no proxy
+# until a core starts one again. Ctrl-C ends the core; this stops nothing else.
+set -eu
+
+command -v docker >/dev/null 2>&1 || { echo "kiln-down: docker is not on PATH" >&2; exit 2; }
+docker version --format '{{.Server.Version}}' >/dev/null 2>&1 ||
+    { echo "kiln-down: the container engine does not answer (docker version)" >&2; exit 2; }
+
+if ! state=$(docker container inspect --format '{{index .Config.Labels "kiln.proxy"}} {{.State.Running}}' kiln-proxy 2>/dev/null); then
+    echo "kiln-down: no proxy"
+    exit 0
+fi
+label=${state% *}
+case "$label" in
+    "" | "<no value>")
+        echo "kiln-down: the container kiln-proxy has no label kiln.proxy, so Kiln did not make it; it is left as it is" >&2
+        exit 2
+        ;;
+esac
+if [ "${state##* }" != true ]; then
+    echo "kiln-down: the proxy is stopped already"
+    exit 0
+fi
+docker stop kiln-proxy >/dev/null
+echo "kiln-down: the proxy is stopped; runs in flight have no proxy until a core starts one again"
