@@ -665,8 +665,10 @@ func (c *core) serve() (func(), error) {
 	}, nil
 }
 
-// tick is one tick: the sweep; main brought up to date and the cards at the
-// Git host looked after (atHostRound); then each card that waits for a run, in
+// tick is one tick: the sweep; the queued cards whose predecessors are done
+// released (release), so that their spec runs can start in this tick; main
+// brought up to date and the cards at the Git host looked after
+// (atHostRound); then each card that waits for a run, in
 // the order of store.Waiting, except that a card whose last start failed
 // before its run was in the store comes after the others: its follower takes
 // a place until it fails, and would otherwise keep the cards behind it from
@@ -681,6 +683,7 @@ func (c *core) tick(ctx context.Context) error {
 	if err := c.sweep(ctx); err != nil {
 		return fmt.Errorf("the sweep: %w", err)
 	}
+	c.release()
 	cards, err := c.store.Waiting()
 	if err != nil {
 		return err
@@ -745,6 +748,24 @@ func (c *core) tick(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// release ends the wait of the queued cards whose predecessors are no longer
+// open (store.Release), also while the instance is paused: a released card
+// only waits for a run. Each card moved is said in one line; an error is
+// printed, and the tick goes on.
+func (c *core) release() {
+	moved, err := c.store.Release()
+	for _, r := range moved {
+		line := r.Reason
+		if r.State == waiting {
+			line += "; its spec run starts by the rule"
+		}
+		fmt.Fprintf(c.out, "kiln core: card %d: %s\n", r.ID, line)
+	}
+	if err != nil {
+		fmt.Fprintln(c.errOut, "kiln core: queued cards:", run.Printable(err.Error()))
+	}
 }
 
 // follows reports whether a card's run is followed.

@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 13"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 14"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 13 was opened")
+		t.Fatal("a store of version 14 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 13") || !strings.Contains(msg, "version 12") {
+	if msg := err.Error(); !strings.Contains(msg, "version 14") || !strings.Contains(msg, "version 13") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 13 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 13 and 0", v, tables)
+	if v != 14 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 14 and 0", v, tables)
 	}
 }
 
@@ -826,7 +826,8 @@ func TestMigrateV2(t *testing.T) {
 			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") &&
 				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") && !strings.HasPrefix(line, "runs | ") &&
 				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") &&
-				!strings.HasPrefix(line, "instance | ") && !strings.HasPrefix(line, "instance_entries | ") {
+				!strings.HasPrefix(line, "instance | ") && !strings.HasPrefix(line, "instance_entries | ") &&
+				!strings.HasPrefix(line, "predecessors | ") && !strings.HasPrefix(line, "sqlite_autoindex_predecessors_1 | ") {
 				out = append(out, line)
 			}
 		}
@@ -976,6 +977,7 @@ func TestMigrateV3(t *testing.T) {
 			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") && !strings.HasPrefix(line, "runs | ") &&
 				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") &&
 				!strings.HasPrefix(line, "instance | ") && !strings.HasPrefix(line, "instance_entries | ") &&
+				!strings.HasPrefix(line, "predecessors | ") && !strings.HasPrefix(line, "sqlite_autoindex_predecessors_1 | ") &&
 				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") {
 				out = append(out, line)
 			}
@@ -1167,8 +1169,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 12 {
-		t.Fatalf("the store is version %d after Open, want 12", v)
+	if v := userVersion(t, s); v != version || version != 13 {
+		t.Fatalf("the store is version %d after Open, want 13", v)
 	}
 	// What version 1 held is still there, and has no run or reason, and no
 	// send-back.
@@ -1225,7 +1227,8 @@ func TestMigrateV9(t *testing.T) {
 	if _, err := s.SetPaused("paused before version 11"); err != nil {
 		t.Fatal(err)
 	}
-	// Back to version 9: the columns of versions 10 to 12 did not exist.
+	// Back to version 9: the columns of versions 10 to 12, and the table of
+	// version 13, did not exist.
 	if _, err := s.db.Exec(`ALTER TABLE runs DROP COLUMN stage;
 ALTER TABLE runs DROP COLUMN cost;
 ALTER TABLE runs DROP COLUMN session;
@@ -1236,6 +1239,7 @@ ALTER TABLE instance DROP COLUMN failed_update;
 ALTER TABLE instance_entries DROP COLUMN cause;
 ALTER TABLE instance_entries DROP COLUMN merging_off;
 ALTER TABLE instance_entries DROP COLUMN failed_update;
+DROP TABLE predecessors;
 PRAGMA user_version = 9`); err != nil {
 		t.Fatal(err)
 	}

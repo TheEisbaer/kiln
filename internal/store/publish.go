@@ -69,6 +69,9 @@ func readFacts(q querier, card int64) (Facts, error) {
 		return Facts{}, err
 	}
 	f.Published = p.Address != ""
+	if f.all, f.Open, f.Dropped, err = readPredecessors(q, card); err != nil {
+		return Facts{}, err
+	}
 	return f, nil
 }
 

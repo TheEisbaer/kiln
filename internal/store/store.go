@@ -22,7 +22,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 12
+const version = 13
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -308,6 +308,16 @@ UPDATE runs SET stage = (SELECT e.stage FROM entries e WHERE e.card = runs.card 
 UPDATE runs SET stage = (SELECT stage FROM cards WHERE cards.id = runs.card) WHERE ending IS NULL;`)
 		return err
 	},
+	func(tx *sql.Tx) error {
+		// A card's predecessors, one row per card and predecessor, written
+		// with the card (ADR 0010); a card that was there has none.
+		_, err := tx.Exec(`CREATE TABLE predecessors (
+	card INTEGER NOT NULL,
+	predecessor INTEGER NOT NULL,
+	PRIMARY KEY (card, predecessor)
+) STRICT`)
+		return err
+	},
 }
 
 // afterMigration, set only by the test, is called when the store has been moved
@@ -385,12 +395,18 @@ func (s *Store) CopyAndClose(path string) error {
 }
 
 // Create writes a new card in the backlog, waiting for the developer, with its
-// first entry.
-func (s *Store) Create(text string) (Card, error) {
+// first entry and its predecessors, in one transaction. A predecessor that is
+// the card itself, that does not exist or that was dropped is refused with
+// ErrPredecessor and its reason, and nothing is written.
+func (s *Store) Create(text string, predecessors ...int64) (Card, error) {
 	if text == "" {
 		return Card{}, errors.New("a card needs a text")
 	}
-	return s.change(edit{create: true, text: text, next: fixed(State{Backlog, Developer}), cause: CauseDeveloper})
+	e := edit{create: true, text: text, next: fixed(State{Backlog, Developer}), cause: CauseDeveloper}
+	if len(predecessors) > 0 {
+		e.write = func(tx *sql.Tx, card int64) error { return writePredecessors(tx, card, predecessors) }
+	}
+	return s.change(e)
 }
 
 // Move changes a card's state. A pairing or a cause that cannot be written is
@@ -492,6 +508,9 @@ type edit struct {
 	end    *runEnd
 	write  func(tx *sql.Tx, card int64) error
 	always bool
+	// because, when it is set, gives the entry's reason instead of reason,
+	// from the state the card goes to and the facts read in the transaction.
+	because func(to State, f Facts) string
 	// rule, when set with end, is a second step in the same transaction: the
 	// card ends at rule.To, with a second entry of the cause rule and no run.
 	rule *Rule
@@ -547,6 +566,9 @@ func (s *Store) change(e edit) (Card, error) {
 	}
 	if !valid[to] {
 		return Card{}, fmt.Errorf("a card cannot be in %s waiting for %s (ADR 0043)", to.Stage, to.WaitsFor)
+	}
+	if e.because != nil {
+		e.reason = e.because(to, f)
 	}
 
 	if e.end != nil {
@@ -1035,6 +1057,7 @@ func (s *Store) Newest(card int64, kinds ...string) (Document, error) {
 // querier is a database or a transaction.
 type querier interface {
 	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
 }
 
 const runSelect = `SELECT id, card, commit_id, model, effort, ending FROM runs`

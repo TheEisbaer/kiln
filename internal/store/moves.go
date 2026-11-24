@@ -19,6 +19,7 @@ const (
 	ToSpec   Action = "to-spec"   // send a stage that needs you back to a spec run
 	Drop     Action = "drop"      // drop a card that will not produce a change
 	Publish  Action = "publish"   // publish a card whose review passed (card 19)
+	Start    Action = "start"     // start a card in the backlog: to a spec run, or queued for its predecessors
 )
 
 // Note is what a move takes of the developer's note: none, one that may be
@@ -38,13 +39,18 @@ const MaxNote = 16 << 10
 // Facts are what the table of moves looks at besides a card's state: whether
 // the card has a run in flight; whether the core has a publish command;
 // whether the card's last entry is a publishing that failed (PublishFailed);
-// and whether the card has a pull request's address, kept by its publishing.
-// The store reads all but Publishing; the core says that.
+// whether the card has a pull request's address, kept by its publishing; and
+// its predecessors that are not done, Open, and those that were dropped,
+// Dropped, each in ID order (ADR 0010). The store reads all but Publishing;
+// the core says that.
 type Facts struct {
 	InFlight      bool
 	Publishing    bool
 	PublishFailed bool
 	Published     bool
+	Open          []int64
+	Dropped       []int64
+	all           []int64 // every predecessor, in ID order
 }
 
 // move is one row of the table of moves: from a state, to a state, what it
@@ -85,8 +91,10 @@ func settled(f Facts) bool { return f.Published || !f.Publishing }
 // one or without, to implement or to a new spec, when the approved spec no
 // longer fits (card 16). Drop is in the table from every state but done, and
 // only for a card without a run in flight (see Decide), and at the Git host
-// only as the moves from there.
+// only as the moves from there. Start takes a card in the backlog to a spec
+// run, or queues it while a predecessor is not done (see DecideWith).
 var moves = append([]move{
+	{Start, State{Backlog, Developer}, State{Spec, Run}, NoNote, nil},
 	{Approve, State{Spec, Approval}, State{Implement, Run}, OptionalNote, nil},
 	{Again, State{Spec, Approval}, State{Spec, Run}, RequiredNote, nil},
 	{Again, State{Spec, Developer}, State{Spec, Run}, OptionalNote, nil},
@@ -184,6 +192,9 @@ func (e Entry) Note() string {
 	if Dropped(e.State, e.Cause, e.Reason) {
 		return strings.TrimPrefix(strings.TrimPrefix(e.Reason, DroppedReason), ": ")
 	}
+	if strings.HasPrefix(e.Reason, QueuedPrefix) {
+		return "" // the store's words on a start that queued the card
+	}
 	return e.Reason
 }
 
@@ -205,7 +216,9 @@ func (s *Store) Decide(id int64, action Action, note string) (Card, error) {
 // the cause developer and the note, trimmed, as the reason of its entry; a
 // drop's reason is DroppedReason, followed by the note. The card's state and
 // its facts are read and changed in the one transaction of change, so that a
-// move is judged against the state it changes. A move the table does not have
+// move is judged against the state it changes. Start queues the card, with
+// QueuedPrefix and the predecessors it waits for as its reason, while one is
+// not done. A move the table does not have
 // for the card's state is refused with ErrRefused, a note that does not fit
 // the move with ErrNote, and the card is returned as it is. Publish writes
 // the card's publication anew in the same transaction: the developer's yes,
@@ -246,6 +259,9 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 			case m.note == NoNote && note != "":
 				return State{}, fmt.Errorf("%w: this move takes no note", ErrNote)
 			}
+			if action == Start {
+				return queueing(m.to, f), nil
+			}
 			return m.to, nil
 		}
 		switch {
@@ -255,6 +271,9 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 			return State{}, fmt.Errorf("%w: the card is being published; it has no move until that ends", ErrRefused)
 		}
 		return State{}, fmt.Errorf("%w: %q from %s waiting for %s", ErrRefused, action, from.Stage, from.WaitsFor)
+	}
+	if action == Start {
+		e.because = queuedReason
 	}
 	if action == Approve && note != "" {
 		e.write = func(tx *sql.Tx, card int64) error {
