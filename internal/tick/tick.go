@@ -1143,12 +1143,15 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 	case err != nil:
 		return err
 	}
-	var doc, text run.Document
+	var doc, text, proposals run.Document
 	var readErr error
 	if verdict.Finished {
 		doc, readErr = c.engine.ReadDocument(in.Runs, row.ID, f.stage.kind)
 		if readErr == nil && f.card.Stage == store.Implement {
 			text, readErr = c.engine.ReadDocument(in.Runs, row.ID, store.KindPullRequest)
+		}
+		if readErr == nil && f.card.Stage == store.Review {
+			proposals, readErr = c.engine.ReadDocument(in.Runs, row.ID, store.KindProposals)
 		}
 	}
 	if readErr != nil {
@@ -1157,7 +1160,7 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 		// fail on every tick, so the run is failed, with its cost.
 		verdict = run.Verdict{Reason: run.Printable(fmt.Sprintf("its record %s cannot be read: %s; leave the files under %s alone",
 			filepath.Join(in.Runs, row.ID, "documents.tar"), readErr, in.Runs)), Cost: verdict.Cost, Session: verdict.Session}
-		doc, text, readErr = run.Document{}, run.Document{}, nil
+		doc, text, proposals, readErr = run.Document{}, run.Document{}, run.Document{}, nil
 	}
 	d, err := destination(f.card.Stage, verdict, doc, readErr)
 	if err != nil {
@@ -1166,6 +1169,9 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 	var kept *store.Doc
 	if f.card.Stage == store.Implement && verdict.Finished {
 		d, kept = d.withText(text)
+	}
+	if f.card.Stage == store.Review && verdict.Finished {
+		d, kept = d.withProposals(proposals, verdict.Reason)
 	}
 
 	var rule *store.Rule
@@ -1337,6 +1343,33 @@ func (d end) withText(text run.Document) (end, *store.Doc) {
 		return d, &store.Doc{Kind: store.KindPullRequest, Text: string(text.Text)}
 	case !text.Missing:
 		d.reason = text.Problem + "; " + d.reason
+	}
+	return d, nil
+}
+
+// withProposals is a review run's end with the proposals it wrote,
+// /kiln/out/proposals.md, read whether or not its review could be (ADR 0033):
+// a missing file, or one of only white space, keeps none and says nothing;
+// another problem is said in front of the run's reason, after the words of
+// the review's verdict, which the screen reads, keeps none, and does not stop
+// the card. A file that can be read keeps every proposal it holds, a
+// malformed one as written.
+func (d end) withProposals(file run.Document, runReason string) (end, *store.Doc) {
+	switch {
+	case file.Problem == "":
+		if ps := run.Proposals(file.Text); len(ps) > 0 {
+			doc := &store.Doc{Kind: store.KindProposals}
+			for _, p := range ps {
+				doc.Proposals = append(doc.Proposals, store.Proposal{Title: p.Title, Text: p.Text})
+			}
+			return d, doc
+		}
+	case !file.Missing && !file.Empty:
+		if words, ok := strings.CutSuffix(d.reason, runReason); ok {
+			d.reason = words + file.Problem + "; " + runReason
+		} else {
+			d.reason = file.Problem + "; " + d.reason
+		}
 	}
 	return d, nil
 }

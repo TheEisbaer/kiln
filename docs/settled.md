@@ -184,6 +184,15 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The schema is version 8: specs has a column note, the developer's note on approving that spec, NULL on every other row (2026-11-23).
 - The schema is version 12. `runs` has `stage`, the stage its card waited in for it, filled for the runs that were there from the history; `cost` and `session`, from its result; and `unread`, 1 for an ended run whose `result.json` no core has read yet. `unread` was set for the runs that had ended before the migration (2026-11-24).
 - The schema is version 13: `predecessors`, one row per card and predecessor, written in the transaction that writes the card (2026-11-24).
+- The schema is version 14: `proposals`, one row per proposal a review run wrote, with the card it was noticed on, the run, its place in the file, its title and text as written, the card made from it and the note it was dismissed with, NULL until then; and `entries.proposal`, the proposal an entry is about, NULL on every other entry (2026-11-24).
+
+## ADR 0033: A problem review notices outside a card's change is proposed to the developer, not acted on
+
+- A review run writes its proposals to `/kiln/out/proposals.md`, each starting with a line `Proposal: <title>`, its text running to the next such line. A review with none writes no file. The core reads the line in any case, after list, quote, heading and bold marks, and with a number after the word (2026-11-24).
+- A proposal the core cannot read the shape of is kept as one proposal, with its text as written and an empty title. Such a proposal is text before the first title line that is more than blank lines and headings, or a file with no title line. A `Proposal: none` with no text is no proposal (2026-11-24).
+- A finished review run's proposals are written in the transaction that ends the run, so a run read again keeps them once. A `proposals.md` that cannot be taken (over 256 KiB, not a file, a damaged archive) is said in the run's reason and keeps nothing, and the run stays finished (2026-11-24).
+- The first screen shows the open proposals in a part of their own under "Needs you", which does not count them: each with its title, the card it was noticed on and its text on demand. "Make a card" writes a backlog card, not started, from the title and the text, and the proposal keeps the card's ID. "Dismiss" takes an optional note. A proposal acted on is no longer open, and a second move on it is refused with 409 (2026-11-24).
+- The board's measures count the proposals made, accepted and dismissed, over the whole history, from the `proposals` rows. The board's JSON carries them as `measures.proposals`, with `made`, `accepted` and `dismissed` (2026-11-24).
 
 ## ADR 0034: Kiln is a core on the developer's machine, a proxy in a container, and one detached container per run
 
@@ -290,6 +299,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - A card's cost is a query over its runs, made when the board or the card is read, not a counter (rule 1) (2026-11-24).
 - A card's interventions are a query over its entries, made when the board or the card is read, not a counter (rule 1). An entry counts when its cause is the developer, except the card's first entry (writing it), an entry from the backlog to spec waiting for a run (starting it), an entry from spec waiting for approval back to spec waiting for a run (a rejected spec, which belongs to the approval, rule 2), and the card's first entry from spec waiting for approval to implement waiting for a run (the planned approval). A move is told from the state of the card's previous entry. The entry of the instance that turns automatic merging on counts on no card (2026-11-24).
 - In a card's history on the screen, a run's entry that the rule's entry follows in the same step, the one transaction of `EndRunByRule`, told by the two entries having the same time, is titled by its stage and what the run did: failed, passed, sent back or finished, never by the state it was written at. The card's JSON carries this as `did` on the entry, empty on every other entry (2026-11-24).
+- An entry about a proposal changes no card. It carries the card's state as it is, writes neither the card's row nor `since`, and every reader of a card's last entry passes over it: the retry, the note a run is told, a failed publishing, a dropped predecessor and the board. A card written from a proposal is a card written, not an intervention, and a dismiss counts on no card (2026-11-24).
 
 ## ADR 0043: A card stores its stage and what it waits for; a run is in flight or has ended in one of four ways
 
@@ -315,6 +325,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - With `--page`, the build is the file's as it is at that moment: the page is served with it and the board says it, so a page left open reloads itself when the file changes. A file that cannot be read has no build, and a page left open stays as it is (2026-11-20).
 - Until the core's report every POST gets 503, after the checks of rule 6. The board's JSON says `version` (2026-11-23).
 - The board's tiles and the card's JSON carry `predecessors` and `queued_for`, the predecessors not yet done while the card is queued, both `[]` when empty. The card's JSON also carries `named_by`, with `id` and `title` (2026-11-24).
+- `POST /api/proposals/{id}/decide` takes `{"action": "make-card"}` or `{"action": "dismiss", "note": …}`, with the checks of rule 6 and the 503 before the report. The board's JSON carries the open proposals as `proposals`, and a card's JSON carries `from_proposal`. A `make-card` repeated after a kill is refused, since the proposal is no longer open, so it never writes a second card (2026-11-24).
 
 ## ADR 0045: Kiln's checks are one command that runs the tools directly in the toolchain image
 
@@ -370,6 +381,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 ## ADR 0055: The instance has state and history of its own, on the same stream
 
 - An entry of the instance holds the instance's whole state after the change and its cause, as a card's entry does: `rule` for a pause and for automatic merging off, `developer` for turning it on. Entries from before store version 11 have cause `rule` (2026-11-23).
+- A proposal's move is an entry of the card it was noticed on, marked by the proposal's ID. Making a card from it also writes the new card's first entry (2026-11-24).
 
 ## ADR 0056: Kiln's stage instructions live in one protected place
 

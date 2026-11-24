@@ -8,8 +8,16 @@ package store
 // for a run (a rejected spec, which belongs to the approval), and the card's
 // first move from spec waiting for approval to implement waiting for a run
 // (the planned approval). A move is told from the state of the previous
-// entry. It reads nothing else; a count is a query, not a counter.
-func Interventions(entries []Entry) int {
+// entry. An entry about a proposal is passed over as if it were not there:
+// it changes no card. It reads nothing else; a count is a query, not a
+// counter.
+func Interventions(all []Entry) int {
+	var entries []Entry
+	for _, e := range all {
+		if e.Proposal == 0 {
+			entries = append(entries, e)
+		}
+	}
 	n := 0
 	approved := false // the planned approval has been made
 	for i, e := range entries {

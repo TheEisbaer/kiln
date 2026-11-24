@@ -184,8 +184,12 @@ func Dropped(s State, cause Cause, reason string) bool {
 }
 
 // Note is the developer's note on an entry of theirs: the reason of a move, or
-// what follows the words of a drop; "" on an entry of another cause.
+// what follows the words of a drop; "" on an entry of another cause. On an
+// entry about a proposal it is the note of a dismiss, and "" otherwise.
 func (e Entry) Note() string {
+	if e.Proposal != 0 {
+		return e.proposalNote()
+	}
 	if e.Cause != CauseDeveloper {
 		return ""
 	}

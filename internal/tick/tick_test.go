@@ -59,6 +59,9 @@ type child struct {
 	// Outcomes starts core on the fake engine, with every run's exit open,
 	// and these outcomes of the runs of each card (fakeEngine.outcomes).
 	Outcomes map[int64][]string
+	// Proposals are the proposals.md of each card's review runs, on the fake
+	// engine, with Reviews.
+	Proposals map[int64]string
 }
 
 // noEngine is an engine with no runs, which starts none. Its Build is
@@ -369,6 +372,9 @@ func asKiln(spec string) int {
 				e.reviews[card] = lines
 				e.open(card, "exit")
 			}
+			for card, text := range c.Proposals {
+				e.proposals[card] = text
+			}
 			for card, outcomes := range c.Outcomes {
 				e.outcomes[card] = outcomes
 				e.open(card, "exit")
@@ -502,7 +508,7 @@ func TestDestination(t *testing.T) {
 			t.Errorf("%s: the error %v, want %v", row.what, err, row.wantErr)
 		}
 		if got.ending != row.want.ending || got.to != row.want.to || got.reason != row.want.reason ||
-			(got.doc == nil) != (row.want.doc == nil) || (got.doc != nil && *got.doc != *row.want.doc) {
+			(got.doc == nil) != (row.want.doc == nil) || (got.doc != nil && !reflect.DeepEqual(*got.doc, *row.want.doc)) {
 			t.Errorf("%s: %s to %v with %q and the document %v, want %s to %v with %q and %v", row.what,
 				got.ending, got.to, got.reason, show(got.doc), row.want.ending, row.want.to, row.want.reason, show(row.want.doc))
 		}

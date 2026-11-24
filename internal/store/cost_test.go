@@ -167,6 +167,8 @@ INSERT INTO runs (id, card, commit_id, model, effort, ending) VALUES
 	('r2', 1, 'c0ffee', 'm', 'high', 'finished'),
 	('r3', 1, 'c0ffee', 'm', 'high', NULL);
 DROP TABLE predecessors;
+DROP TABLE proposals;
+ALTER TABLE entries DROP COLUMN proposal;
 PRAGMA user_version = 11`); err != nil {
 		t.Fatal(err)
 	}

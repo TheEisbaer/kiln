@@ -19,8 +19,16 @@ Everything else is discarded: taste, naming you would have chosen differently, i
 After the verdict line:
 
 - Findings, each with which of the three it points to, the file and line, how it fails and what must change.
-- Proposals, if any.
 - What you ran, and its result.
+
+## Proposals
+
+Write each proposal to /kiln/out/proposals.md, one after the other, each in this shape:
+
+    Proposal: <its title, on one line>
+    <its text: what the problem is, where it is, with the file and line, and how it fails>
+
+Each proposal starts with its own `Proposal:` line, and its text runs to the next such line. A review with no proposal writes no proposals.md.
 
 ## Rules
 
