@@ -192,6 +192,27 @@ button:disabled { opacity: .55; cursor: default; }
 .row .why { grid-column: 2; font-size: 12.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .group.needs .row .why { color: var(--amber-ink); }
 
+/* The proposals: apart from "needs you", which does not count them */
+.proposals { padding: 6px 28px 6px; }
+.prop {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 10px;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--line);
+}
+.prop .from { font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prop .from .id { font-family: var(--mono); }
+.prop .t { font-weight: 550; overflow-wrap: anywhere; }
+.prop .acts { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 6px; }
+.prop .acts button { padding: 4px 10px; font-size: 12.5px; }
+.prop .md, .prop .err { grid-column: 1 / -1; }
+.prop .err, .prop.err { color: var(--amber-ink); font-size: 12.5px; }
+
 /* The board */
 .board {
   flex: 1;
@@ -509,6 +530,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
   .top { padding: 12px 16px; gap: 12px; }
   .strip { padding: 14px 16px 4px; }
   .measures { padding: 4px 16px 0; }
+  .proposals { padding: 6px 16px 4px; }
   .board { padding: 14px 16px 24px; grid-template-columns: repeat(5, minmax(230px, 1fr)); }
   .panel .body { padding: 18px 18px 48px; }
 }
@@ -539,7 +561,8 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
 <div id="offline" class="offline" hidden>the core does not answer; trying again every 2 seconds</div>
 <div id="stale" class="offline" hidden>the core serves another version of this page; reload the page to use it</div>
 <section id="strip" class="strip" aria-label="What needs you"></section>
-<section id="measures" class="measures" aria-label="Measures" title="Over the whole history. An intervention is a move of yours on a card other than writing it, starting it and the first approval of its spec; sending a spec back belongs to that approval. Not counted yet: your approvals of protected paths on the Git host, which the core does not see, and turning automatic merging on, which belongs to no card."></section>
+<section id="proposals" class="proposals" aria-label="Proposals" hidden></section>
+<section id="measures" class="measures" aria-label="Measures" title="Over the whole history. An intervention is a move of yours on a card other than writing it, starting it and the first approval of its spec; sending a spec back belongs to that approval. Not counted yet: your approvals of protected paths on the Git host, which the core does not see, and turning automatic merging on, which belongs to no card. Proposals: made by reviews, accepted as cards, dismissed by you."></section>
 <main id="board" class="board" aria-label="Board"></main>
 <div id="scrim" class="scrim"></div>
 <aside id="panel" class="panel" aria-label="Card" aria-hidden="true">
@@ -906,6 +929,7 @@ function renderBoard(b) {
     empty.hidden = want.length > 0;
   }
   renderStrip(b.cards);
+  renderProposals(b.proposals);
   renderMeasures(b.measures);
   tickClocks();
   boardSeen = true;
@@ -948,6 +972,115 @@ function renderStrip(cards) {
   if (approvals.length) group("approve", "Waits for your approval", approvals,
     (w, c) => w.append(document.createTextNode(c.stage === "review" ? "The review passes; the change is ready to read." : "The spec is ready to read.")));
   strip.append(groups);
+}
+
+// The proposals: problems a review noticed outside its card's change, each
+// turned into a card or dismissed by you (ADR 0033). They are a part of their
+// own, apart from "needs you", which does not count them.
+
+let proposalsKey = null;
+let proposalsShown = [];          // the open proposals, as the board gave them
+const proposalOpen = new Set();   // the proposals whose text is shown
+const proposalErr = new Map();    // the sentence of a refused move, by proposal
+
+function renderProposals(list) {
+  proposalsShown = list;
+  const key = JSON.stringify([list, [...proposalOpen], [...proposalErr]]);
+  if (key === proposalsKey) return;
+  proposalsKey = key;
+  const part = $("proposals");
+  part.replaceChildren();
+  // A refused move on a proposal that is no longer open is said until the
+  // next move.
+  const gone = [...proposalErr].filter(([id]) => !list.some((p) => p.id === id));
+  part.hidden = !list.length && !gone.length;
+  if (part.hidden) return;
+  const g = el("div", "group");
+  const h = el("h2", null, "Proposals");
+  h.append(el("span", "n", String(list.length)));
+  const rows = el("div", "rows");
+  for (const p of list) rows.append(proposalRow(p));
+  for (const [id, text] of gone) rows.append(el("div", "prop err", "Proposal " + id + ": " + text));
+  g.append(h, rows);
+  part.append(g);
+}
+
+function proposalRow(p) {
+  const r = el("div", "prop");
+  const from = el("span", "from");
+  from.tabIndex = 0;
+  from.append(el("span", "id", "#" + p.card), document.createTextNode(" " + (p.card_headline || "(no title)")));
+  from.title = "Noticed on #" + p.card + " by its review run " + p.run;
+  from.addEventListener("click", () => openCard(p.card));
+  from.addEventListener("keydown", (e) => { if (e.key === "Enter") openCard(p.card); });
+  const t = el("div", "t", p.headline || "(no title)");
+  t.title = p.title;
+  const acts = el("div", "acts");
+  const shown = proposalOpen.has(p.id);
+  const toggle = el("button", null, shown ? "Hide the text" : "Show the text");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", String(shown));
+  toggle.addEventListener("click", () => {
+    if (shown) proposalOpen.delete(p.id); else proposalOpen.add(p.id);
+    renderProposals(proposalsShown);
+  });
+  const make = el("button", "primary", "Make a card");
+  make.type = "button";
+  make.title = "Writes a card in the backlog from its title and text, not started.";
+  make.addEventListener("click", async () => {
+    const r = await decideProposal(p.id, "make-card", undefined, acts);
+    if (r.refused) showProposalErr(p.id, r.refused);
+  });
+  const dismiss = el("button", null, "Dismiss");
+  dismiss.type = "button";
+  dismiss.addEventListener("click", () => openDismiss(p));
+  acts.append(toggle, make, dismiss);
+  r.append(from, acts, t);
+  if (shown) r.append(markdown(p.text));
+  if (proposalErr.has(p.id)) r.append(el("div", "err", proposalErr.get(p.id)));
+  return r;
+}
+
+function showProposalErr(id, text) {
+  proposalErr.set(id, text);
+  renderProposals(proposalsShown);
+}
+
+// decideProposal sends a move on a proposal and asks for the board again. It
+// answers the status and, for a refused move, its sentence.
+async function decideProposal(id, action, note, box) {
+  for (const b of box.querySelectorAll("button")) b.disabled = true;
+  for (const gone of proposalErr.keys()) if (!proposalsShown.some((p) => p.id === gone)) proposalErr.delete(gone);
+  let out = {};
+  try {
+    const r = await api("POST", "/api/proposals/" + id + "/decide", action === "dismiss" ? { action, note } : { action });
+    setOnline(true);
+    out = { status: r.status };
+    if (!r.ok) out.refused = sentence((r.data && r.data.error) || "the move was refused");
+    else proposalErr.delete(id);
+  } catch (e) {
+    setOnline(false);
+    out = { refused: "The core does not answer; nothing was moved." };
+  }
+  for (const b of box.querySelectorAll("button")) b.disabled = false;
+  refreshBoard().catch(() => {});
+  return out;
+}
+
+// sendDismiss dismisses a proposal with the dialog's note. A note that does
+// not fit is said in the dialog; a proposal acted on meanwhile, by its row.
+async function sendDismiss(id) {
+  $("n-go").disabled = true;
+  const r = await decideProposal(id, "dismiss", $("n-text").value, $("note"));
+  if (r.refused && r.status !== 409) {
+    const hint = $("n-hint");
+    hint.className = "err";
+    hint.textContent = r.refused;
+    noteReady();
+    return;
+  }
+  if (r.refused) showProposalErr(id, r.refused);
+  $("note").close();
 }
 
 // Markdown, by hand: every piece of text becomes a text node.
@@ -1488,11 +1621,32 @@ function openNote(m) {
   $("n-text").placeholder = m.note === "required" ? "Say what should change, and why." : "";
   $("n-go").textContent = t.go;
   $("n-go").className = m.action === "drop" ? "danger" : "primary";
+  noteHint(m.note === "required");
+  noteReady();
+  $("note").showModal();
+  $("n-text").focus();
+}
+
+// noteHint says in the dialog of a note how it is sent.
+function noteHint(required) {
   const hint = $("n-hint");
   hint.className = "hint";
   hint.replaceChildren();
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
-  hint.append(el("kbd", null, mac ? "⌘" : "Ctrl"), document.createTextNode(" "), el("kbd", null, "Enter"), document.createTextNode(m.note === "required" ? " sends it, once there is a note" : " sends it"));
+  hint.append(el("kbd", null, mac ? "⌘" : "Ctrl"), document.createTextNode(" "), el("kbd", null, "Enter"), document.createTextNode(required ? " sends it, once there is a note" : " sends it"));
+}
+
+// openDismiss opens the dialog of a note for the dismiss of a proposal.
+function openDismiss(p) {
+  noteMove = { proposal: p.id, note: "optional" };
+  $("n-title").textContent = "Dismiss the proposal?";
+  $("n-what").textContent = "“" + (p.headline || "(no title)") + "”, noticed on #" + p.card + ". No card is made from it.";
+  $("n-label").textContent = "Why? Optional; the history keeps it.";
+  $("n-text").value = "";
+  $("n-text").placeholder = "";
+  $("n-go").textContent = "Dismiss";
+  $("n-go").className = "primary";
+  noteHint(false);
   noteReady();
   $("note").showModal();
   $("n-text").focus();
@@ -1506,6 +1660,7 @@ function noteReady() {
 
 async function sendNote() {
   if (!noteMove || $("n-go").disabled) return;
+  if (noteMove.proposal) return sendDismiss(noteMove.proposal);
   const { id, action } = noteMove;
   $("n-go").disabled = true;
   const r = await decide(id, action, $("n-text").value, $("p-moves"));
@@ -1706,6 +1861,15 @@ function renderHistory(history) {
   ol.replaceChildren();
   for (const e of history.slice().reverse()) {
     const li = el("li");
+    if (e.proposal) {
+      // A move on a proposal changes no card: its reason is its line.
+      const l1 = el("div", "line1");
+      l1.append(el("span", "to", e.reason), el("span", "by", "by you"), el("span", "when", when(e.at)));
+      li.append(el("span", "mark dot"), l1);
+      if (e.note) li.append(el("div", "words", e.note));
+      ol.append(li);
+      continue;
+    }
     const mark = el("span", "mark dot " + e.stage);
     const l1 = el("div", "line1");
     const to = e.did ? DID[e.did] || e.did : e.dropped ? "dropped" : e.stage === "backlog" && e.waits_for === "developer" ? "not started" : WAITS[e.waits_for] || e.waits_for;

@@ -20,11 +20,13 @@ const maxSpec = 256 << 10
 
 // Document is what ReadDocument took of a run's document: its bytes exactly as
 // written, or the problem why it cannot be taken. Missing is set, with the
-// problem, when the run wrote none.
+// problem, when the run wrote none, and Empty when it wrote nothing but white
+// space.
 type Document struct {
 	Text    []byte
 	Problem string
 	Missing bool
+	Empty   bool
 }
 
 // ReadSpec reads the spec a run wrote, /kiln/out/spec.md, as ReadDocument
@@ -85,7 +87,7 @@ func ReadDocument(runs, id, kind string) (Document, error) {
 			return damaged(err)
 		}
 		if len(bytes.TrimSpace(data)) == 0 {
-			return Document{Problem: "the " + kind + " is empty"}, nil
+			return Document{Problem: "the " + kind + " is empty", Empty: true}, nil
 		}
 		return Document{Text: data}, nil
 	}

@@ -80,7 +80,10 @@ type fakeEngine struct {
 	// instruction, as after the instruction's file was written again.
 	otherInstruction map[int64]bool
 	docsFail         map[int64]error // the error of ReadDocument, by card
-	removeFails      map[string]bool // the runs whose RemoveRun fails
+	// The proposals.md of a card's review runs, by card; a card without one
+	// has its review runs write none.
+	proposals   map[int64]string
+	removeFails map[string]bool // the runs whose RemoveRun fails
 	// The cards whose Carry of a running container breaks off with an error
 	// at once, so that the next tick looks at the container again.
 	breakOff map[int64]bool
@@ -159,7 +162,7 @@ func newFakeEngine() *fakeEngine {
 		reviews: map[int64][]string{}, reviewed: map[string]string{}, saves: map[int64]bool{}, models: map[string]string{},
 		outcomes: map[int64][]string{}, outcome: map[string]string{}, inspected: map[string]int{},
 		startFails: map[int64]int{}, otherInstruction: map[int64]bool{}, docsFail: map[int64]error{},
-		removeFails: map[string]bool{}, breakOff: map[int64]bool{}}
+		removeFails: map[string]bool{}, breakOff: map[int64]bool{}, proposals: map[int64]string{}}
 }
 
 func (e *fakeEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {
@@ -296,13 +299,21 @@ func (e *fakeEngine) Remove(_ context.Context, in run.Inputs) error {
 
 // ReadDocument gives a run's document. A review run's first line is the next
 // of its card's reviews, Verdict: passes when there are none left, the same
-// for every read of one run; a review that goes back has a finding.
+// for every read of one run; a review that goes back has a finding. A
+// review run's proposals.md is its card's proposals, missing without them.
 func (e *fakeEngine) ReadDocument(_, id, kind string) (run.Document, error) {
 	e.mu.Lock()
 	fails := e.docsFail[cardOf(id)]
+	proposals, proposed := e.proposals[cardOf(id)]
 	e.mu.Unlock()
 	if fails != nil {
 		return run.Document{}, fails
+	}
+	if kind == store.KindProposals {
+		if !proposed {
+			return run.Document{Problem: "the run wrote no proposals (/kiln/out/proposals.md)", Missing: true}, nil
+		}
+		return run.Document{Text: []byte(proposals)}, nil
 	}
 	text := map[string]string{store.KindSpec: "# Spec\n", store.KindReport: "# Report\n", store.KindReview: "Verdict: passes\n"}[kind]
 	if kind == store.KindReview {

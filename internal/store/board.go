@@ -13,6 +13,9 @@ const (
 	KindReport      = "report"       // report.md of an implement run
 	KindPullRequest = "pull-request" // pull-request.md of an implement run, the pull request's text (card 19)
 	KindReview      = "review"       // review.md of a review run
+	// KindProposals is proposals.md of a review run, kept as rows of the
+	// table proposals, never in specs (ADR 0033).
+	KindProposals = "proposals"
 )
 
 // kinds are the kinds of documents the store keeps.
@@ -244,8 +247,9 @@ func (s *Store) Board() ([]Summary, error) {
 		return nil, err
 	}
 
+	// An entry about a proposal changes no card, so it is passed over.
 	rows, err = tx.Query(`SELECT card, cause, reason FROM entries
-		WHERE number IN (SELECT max(number) FROM entries GROUP BY card)`)
+		WHERE number IN (SELECT max(number) FROM entries WHERE proposal IS NULL GROUP BY card)`)
 	if err != nil {
 		return nil, err
 	}
@@ -268,17 +272,19 @@ func (s *Store) Board() ([]Summary, error) {
 	}
 
 	// The entries' causes and states, by number, for the interventions.
-	rows, err = tx.Query(`SELECT card, cause, stage, waits_for FROM entries ORDER BY number`)
+	rows, err = tx.Query(`SELECT card, cause, stage, waits_for, proposal FROM entries ORDER BY number`)
 	if err != nil {
 		return nil, err
 	}
 	entries := map[int64][]Entry{}
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(&e.Card, &e.Cause, &e.Stage, &e.WaitsFor); err != nil {
+		var proposal sql.NullInt64
+		if err := rows.Scan(&e.Card, &e.Cause, &e.Stage, &e.WaitsFor, &proposal); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		e.Proposal = proposal.Int64
 		entries[e.Card] = append(entries[e.Card], e)
 	}
 	if err := errorsOf(rows); err != nil {

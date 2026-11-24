@@ -267,11 +267,11 @@ func TestDocuments(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s, theRun(card.ID, "r3"))
-	if _, err := s.EndRun("r3", Finished, "", State{Review, Run}, Cost{}, &Doc{KindReport, "the report"}); err != nil {
+	if _, err := s.EndRun("r3", Finished, "", State{Review, Run}, Cost{}, &Doc{Kind: KindReport, Text: "the report"}); err != nil {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s, theRun(card.ID, "r4"))
-	if _, err := s.EndRun("r4", Finished, "", State{Review, Approval}, Cost{}, &Doc{KindReview, "Verdict: passes\n"}); err != nil {
+	if _, err := s.EndRun("r4", Finished, "", State{Review, Approval}, Cost{}, &Doc{Kind: KindReview, Text: "Verdict: passes\n"}); err != nil {
 		t.Fatal(err)
 	}
 	want := []Document{{"spec", "r1", "the first <script>", ""}, {"spec", "r2", "the second \x1b[2J", ""},

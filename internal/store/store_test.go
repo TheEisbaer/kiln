@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 14"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 15"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 14 was opened")
+		t.Fatal("a store of version 15 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 14") || !strings.Contains(msg, "version 13") {
+	if msg := err.Error(); !strings.Contains(msg, "version 15") || !strings.Contains(msg, "version 14") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 14 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 14 and 0", v, tables)
+	if v != 15 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 15 and 0", v, tables)
 	}
 }
 
@@ -742,6 +742,27 @@ func dump(t *testing.T, path string) string {
 // added: started, stage, cost, session and unread.
 var runColumns = regexp.MustCompile(` \| <nil> \| [^ |]+ \| <nil> \| <nil> \| [01]$`)
 
+// withoutProposal is a line of a dump without the entries' column proposal,
+// which version 14 added, NULL on every entry that was there, and without the
+// table proposals and its index, when the dump is of a store moved forward.
+func withoutProposal(line string, migrated bool) string {
+	if !migrated {
+		return line
+	}
+	if strings.HasPrefix(line, "entries | ") {
+		return strings.Replace(line, ", proposal INTEGER", "", 1)
+	}
+	if strings.HasPrefix(line, "proposals | ") || strings.HasPrefix(line, "proposals_made | ") ||
+		strings.HasPrefix(line, "sqlite_autoindex_proposals_1 | ") {
+		return "version " // left out, as the version is
+	}
+	parts := strings.Split(line, " | ")
+	if _, err := strconv.Atoi(parts[0]); err == nil && len(parts) == 9 && parts[8] == "<nil>" {
+		return strings.Join(parts[:8], " | ")
+	}
+	return line
+}
+
 func withoutSince(line string, migrated bool) string {
 	if parts := strings.Split(line, " | "); migrated && len(parts) == 6 && !strings.HasPrefix(parts[0], "ab12cd34-") && parts[5] == "0" {
 		return strings.Join(parts[:4], " | ")
@@ -823,6 +844,7 @@ func TestMigrateV2(t *testing.T) {
 				line = runColumns.ReplaceAllString(line, "")
 			}
 			line = withoutSince(line, migrated)
+			line = withoutProposal(line, migrated)
 			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") &&
 				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") && !strings.HasPrefix(line, "runs | ") &&
 				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") &&
@@ -974,6 +996,7 @@ func TestMigrateV3(t *testing.T) {
 				line = runColumns.ReplaceAllString(line, "")
 			}
 			line = withoutSince(line, migrated)
+			line = withoutProposal(line, migrated)
 			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") && !strings.HasPrefix(line, "runs | ") &&
 				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") &&
 				!strings.HasPrefix(line, "instance | ") && !strings.HasPrefix(line, "instance_entries | ") &&
@@ -1027,8 +1050,8 @@ func TestDocumentKinds(t *testing.T) {
 	if _, err := s.Newest(card.ID, KindReview); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("Newest of a card without a review: %v", err)
 	}
-	end("r2", State{Review, Run}, &Doc{KindReport, "the report"})
-	end("r3", State{Review, Developer}, &Doc{KindReview, "Verdict: goes back\n"})
+	end("r2", State{Review, Run}, &Doc{Kind: KindReport, Text: "the report"})
+	end("r3", State{Review, Developer}, &Doc{Kind: KindReview, Text: "Verdict: goes back\n"})
 
 	if sp, err := s.Spec(card.ID); err != nil || sp.Run != "r1" || sp.Text != "the spec" {
 		t.Errorf("Spec after a report and a review is %+v (%v)", sp, err)
@@ -1063,7 +1086,7 @@ func TestDocumentKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s, theRun(card.ID, "r5"))
-	if _, err := s.EndRun("r5", Finished, "", State{Spec, Approval}, Cost{}, &Doc{"notes", "x"}); err == nil {
+	if _, err := s.EndRun("r5", Finished, "", State{Spec, Approval}, Cost{}, &Doc{Kind: "notes", Text: "x"}); err == nil {
 		t.Error("a document of the kind notes was kept")
 	}
 	if r, _ := s.InFlight(card.ID); r == nil || countRows(t, s, "specs") != 4 {
@@ -1169,8 +1192,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 13 {
-		t.Fatalf("the store is version %d after Open, want 13", v)
+	if v := userVersion(t, s); v != version || version != 14 {
+		t.Fatalf("the store is version %d after Open, want 14", v)
 	}
 	// What version 1 held is still there, and has no run or reason, and no
 	// send-back.
@@ -1227,8 +1250,8 @@ func TestMigrateV9(t *testing.T) {
 	if _, err := s.SetPaused("paused before version 11"); err != nil {
 		t.Fatal(err)
 	}
-	// Back to version 9: the columns of versions 10 to 12, and the table of
-	// version 13, did not exist.
+	// Back to version 9: the columns of versions 10 to 12, the table of
+	// version 13, and the table and the column of version 14, did not exist.
 	if _, err := s.db.Exec(`ALTER TABLE runs DROP COLUMN stage;
 ALTER TABLE runs DROP COLUMN cost;
 ALTER TABLE runs DROP COLUMN session;
@@ -1240,6 +1263,8 @@ ALTER TABLE instance_entries DROP COLUMN cause;
 ALTER TABLE instance_entries DROP COLUMN merging_off;
 ALTER TABLE instance_entries DROP COLUMN failed_update;
 DROP TABLE predecessors;
+DROP TABLE proposals;
+ALTER TABLE entries DROP COLUMN proposal;
 PRAGMA user_version = 9`); err != nil {
 		t.Fatal(err)
 	}

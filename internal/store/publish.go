@@ -56,7 +56,8 @@ func readFacts(q querier, card int64) (Facts, error) {
 	}
 	var e Entry
 	var reason sql.NullString
-	err := q.QueryRow(`SELECT cause, stage, waits_for, reason FROM entries WHERE card = ? ORDER BY number DESC LIMIT 1`, card).
+	err := q.QueryRow(`SELECT cause, stage, waits_for, reason FROM entries
+		WHERE card = ? AND proposal IS NULL ORDER BY number DESC LIMIT 1`, card).
 		Scan(&e.Cause, &e.Stage, &e.WaitsFor, &reason)
 	switch {
 	case err == nil:

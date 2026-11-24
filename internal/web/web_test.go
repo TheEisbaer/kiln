@@ -31,11 +31,13 @@ type fixture struct {
 	store *store.Store
 	act   *Activity
 	h     http.Handler
+	path  string // the store's file
 }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "store.db"))
+	path := filepath.Join(t.TempDir(), "store.db")
+	s, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +47,7 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &fixture{store: s, act: act, h: h}
+	return &fixture{store: s, act: act, h: h, path: path}
 }
 
 // do sends a request as the page would: to the listen address, and a POST

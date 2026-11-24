@@ -22,7 +22,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 13
+const version = 14
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -105,6 +105,9 @@ type Entry struct {
 	State
 	Run    string
 	Reason string
+	// Proposal is the proposal the entry is about, 0 on every other entry:
+	// such an entry changes no card (ADR 0055).
+	Proposal int64
 }
 
 // Ending is how a run ended. A run in flight has none (ADR 0043).
@@ -117,10 +120,13 @@ const (
 )
 
 // Doc is a run's document as EndRun keeps it: its kind, KindSpec, KindReport,
-// KindPullRequest or KindReview, and its text, exactly as the run wrote it.
+// KindPullRequest, KindReview or KindProposals, and its text, exactly as the
+// run wrote it. A doc of KindProposals has no text: its Proposals are kept,
+// one row each, in the table proposals.
 type Doc struct {
-	Kind string
-	Text string
+	Kind      string
+	Text      string
+	Proposals []Proposal
 }
 
 // SpecRow is a card's spec, as the store keeps it: its text, exactly as the run
@@ -318,6 +324,28 @@ UPDATE runs SET stage = (SELECT stage FROM cards WHERE cards.id = runs.card) WHE
 ) STRICT`)
 		return err
 	},
+	func(tx *sql.Tx) error {
+		// The proposals a review run wrote, one row each, with the card they
+		// were noticed on, and what the developer did with them (ADR 0033);
+		// and the proposal an entry is about, NULL on every other entry
+		// (ADR 0055).
+		_, err := tx.Exec(`
+CREATE TABLE proposals (
+	id INTEGER PRIMARY KEY,
+	card INTEGER NOT NULL,
+	run TEXT NOT NULL,
+	number INTEGER NOT NULL,
+	title TEXT NOT NULL,
+	text TEXT NOT NULL,
+	made INTEGER,
+	dismissed TEXT,
+	UNIQUE (run, number),
+	CHECK (made IS NULL OR dismissed IS NULL)
+) STRICT;
+CREATE UNIQUE INDEX proposals_made ON proposals(made) WHERE made IS NOT NULL;
+ALTER TABLE entries ADD COLUMN proposal INTEGER;`)
+		return err
+	},
 }
 
 // afterMigration, set only by the test, is called when the store has been moved
@@ -453,9 +481,10 @@ func (s *Store) Card(id int64) (Card, error) {
 	return readCard(s.db, id)
 }
 
-// History reads the entries of a card, in the order of their numbers.
+// History reads the entries of a card, in the order of their numbers, those
+// about a proposal included.
 func (s *Store) History(id int64) ([]Entry, error) {
-	rows, err := s.db.Query(`SELECT number, card, at, cause, stage, waits_for, run, reason
+	rows, err := s.db.Query(`SELECT number, card, at, cause, stage, waits_for, run, reason, proposal
 		FROM entries WHERE card = ? ORDER BY number`, id)
 	if err != nil {
 		return nil, err
@@ -466,10 +495,11 @@ func (s *Store) History(id int64) ([]Entry, error) {
 		var e Entry
 		var at string
 		var run, reason sql.NullString
-		if err := rows.Scan(&e.Number, &e.Card, &at, &e.Cause, &e.Stage, &e.WaitsFor, &run, &reason); err != nil {
+		var proposal sql.NullInt64
+		if err := rows.Scan(&e.Number, &e.Card, &at, &e.Cause, &e.Stage, &e.WaitsFor, &run, &reason, &proposal); err != nil {
 			return nil, err
 		}
-		e.Run, e.Reason = run.String, reason.String
+		e.Run, e.Reason, e.Proposal = run.String, reason.String, proposal.Int64
 		if e.At, err = time.Parse(time.RFC3339Nano, at); err != nil {
 			return nil, fmt.Errorf("entry %d: %w", e.Number, err)
 		}
@@ -581,6 +611,12 @@ func (s *Store) change(e edit) (Card, error) {
 			return Card{}, err
 		}
 		for _, d := range e.end.docs {
+			if d.Kind == KindProposals {
+				if err := writeProposals(tx, id, e.end.id, d.Proposals); err != nil {
+					return Card{}, err
+				}
+				continue
+			}
 			if _, err := tx.Exec(`INSERT INTO specs (run, card, text, kind) VALUES (?, ?, ?, ?)`,
 				e.end.id, id, d.Text, d.Kind); err != nil {
 				return Card{}, err
@@ -852,7 +888,7 @@ func keepDocs(id string, docs []*Doc) ([]Doc, error) {
 		if d == nil {
 			continue
 		}
-		if !kinds[d.Kind] {
+		if !kinds[d.Kind] && d.Kind != KindProposals {
 			return nil, fmt.Errorf("%q is not a kind of document", d.Kind)
 		}
 		if seen[d.Kind] {
@@ -928,11 +964,12 @@ const (
 )
 
 // lastEntry reads a card's last entry, with sql.ErrNoRows for a card that has
-// none.
+// none. An entry about a proposal is passed over: it changes no card.
 func lastEntry(q querier, card int64) (Entry, error) {
 	e := Entry{Card: card}
 	var run, reason sql.NullString
-	err := q.QueryRow(`SELECT number, cause, stage, waits_for, run, reason FROM entries WHERE card = ? ORDER BY number DESC LIMIT 1`, card).
+	err := q.QueryRow(`SELECT number, cause, stage, waits_for, run, reason FROM entries
+		WHERE card = ? AND proposal IS NULL ORDER BY number DESC LIMIT 1`, card).
 		Scan(&e.Number, &e.Cause, &e.Stage, &e.WaitsFor, &run, &reason)
 	e.Run, e.Reason = run.String, reason.String
 	return e, err
@@ -980,9 +1017,11 @@ func (s *Store) Retrying(card int64) (first string, retrying bool, err error) {
 // the entry that made the card wait for a run, when that entry is the
 // developer's; "" otherwise. The rule's entries after a failed or a refused
 // run are passed over, each with the run's entry just before it, so that a
-// retry and a run after a refusal are told what the first run was told.
+// retry and a run after a refusal are told what the first run was told. An
+// entry about a proposal is passed over.
 func (s *Store) Note(card int64) (string, error) {
-	rows, err := s.db.Query(`SELECT cause, stage, waits_for, run, reason FROM entries WHERE card = ? ORDER BY number DESC`, card)
+	rows, err := s.db.Query(`SELECT cause, stage, waits_for, run, reason FROM entries
+		WHERE card = ? AND proposal IS NULL ORDER BY number DESC`, card)
 	if err != nil {
 		return "", err
 	}

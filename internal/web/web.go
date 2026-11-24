@@ -219,6 +219,7 @@ func Handler(s *store.Store, info Info, act *Activity, addr string) (http.Handle
 	mux.HandleFunc("POST /api/cards", h.create)
 	mux.HandleFunc("POST /api/cards/{id}/decide", h.decide)
 	mux.HandleFunc("POST /api/instance/decide", h.decideInstance)
+	mux.HandleFunc("POST /api/proposals/{id}/decide", h.decideProposal)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hosts[r.Host] {
 			fail(w, http.StatusForbidden, "the request's Host is not the core's address")
@@ -304,16 +305,50 @@ type (
 		// update, and null while it is on (ADR 0019, rule 3).
 		MergingOff *mergingJSON `json:"merging_off"`
 		Cards      []tileJSON   `json:"cards"`
+		// Proposals are the open proposals, oldest first, apart from the
+		// cards: they raise no count of "needs you" (ADR 0033, rule 3).
+		Proposals []proposalJSON `json:"proposals"`
 		// Measures are the board's measures over the whole history.
 		Measures measuresJSON `json:"measures"`
 	}
 	// measuresJSON: PerMerged is null with no merged card.
 	measuresJSON struct {
-		Merged        int      `json:"merged"`
-		Interventions int      `json:"interventions"`
-		PerMerged     *float64 `json:"per_merged"`
-		Dropped       int      `json:"dropped"`
-		Text          string   `json:"text"`
+		Merged        int                `json:"merged"`
+		Interventions int                `json:"interventions"`
+		PerMerged     *float64           `json:"per_merged"`
+		Dropped       int                `json:"dropped"`
+		Proposals     proposalCountsJSON `json:"proposals"`
+		Text          string             `json:"text"`
+	}
+	// proposalCountsJSON are the proposals made by reviews, accepted as
+	// cards and dismissed, over the whole history (ADR 0033, rule 4).
+	proposalCountsJSON struct {
+		Made      int `json:"made"`
+		Accepted  int `json:"accepted"`
+		Dismissed int `json:"dismissed"`
+	}
+	// proposalJSON is a proposal: the card it was noticed on and that
+	// card's headline, the review run that wrote it, its title and its
+	// headline, "" for none, its text, and its state, "open", "made" or
+	// "dismissed", with the card made from it, 0 until then, and the note
+	// it was dismissed with.
+	proposalJSON struct {
+		ID           int64  `json:"id"`
+		Card         int64  `json:"card"`
+		CardHeadline string `json:"card_headline"`
+		Run          string `json:"run"`
+		Title        string `json:"title"`
+		Headline     string `json:"headline"`
+		Text         string `json:"text"`
+		State        string `json:"state"`
+		Made         int64  `json:"made"`
+		Note         string `json:"note"`
+	}
+	// originJSON is the proposal a card was made from.
+	originJSON struct {
+		ID   int64  `json:"id"`
+		Card int64  `json:"card"`
+		Run  string `json:"run"`
 	}
 	mergingJSON struct {
 		// Reason names the failed update, why it failed, and the version
@@ -391,7 +426,10 @@ type (
 		// has one (card 19).
 		PullRequest *pullJSON `json:"pull_request"`
 		Publishing  bool      `json:"publishing"`
-		Now         time.Time `json:"now"`
+		// FromProposal is the proposal the card was made from, null when
+		// it was not.
+		FromProposal *originJSON `json:"from_proposal"`
+		Now          time.Time   `json:"now"`
 	}
 	pullJSON struct {
 		Address string `json:"address"`
@@ -431,6 +469,9 @@ type (
 		Reason   string         `json:"reason"`
 		Note     string         `json:"note"`
 		Dropped  bool           `json:"dropped"`
+		// Proposal is the proposal the entry is about, 0 on every other
+		// entry: such an entry changes no card.
+		Proposal int64 `json:"proposal"`
 		// Did is what a run's entry did, when the rule's entry follows it in the
 		// same step: "failed", "passed", "sent back" or "finished". Empty on
 		// every other entry.
@@ -580,15 +621,31 @@ func tile(s store.Summary) tileJSON {
 }
 
 // measures is the board's strip: the figures and the line that tells them.
-func measures(m store.Measures) measuresJSON {
-	out := measuresJSON{Merged: m.Merged, Interventions: m.Interventions, Dropped: m.Dropped}
+func measures(m store.Measures, p store.ProposalCounts) measuresJSON {
+	out := measuresJSON{Merged: m.Merged, Interventions: m.Interventions, Dropped: m.Dropped,
+		Proposals: proposalCountsJSON{Made: p.Made, Accepted: p.Accepted, Dismissed: p.Dismissed}}
 	per := "–"
 	if m.Merged > 0 {
 		v := float64(m.Interventions) / float64(m.Merged)
 		out.PerMerged = &v
 		per = figure(v)
 	}
-	out.Text = fmt.Sprintf("%d merged · interventions per merged card: %s · %d dropped", m.Merged, per, m.Dropped)
+	out.Text = fmt.Sprintf("%d merged · interventions per merged card: %s · %d dropped · proposals: %d made, %d accepted, %d dismissed",
+		m.Merged, per, m.Dropped, p.Made, p.Accepted, p.Dismissed)
+	return out
+}
+
+// proposal is a proposal's JSON, with the headline of the card it was
+// noticed on.
+func proposal(p store.Proposal, cardHeadline string) proposalJSON {
+	out := proposalJSON{ID: p.ID, Card: p.Card, CardHeadline: cardHeadline, Run: p.Run, Title: p.Title, Headline: headline(p.Title),
+		Text: p.Text, State: "open", Made: p.Made, Note: p.Note}
+	switch {
+	case p.Made != 0:
+		out.State = "made"
+	case p.Dismissed:
+		out.State = "dismissed"
+	}
 	return out
 }
 
@@ -613,12 +670,23 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Version: h.info.Version, Repo: h.info.Repo, Models: h.models(), Runs: h.info.Runs, Now: time.Now().UTC(),
-		Paused: paused, MergingOff: merging, Cards: []tileJSON{}}
-	for _, c := range cards {
-		b.Cards = append(b.Cards, tile(c))
+	open, counts, err := h.store.OpenProposals()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-	b.Measures = measures(store.MeasuresOf(cards))
+	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Version: h.info.Version, Repo: h.info.Repo, Models: h.models(), Runs: h.info.Runs, Now: time.Now().UTC(),
+		Paused: paused, MergingOff: merging, Cards: []tileJSON{}, Proposals: []proposalJSON{}}
+	headlines := map[int64]string{}
+	for _, c := range cards {
+		t := tile(c)
+		b.Cards = append(b.Cards, t)
+		headlines[c.ID] = t.Headline
+	}
+	for _, p := range open {
+		b.Proposals = append(b.Proposals, proposal(p, headlines[p.Card]))
+	}
+	b.Measures = measures(store.MeasuresOf(cards), counts)
 	reply(w, http.StatusOK, b)
 }
 
@@ -719,8 +787,16 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	// The pull request shows while the card is at the Git host, and on a card
 	// the Git host merged.
 	atHost := c.State == store.State{Stage: store.Review, WaitsFor: store.Host}
-	if len(history) > 0 {
-		last := history[len(history)-1]
+	// The card's last entry, past those about a proposal, which change no
+	// card.
+	var changes []store.Entry
+	for _, e := range history {
+		if e.Proposal == 0 {
+			changes = append(changes, e)
+		}
+	}
+	if len(changes) > 0 {
+		last := changes[len(changes)-1]
 		sum.Reason, sum.Dropped = last.Reason, store.Dropped(last.State, last.Cause, last.Reason)
 		sum.Merged = store.Merged(last.State, last.Cause, last.Reason)
 		// The note that the run the card waits for is told, as the tick
@@ -736,7 +812,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	for i, e := range history {
 		out.History = append(out.History, entryJSON{Number: e.Number, At: e.At, Cause: e.Cause, Stage: e.Stage,
 			WaitsFor: e.WaitsFor, Run: e.Run, Reason: e.Reason, Note: e.Note(),
-			Dropped: store.Dropped(e.State, e.Cause, e.Reason), Did: did(history, i, endings)})
+			Dropped: store.Dropped(e.State, e.Cause, e.Reason), Proposal: e.Proposal, Did: did(history, i, endings)})
 	}
 	for _, r := range runs {
 		out.Runs = append(out.Runs, runJSON{ID: r.ID, Commit: r.Commit, Model: r.Model, Effort: r.Effort,
@@ -756,6 +832,13 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 			seen[d.Kind] = true
 			sum.Kinds = append(sum.Kinds, d.Kind)
 		}
+	}
+	from, err := h.store.ProposalOf(c.ID)
+	if err != nil {
+		return cardJSON{}, err
+	}
+	if from != nil {
+		out.FromProposal = &originJSON{ID: from.ID, Card: from.Card, Run: from.Run}
 	}
 	sum.Cost = store.CostOf(runs)
 	sum.Interventions = store.Interventions(history)
@@ -873,6 +956,92 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 	}
 	out.Change = h.change(r.Context(), c.ID)
 	reply(w, http.StatusOK, out)
+}
+
+// The developer's moves on a proposal (ADR 0033).
+const (
+	makeCard = "make-card"
+	dismiss  = "dismiss"
+)
+
+// decideProposal makes a move of the developer's on a proposal: make a card
+// from it, which answers 201 with the proposal and the card, or dismiss it,
+// with a note that may be left out. A proposal acted on already is refused
+// with 409, the sentence and the proposal.
+func (h *handler) decideProposal(w http.ResponseWriter, r *http.Request) {
+	id := cardID(r)
+	if id == 0 {
+		fail(w, http.StatusNotFound, fmt.Sprintf("no proposal %s", r.PathValue("id")))
+		return
+	}
+	var body struct {
+		Action string  `json:"action"`
+		Note   *string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+		!(body.Action == makeCard && body.Note == nil || body.Action == dismiss) {
+		fail(w, http.StatusBadRequest, `the body must be {"action": "make-card"} or {"action": "dismiss", "note": …}, the note optional`)
+		return
+	}
+	var c store.Card
+	var p store.Proposal
+	var err error
+	if body.Action == makeCard {
+		c, p, err = h.store.MakeCard(id)
+	} else {
+		var note string
+		if body.Note != nil {
+			note = *body.Note
+		}
+		p, err = h.store.Dismiss(id, note)
+	}
+	switch {
+	case errors.Is(err, store.ErrNoProposal):
+		fail(w, http.StatusNotFound, fmt.Sprintf("no proposal %d", id))
+		return
+	case errors.Is(err, store.ErrNote):
+		fail(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), store.ErrNote.Error()+": "))
+		return
+	case errors.Is(err, store.ErrRefused):
+		out, perr := h.proposalJSON(p)
+		if perr != nil {
+			fail(w, http.StatusInternalServerError, perr.Error())
+			return
+		}
+		// The sentence of the proposal, such as "proposal 7 was dismissed
+		// already", without the words of the table of a card's moves.
+		msg := strings.TrimPrefix(err.Error(), store.ErrRefused.Error()+": ")
+		reply(w, http.StatusConflict, map[string]any{"error": run.Printable(msg), "proposal": out})
+		return
+	case err != nil:
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out, err := h.proposalJSON(p)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if body.Action == dismiss {
+		reply(w, http.StatusOK, map[string]any{"proposal": out})
+		return
+	}
+	card, err := h.cardJSON(c)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	reply(w, http.StatusCreated, map[string]any{"proposal": out, "card": card})
+}
+
+// proposalJSON is a proposal's JSON, with the headline of the card it was
+// noticed on read from the store.
+func (h *handler) proposalJSON(p store.Proposal) (proposalJSON, error) {
+	c, err := h.store.Card(p.Card)
+	if err != nil {
+		return proposalJSON{}, err
+	}
+	return proposal(p, headline(title(c.Text))), nil
 }
 
 // mergingOn is the developer's move that turns automatic merging on again.
