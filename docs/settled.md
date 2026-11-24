@@ -12,6 +12,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 
 - Checks now run on the Git host's own runners, not on a runner on the developer's machine (ADR 0049).
 - The developer's approval of a protected path is given on the Git host. It is an intervention (ADR 0042), which the core records when it sees the approval there.
+- The board's count of interventions leaves out the developer's approval of a protected path on the Git host until the core sees it, and the strip's title says so (2026-11-24).
 - Kiln's review instructions, with all its stage instructions, are a protected place in Kiln's repo (ADR 0056).
 
 ## ADR 0008: One planned intervention per card: approval before any code is written
@@ -122,6 +123,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The first screen shows everything that waits for the developer: specs to approve, drops to confirm, and cards in the state "needs you". The term itself keeps its narrower meaning from CONTEXT.md, a card that has stopped outside the planned approval.
 - The strip shows of each card its headline: the first sentence of its first line, cut to at most 90 characters with an ellipsis, on one line. The board's JSON carries it as `headline`, beside `title`. The tiles, the card's page and the drop dialog keep the whole first line (2026-11-20).
 - The board shows each card's cost on its tile, the total with the stages in the tile's title, and the card's page shows it with the stages on one line. The figure is Claude Code's estimate, summed from what each ended run of the card added, in dollars with two decimals. `+?` follows a part that has a run of unknown cost, and `?` stands for a part with nothing known. A run in flight counts nothing yet. The board's JSON carries it as `cost`, with `text` and `label` (2026-11-24).
+- The board shows its measures in one small strip under the strip of what needs you: the cards merged, the interventions per merged card (their total over the merged cards, divided by their number, `–` with none) and the cards dropped, over the whole history. The board's JSON carries them as `measures`, with `merged`, `interventions`, `per_merged` and `dropped`, and the line as `text`. A tile shows its card's interventions when there are any, and the card's page always shows them. The JSON of the board and of the card carries the number as `interventions` (2026-11-24).
 
 ## ADR 0023: Kiln's core is written in Go, its UI in Svelte
 
@@ -269,6 +271,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The note on an approval is state, kept on the approved spec's row, and the core never reads it from the history (rule 3) (2026-11-23).
 - A run's end and the rule's step that follows it are one change: `EndRunByRule` in `internal/store` writes the run's entry, at the state the run's end gives, and after it the rule's entry, of the cause rule and with no run, in the one transaction of `change`. The card's row has the rule's state (2026-11-23).
 - A card's cost is a query over its runs, made when the board or the card is read, not a counter (rule 1) (2026-11-24).
+- A card's interventions are a query over its entries, made when the board or the card is read, not a counter (rule 1). An entry counts when its cause is the developer, except the card's first entry (writing it), an entry from the backlog to spec waiting for a run (starting it), an entry from spec waiting for approval back to spec waiting for a run (a rejected spec, which belongs to the approval, rule 2), and the card's first entry from spec waiting for approval to implement waiting for a run (the planned approval). A move is told from the state of the card's previous entry. The entry of the instance that turns automatic merging on counts on no card (2026-11-24).
 - In a card's history on the screen, a run's entry that the rule's entry follows in the same step, the one transaction of `EndRunByRule`, told by the two entries having the same time, is titled by its stage and what the run did: failed, passed, sent back or finished, never by the state it was written at. The card's JSON carries this as `did` on the entry, empty on every other entry (2026-11-24).
 
 ## ADR 0043: A card stores its stage and what it waits for; a run is in flight or has ended in one of four ways

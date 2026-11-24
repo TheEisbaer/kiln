@@ -304,6 +304,16 @@ type (
 		// update, and null while it is on (ADR 0019, rule 3).
 		MergingOff *mergingJSON `json:"merging_off"`
 		Cards      []tileJSON   `json:"cards"`
+		// Measures are the board's measures over the whole history.
+		Measures measuresJSON `json:"measures"`
+	}
+	// measuresJSON: PerMerged is null with no merged card.
+	measuresJSON struct {
+		Merged        int      `json:"merged"`
+		Interventions int      `json:"interventions"`
+		PerMerged     *float64 `json:"per_merged"`
+		Dropped       int      `json:"dropped"`
+		Text          string   `json:"text"`
 	}
 	mergingJSON struct {
 		// Reason names the failed update, why it failed, and the version
@@ -338,6 +348,8 @@ type (
 		SendBacks int `json:"send_backs"`
 		// Cost is what the card's ended runs cost; null with none.
 		Cost *costJSON `json:"cost"`
+		// Interventions is the card's number of interventions, 0 included.
+		Interventions int `json:"interventions"`
 	}
 	partJSON struct {
 		USD     float64 `json:"usd"`
@@ -544,7 +556,7 @@ func costOf(c *store.CardCost) *costJSON {
 
 func tile(s store.Summary) tileJSON {
 	t := tileJSON{ID: s.ID, Title: title(s.Text), Headline: headline(title(s.Text)), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
-		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds, SendBacks: s.SendBacks, Cost: costOf(s.Cost)}
+		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds, SendBacks: s.SendBacks, Cost: costOf(s.Cost), Interventions: s.Interventions}
 	if t.Documents == nil {
 		t.Documents = []string{}
 	}
@@ -552,6 +564,24 @@ func tile(s store.Summary) tileJSON {
 		t.Run = &flightJSON{ID: r.ID, Model: r.Model, Since: started(r.Started)}
 	}
 	return t
+}
+
+// measures is the board's strip: the figures and the line that tells them.
+func measures(m store.Measures) measuresJSON {
+	out := measuresJSON{Merged: m.Merged, Interventions: m.Interventions, Dropped: m.Dropped}
+	per := "–"
+	if m.Merged > 0 {
+		v := float64(m.Interventions) / float64(m.Merged)
+		out.PerMerged = &v
+		per = figure(v)
+	}
+	out.Text = fmt.Sprintf("%d merged · interventions per merged card: %s · %d dropped", m.Merged, per, m.Dropped)
+	return out
+}
+
+// figure is v rounded to two decimals, without trailing zeros or a dot.
+func figure(v float64) string {
+	return strings.TrimSuffix(strings.TrimRight(strconv.FormatFloat(v, 'f', 2, 64), "0"), ".")
 }
 
 func (h *handler) board(w http.ResponseWriter, r *http.Request) {
@@ -575,6 +605,7 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 	for _, c := range cards {
 		b.Cards = append(b.Cards, tile(c))
 	}
+	b.Measures = measures(store.MeasuresOf(cards))
 	reply(w, http.StatusOK, b)
 }
 
@@ -707,6 +738,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 		}
 	}
 	sum.Cost = store.CostOf(runs)
+	sum.Interventions = store.Interventions(history)
 	out.tileJSON = tile(sum)
 	if sum.InFlight != nil && h.act != nil {
 		for _, a := range h.act.Of(sum.InFlight.ID) {
