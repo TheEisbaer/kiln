@@ -482,26 +482,52 @@ func TestTick(t *testing.T) {
 		<-done
 		must(t, "rm", "--force", "kiln-run-"+c.run)
 
+		// The vanished run fails, and the rule runs it once more.
 		core, done = f.core(t, c, "")
-		f.waitEnded(t, c)
+		first := c.run
+		c.run = c.runOf(2)
+		f.waitAtGate(t, c)
+		must(t, "exec", "kiln-run-"+c.run, "touch", "/tmp/gate")
+		f.waitState(t, c, finished, 2)
 		f.stop(t, core, done)
-		e := f.assertEnded(t, c, store.Failed)
-		if !strings.Contains(e.Reason, "container is gone") {
-			t.Errorf("the reason is %q, want that the container is gone", e.Reason)
+		f.assertRun(t, c, 1, model, "high", c.commit, store.Failed)
+		f.assertRun(t, c, 2, model, "high", c.commit, store.Finished)
+		s := f.open(t, c)
+		h, err := s.History(1)
+		s.Close()
+		if err != nil || len(h) != 5 {
+			t.Fatalf("the history is %+v (%v), want five entries", h, err)
+		}
+		if e := h[2]; e.Run != first || !strings.Contains(e.Reason, "container is gone") {
+			t.Errorf("the first run's entry is %+v, want that the container is gone", e)
+		}
+		if e := h[3]; e.Cause != store.CauseRule || e.State != waiting || e.Reason != store.RetryPrefix+run.ErrGone.Error() {
+			t.Errorf("the rule's entry is %+v", e)
+		}
+		if e := h[4]; e.Run != c.run || e.State != finished {
+			t.Errorf("the retry's entry is %+v", e)
 		}
 	})
 
 	// The stand-in writes its spec before it fails; a failed run's is not read.
+	// It fails on the retry as well, and the card waits for the developer.
 	t.Run("a run that fails", func(t *testing.T) {
 		t.Parallel()
 		c := f.newCase(t, f.standIn)
 		f.card(t, c, "Add a line to NOTES.md. "+failWord)
 		core, done := f.core(t, c, "")
-		f.waitEnded(t, c)
+		f.waitState(t, c, failed, 2)
 		f.stop(t, core, done)
-		e := f.assertEnded(t, c, store.Failed)
-		if !strings.Contains(e.Reason, "exit 1") || !strings.Contains(e.Reason, "no result") {
-			t.Errorf("the reason is %q, want exit 1 and no result", e.Reason)
+		f.assertRun(t, c, 1, model, "high", c.commit, store.Failed)
+		f.assertRun(t, c, 2, model, "high", c.commit, store.Failed)
+		if n := countSpecs(t, c); n != 0 {
+			t.Errorf("%d rows in specs, want none", n)
+		}
+		e := f.lastEntry(t, c)
+		if e.Cause != store.CauseRule || e.State != failed ||
+			!strings.HasPrefix(e.Reason, "the retry failed as well, and the rule runs a failed run once more at most, so it waits for you; the first run: exit 1, no result, ") ||
+			!strings.Contains(e.Reason, "; the retry: exit 1, no result, ") {
+			t.Errorf("the last entry is %+v, want the rule's with both runs' reasons", e)
 		}
 	})
 

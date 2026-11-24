@@ -221,6 +221,34 @@ func TestReadEvents(t *testing.T) {
 			t.Error("a run with a result, the model and exit 0 does not have the exit status 0")
 		}
 	})
+
+	// A run is failed when any one fact of its record is, exit 0 included.
+	t.Run("failed with exit 0", func(t *testing.T) {
+		for _, c := range []struct {
+			name   string
+			oom    bool
+			result *Result
+			reason string
+		}{
+			{"killed for memory", true, &Result{Subtype: "success", NumTurns: 3, TotalCostUSD: 0.25},
+				"exit 0, killed for memory, result success, 3 turns, $0.2500, no change"},
+			{"a result that is an error", false, &Result{Subtype: "success", IsError: true, NumTurns: 3, TotalCostUSD: 0.25},
+				"exit 0, result is_error, 3 turns, $0.2500, no change"},
+			{"no result", false, nil, "exit 0, no result, no change"},
+		} {
+			rec := &record{Inputs: RecordInputs{Model: "claude-haiku-5-5"}, ModelSeen: "claude-haiku-5-5",
+				Ending: Ending{OOMKilled: c.oom}, Result: c.result, Saved: noChange}
+			if rec.status() == 0 {
+				t.Errorf("%s: the run has the exit status 0", c.name)
+			}
+			if got := rec.reason(); got != c.reason {
+				t.Errorf("%s: the reason is %q, want %q", c.name, got, c.reason)
+			}
+			if rec.refused() {
+				t.Errorf("%s: the run is told refused", c.name)
+			}
+		}
+	})
 }
 
 // refusedOutput is the output of a run whose credential the upstream refused,
@@ -258,6 +286,9 @@ func TestRefused(t *testing.T) {
 	if got, want := rec.reason(), "the upstream refused the Claude credential (401), 23 turns, $1.5000, not saved"; got != want {
 		t.Errorf("the reason is %q, want %q", got, want)
 	}
+	if !rec.refused() {
+		t.Error("a run that the 401 ended is not told refused")
+	}
 	// Following without refused set, as `kiln run` by hand does.
 	f.refused = nil
 	if _, err := readEvents(strings.NewReader(refusedOutput), f.see); err != nil {
@@ -265,8 +296,11 @@ func TestRefused(t *testing.T) {
 	}
 	// Another error of the API keeps the reason as it was.
 	rec.Result.APIErrorStatus = 500
-	if got, want := rec.reason(), "exit 1, result success, 23 turns, $1.5000, not saved"; got != want {
+	if got, want := rec.reason(), "exit 1, result is_error, 23 turns, $1.5000, not saved"; got != want {
 		t.Errorf("with a 500 the reason is %q, want %q", got, want)
+	}
+	if rec.refused() {
+		t.Error("a run that a 500 ended is told refused")
 	}
 }
 

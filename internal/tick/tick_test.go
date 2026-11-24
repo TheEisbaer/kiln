@@ -56,6 +56,9 @@ type child struct {
 	// Reviews starts core on the fake engine, with every run's exit open,
 	// and these first lines of the reviews of each card.
 	Reviews map[int64][]string
+	// Outcomes starts core on the fake engine, with every run's exit open,
+	// and these outcomes of the runs of each card (fakeEngine.outcomes).
+	Outcomes map[int64][]string
 }
 
 // noEngine is an engine with no runs, which starts none. Its Build is
@@ -360,10 +363,14 @@ func asKiln(spec string) int {
 		if c.NoEngine {
 			eng = noEngine{builds: c.Builds, images: c.Images}
 		}
-		if c.Reviews != nil {
+		if c.Reviews != nil || c.Outcomes != nil {
 			e := newFakeEngine()
 			for card, lines := range c.Reviews {
 				e.reviews[card] = lines
+				e.open(card, "exit")
+			}
+			for card, outcomes := range c.Outcomes {
+				e.outcomes[card] = outcomes
 				e.open(card, "exit")
 			}
 			eng = e

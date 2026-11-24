@@ -888,22 +888,112 @@ func (s *Store) EndRunByRule(id string, ending Ending, reason string, to State, 
 	return s.change(e)
 }
 
+// The reasons of the rule's entry after a failed run (ADR 0016). Each is the
+// card's last entry, with the cause rule, no run and the card waiting for a
+// run, until that run ends: nothing writes an entry for a card whose run is in
+// flight.
+const (
+	// RetryPrefix begins the reason of the rule's entry that runs a failed
+	// run once more, followed by the failed run's reason.
+	RetryPrefix = "the run failed, and the rule runs it once more; "
+	// RefusedReason is the reason of the rule's entry after a first run that
+	// the upstream refused the credential to: it uses up no retry.
+	RefusedReason = "the upstream refused the Claude credential; the run starts again by the rule once the credential works, and uses up no retry"
+	// RefusedRetryPrefix begins the reason of the rule's entry after a retry
+	// that the upstream refused the credential to, followed by the first
+	// run's reason: the next run is the retry still.
+	RefusedRetryPrefix = "the upstream refused the Claude credential on the retry; the retry starts again by the rule once the credential works; the first run: "
+)
+
+// lastEntry reads a card's last entry, with sql.ErrNoRows for a card that has
+// none.
+func lastEntry(q querier, card int64) (Entry, error) {
+	e := Entry{Card: card}
+	var run, reason sql.NullString
+	err := q.QueryRow(`SELECT number, cause, stage, waits_for, run, reason FROM entries WHERE card = ? ORDER BY number DESC LIMIT 1`, card).
+		Scan(&e.Number, &e.Cause, &e.Stage, &e.WaitsFor, &run, &reason)
+	e.Run, e.Reason = run.String, reason.String
+	return e, err
+}
+
+// byRuleAfterFailure reports whether an entry is the rule's after a failed or
+// refused run: of the cause rule, with no run, the card waiting for a run.
+func (e Entry) byRuleAfterFailure() bool {
+	return e.Cause == CauseRule && e.Run == "" && e.WaitsFor == Run
+}
+
+// retry tells whether an entry makes the run its card waits for the retry,
+// and gives the first run's reason.
+func (e Entry) retry() (first string, retrying bool) {
+	if !e.byRuleAfterFailure() {
+		return "", false
+	}
+	for _, prefix := range []string{RetryPrefix, RefusedRetryPrefix} {
+		if rest, ok := strings.CutPrefix(e.Reason, prefix); ok {
+			return rest, true
+		}
+	}
+	return "", false
+}
+
+// Retrying tells whether the run a card waits for is the retry of a failed
+// run, from the card's last entry alone (ADR 0016, ADR 0054): one of the rule,
+// with no run, the card waiting for a run, whose reason begins with
+// RetryPrefix or RefusedRetryPrefix. first is the first run's reason, which
+// follows those words. Any later entry of the card, such as a move of the
+// developer's, ends the retry.
+func (s *Store) Retrying(card int64) (first string, retrying bool, err error) {
+	e, err := lastEntry(s.db, card)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, fmt.Errorf("%w %d", ErrNoCard, card)
+	}
+	if err != nil {
+		return "", false, err
+	}
+	first, retrying = e.retry()
+	return first, retrying, nil
+}
+
 // Note reads the developer's note that a card's next run is told: the note on
 // the entry that made the card wait for a run, when that entry is the
-// developer's; "" otherwise.
+// developer's; "" otherwise. The rule's entries after a failed or a refused
+// run are passed over, each with the run's entry just before it, so that a
+// retry and a run after a refusal are told what the first run was told.
 func (s *Store) Note(card int64) (string, error) {
-	var e Entry
-	var reason sql.NullString
-	err := s.db.QueryRow(`SELECT cause, stage, waits_for, reason FROM entries WHERE card = ? ORDER BY number DESC LIMIT 1`, card).
-		Scan(&e.Cause, &e.Stage, &e.WaitsFor, &reason)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("%w %d", ErrNoCard, card)
-	}
-	if err != nil || e.WaitsFor != Run {
+	rows, err := s.db.Query(`SELECT cause, stage, waits_for, run, reason FROM entries WHERE card = ? ORDER BY number DESC`, card)
+	if err != nil {
 		return "", err
 	}
-	e.Reason = reason.String
-	return e.Note(), nil
+	defer rows.Close()
+	skip, seen := false, false
+	for rows.Next() {
+		seen = true
+		var e Entry
+		var run, reason sql.NullString
+		if err := rows.Scan(&e.Cause, &e.Stage, &e.WaitsFor, &run, &reason); err != nil {
+			return "", err
+		}
+		e.Run, e.Reason = run.String, reason.String
+		if skip {
+			skip = false // the failed run's own entry
+			continue
+		}
+		if _, retrying := e.retry(); retrying || (e.byRuleAfterFailure() && e.Reason == RefusedReason) {
+			skip = true
+			continue
+		}
+		if e.WaitsFor != Run {
+			return "", nil
+		}
+		return e.Note(), nil
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if !seen {
+		return "", fmt.Errorf("%w %d", ErrNoCard, card)
+	}
+	return "", nil
 }
 
 // Spec reads the newest spec of a card, the one written last, with its run's

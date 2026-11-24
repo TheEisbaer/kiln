@@ -95,12 +95,14 @@ func (in RecordInputs) matches(r *run) error {
 }
 
 // status is the command's exit status for a recorded run: 0 only when the
-// container exited with 0, the result is success, and the model matched. The
-// work is saved, or nothing changed, or the save was skipped, or there would be
-// no record.
+// container exited with 0, it was not killed for memory, the result is success
+// and not an error, and the model matched. The work is saved, or nothing
+// changed, or the save was skipped, or there would be no record. A missing
+// result is failed, and so is a kill for memory whatever the exit code: the
+// engine may kill a process of the run's and not Claude Code itself.
 func (rec *record) status() int {
-	if rec.Ending.ExitCode == 0 && rec.Result != nil && rec.Result.Subtype == "success" &&
-		rec.ModelSeen == rec.Inputs.Model && rec.Saved != "" {
+	if rec.Ending.ExitCode == 0 && !rec.Ending.OOMKilled && rec.Result != nil && rec.Result.Subtype == "success" &&
+		!rec.Result.IsError && rec.ModelSeen == rec.Inputs.Model && rec.Saved != "" {
 		return 0
 	}
 	return exitFailed
@@ -131,7 +133,8 @@ func ReadCost(runs, id string) (cost *float64, session string, err error) {
 }
 
 // reason is the verdict's line: the container's ending, the result's subtype,
-// turns and cost, and the saved commit, "no change" or "not saved". A run that
+// or is_error for a result that is an error with the subtype success, turns
+// and cost, and the saved commit, "no change" or "not saved". A run that
 // ended because the upstream refused the credential says so in words in place
 // of the ending and the subtype.
 func (rec *record) reason() string {
@@ -141,11 +144,15 @@ func (rec *record) reason() string {
 	}
 	result := "no result"
 	switch {
-	case rec.Result != nil && rec.Result.APIErrorStatus == refusedStatus:
+	case rec.refused():
 		ending = "the upstream refused the Claude credential (401)"
 		result = fmt.Sprintf("%d turns, $%.4f", rec.Result.NumTurns, rec.Result.TotalCostUSD)
 	case rec.Result != nil:
-		result = fmt.Sprintf("result %s, %d turns, $%.4f", printable(rec.Result.Subtype), rec.Result.NumTurns, rec.Result.TotalCostUSD)
+		subtype := printable(rec.Result.Subtype)
+		if rec.Result.IsError && rec.Result.Subtype == "success" {
+			subtype = "is_error"
+		}
+		result = fmt.Sprintf("result %s, %d turns, $%.4f", subtype, rec.Result.NumTurns, rec.Result.TotalCostUSD)
 	}
 	saved := rec.Saved
 	if saved != noChange && saved != notSaved {
@@ -233,4 +240,11 @@ func syncDir(dir string) error {
 		return err
 	}
 	return errors.Join(d.Sync(), d.Close())
+}
+
+// refused reports whether the run ended because the upstream refused the
+// credential: its result carries the status 401. A run killed before it had a
+// result is not told apart.
+func (rec *record) refused() bool {
+	return rec.Result != nil && rec.Result.APIErrorStatus == refusedStatus
 }
