@@ -117,6 +117,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 
 - The first screen shows everything that waits for the developer: specs to approve, drops to confirm, and cards in the state "needs you". The term itself keeps its narrower meaning from CONTEXT.md, a card that has stopped outside the planned approval.
 - The strip shows of each card its headline: the first sentence of its first line, cut to at most 90 characters with an ellipsis, on one line. The board's JSON carries it as `headline`, beside `title`. The tiles, the card's page and the drop dialog keep the whole first line (2026-11-20).
+- The board shows each card's cost on its tile, the total with the stages in the tile's title, and the card's page shows it with the stages on one line. The figure is Claude Code's estimate, summed from what each ended run of the card added, in dollars with two decimals. `+?` follows a part that has a run of unknown cost, and `?` stands for a part with nothing known. A run in flight counts nothing yet. The board's JSON carries it as `cost`, with `text` and `label` (2026-11-24).
 
 ## ADR 0023: Kiln's core is written in Go, its UI in Svelte
 
@@ -137,6 +138,11 @@ A line says what was settled and ends with the date in brackets, for example (20
 - Kiln cannot act as an app on a personal repo on this Git host, so the fallback this decision names was taken: a public repo on github.com under the developer's personal account, with checks on the Git host's own runners (ADR 0049). GitHub as the first Git host, Kiln building no checker, and Kiln acting under its own identity all stand.
 - Of this decision's cost rules, two stand: Kiln's repo causes no billable usage, and there are no hosted background jobs. The rules about the developer's own runner and its caches ended with that runner (ADR 0049). What may be stored on the Git host, and how CPU time per check run is recorded there (ADR 0031), is settled by the card that needs it.
 - What may be stored on the Git host: Actions caches of Kiln's repo, within the default limit of 10 GB, which costs nothing. The limit is not raised, and over it the Git host evicts the entries accessed longest ago. Only the workflow `cache`, on a push to `main`, saves; it runs none of the repo's code but the protected script, workflows and Dockerfile, and compiles the rest without running it. The check on pull requests restores and has a read-only cache token (`cache-mode: read`) (2026-11-20).
+
+## ADR 0029: Every run has three ceilings, and a run that hits one is not retried
+
+- Each run's cost is kept in the store in the transaction that ends it: the result's `total_cost_usd` and `session_id`, in the columns `cost` and `session` of `runs`. A run with no result, and an `error_during_execution` result with a cost of 0, which Claude Code may zero after a crash, have no cost. Such a cost is shown as unknown, never as 0 (2026-11-24).
+- `--max-budget-usd` counts only a run's own spend, not the totals a resumed session restores (Claude Code's documentation and a try with 2.1.326, both 2026-11-24), so the budget ceiling needs no allowance for a resumed run (2026-11-24).
 
 ## ADR 0030: Opus for spec and review, a model proposed per card for implement, Fable only as an advisor
 
@@ -160,6 +166,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The schema is version 5, after card 13's version 4 with the time a run started: `specs` holds every run's document, one row per run, with a column `kind`, `spec`, `report` or `review`; the rows that were there are specs (card 14, 2026-11-19).
 - The schema is version 7: `specs` is keyed by a document's run and kind, since an implement run keeps two, its report and the pull request's text, and the rows keep their order; `publishes` holds a card's publication, one row per card the developer has published: the commit of the branch whose workflow files the developer said yes to, once published the commit and the pull request's address, and the branch on the Git host, kept from the first publishing (card 19, 2026-11-20).
 - The schema is version 8: specs has a column note, the developer's note on approving that spec, NULL on every other row (2026-11-23).
+- The schema is version 12. `runs` has `stage`, the stage its card waited in for it, filled for the runs that were there from the history; `cost` and `session`, from its result; and `unread`, 1 for an ended run whose `result.json` no core has read yet. `unread` was set for the runs that had ended before the migration (2026-11-24).
 
 ## ADR 0034: Kiln is a core on the developer's machine, a proxy in a container, and one detached container per run
 
@@ -191,6 +198,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - A card that waits for the Git host without a pull request is published by a publisher beside the tick, like a run's follower and counted in no limit, one per card. Its commit is made the same from the same branch and `main`, so a publisher a kill stopped is started again by the next core and publishes the same commit once more; the address is kept, with an entry of the rule, only after the command has printed it. Ctrl-C ends the command with the core. An error of the publishing itself, not of the command, moves the card to review, needing you, with the reason, as a failed command does, so that no card is left without a move and nothing is tried again on every tick. After every fetch a card with a pull request whose published commit, merged into `main`, changes nothing is done, by the Git host, with the reason `merged`; a pull request closed without a merge is not noticed (card 19).
 - Every core starts in one order: store, screen without actions, the comparison, the report, and only then the proxy, the credential and the ticks. A core does not know whether it is on probation (2026-11-23).
 - Under a launcher, `main` is fetched at most once in 30 seconds on every tick, also when no run may start and no card waits for the Git host, so that an update is seen. The tick does not wait for that fetch (2026-11-23).
+- After the store is opened and before the screen, the core reads the cost of every unread run from `<data>/runs/<id>/result.json`, once, in one transaction. A run without a record, or with one that cannot be read, keeps an unknown cost and is read no more. A failure is printed and the core goes on; the runs are read at the next start (2026-11-24).
 
 ## ADR 0036: A small launcher judges every update, and the store is copied before it
 
@@ -222,6 +230,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The change is collected by saving the working tree in a throwaway container from the run image, with no network, the run's user and limits, and no mounts. The engine pipes the tree from the run's container into it, so nothing of it is unpacked on the developer's machine; what comes back is a tree and a pack of its new objects.
 - A stage's documents and the run's sessions are kept as the archives the engine hands over, `documents.tar` and `session.tar` in the run's record, and are never unpacked on the developer's machine.
 - A run's `result.json` holds `hosts`, its list of hosts, empty without one. The record of a run with a list holds `wayout.jsonl`, the way out's line per request: the target, the addresses, whether it was allowed or refused, the reason and the status. A run whose way out was gone when it was collected has none, and its `result.json` says `"wayout": "gone"` (ADR 0059) (card 12, 2026-11-19).
+- A run's `result.json` keeps the result's `session_id` under `result` (2026-11-24).
 
 ## ADR 0039: A run image is a target repo's toolchain image with Kiln's layer on top
 
@@ -253,6 +262,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - A card also carries when it got its state, `since`, written by `change` with the same time as the entry, so that the tick takes the card that has waited longest first without reading the history (rule 3). A store of version 5 takes the time of each card's last entry (card 17, 2026-11-20).
 - The note on an approval is state, kept on the approved spec's row, and the core never reads it from the history (rule 3) (2026-11-23).
 - A run's end and the rule's step that follows it are one change: `EndRunByRule` in `internal/store` writes the run's entry, at the state the run's end gives, and after it the rule's entry, of the cause rule and with no run, in the one transaction of `change`. The card's row has the rule's state (2026-11-23).
+- A card's cost is a query over its runs, made when the board or the card is read, not a counter (rule 1) (2026-11-24).
 
 ## ADR 0043: A card stores its stage and what it waits for; a run is in flight or has ended in one of four ways
 
@@ -311,6 +321,10 @@ A line says what was settled and ends with the date in brackets, for example (20
 - Rule 4 holds with the core in the middle: the developer's own publish command holds the app's key, scans the title and the text, pushes and opens the pull request, and it lives outside the repo. `kiln core --publish-command <command>`, empty by default, is run with `sh -c` in the data directory, with no standard input, for at most five minutes with its process group, and with the core's environment plus `KILN_CARD`, `KILN_REPO`, `KILN_COMMIT`, `KILN_BRANCH`, `KILN_TITLE`, `KILN_TEXT_FILE` and, for a change to the workflow files the developer said yes to, `KILN_WORKFLOW_YES=1`, the same names taken out of what it inherits. Exit status 0 with a last line on standard output that starts with `https://` is published; anything else moves the card to review, needing you, with the exit status and the last 2 KiB of its standard error, made printable. The command may be run again for the same card and commit. No run and no test gets the key or a token (card 19, 2026-11-20).
 - The commit the command publishes is the change put onto `main` as one commit, without a working tree: the merge of the card's branch into `main` as its tree, `main`'s head as its only parent, by Kiln, the pull request's title as its subject and `Kiln-Card: <id>` and `Kiln-Run: <id>` of the save at the branch's tip in its body. It is kept under `refs/kiln/publish/card-<id>`; the card's branch is not moved (card 19).
 - Rule 4 with a core that publishes by itself: the developer's own command still holds the app's key and runs on the developer's machine. The core runs it once a review passes, and the developer's click is needed only for a change to the workflow files (2026-11-23).
+
+## ADR 0053: Each stage starts with a fresh session, and a stage that is sent back resumes its own
+
+- A resumed run's result reports the cost of the whole conversation. Claude Code keeps the session's totals in its record and restores them on a resume or a fork, also in a new home that holds only the record, and across a change of model (tried with 2.1.326 on 2026-11-24). The cost counted for a run is what it added: its reported cost less the reported cost of the card's latest earlier run, of known cost, with the same `session_id`, which a plain `--resume` keeps. A run with no such earlier run counts its whole cost, and a difference below 0 is unknown. A fork gets a new `session_id`, so the card that resumes sessions resumes without `--fork-session` (2026-11-24).
 
 ## ADR 0054: A card carries its number of send-backs and whether its run was retried
 

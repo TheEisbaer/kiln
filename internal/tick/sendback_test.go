@@ -27,7 +27,7 @@ func (p *publishing) approvedCard(t *testing.T, s *store.Store) int64 {
 		t.Fatal(err)
 	}
 	spec := "# Spec\n\nModel for implement: `claude-haiku-5-5`\n\nPull request title: `" + publishTitle + "`\n\n## 1. What\n"
-	if _, err := s.EndRun(id, store.Finished, "staged", finished, &store.Doc{Kind: store.KindSpec, Text: spec}); err != nil {
+	if _, err := s.EndRun(id, store.Finished, "staged", finished, store.Cost{}, &store.Doc{Kind: store.KindSpec, Text: spec}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Decide(c.ID, store.Approve, ""); err != nil {

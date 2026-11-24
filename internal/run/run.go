@@ -235,6 +235,10 @@ type Verdict struct {
 	// Saved is the record's save: the saved commit, "no change" or "not
 	// saved". Changed tells the first from the other two.
 	Saved string
+	// Cost is the result's total_cost_usd and Session its session_id; Cost is
+	// nil when the cost is unknown (see record.cost).
+	Cost    *float64
+	Session string
 }
 
 // Changed reports whether the run's work was saved as a commit.
@@ -300,8 +304,10 @@ func Carry(ctx context.Context, in Inputs, starting func() error, notes io.Write
 	if err != nil {
 		return Verdict{}, err
 	}
+	cost, session := rec.cost()
 	return Verdict{Finished: rec.status() == 0, Reason: rec.reason(),
-		Hosts: rec.Hosts, WayOutGone: rec.WayOut == wayOutGone, Saved: rec.Saved}, nil
+		Hosts: rec.Hosts, WayOutGone: rec.WayOut == wayOutGone, Saved: rec.Saved,
+		Cost: cost, Session: session}, nil
 }
 
 // With stored, the run is known to be in the store once starting has

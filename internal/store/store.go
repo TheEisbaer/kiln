@@ -22,7 +22,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 11
+const version = 12
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -291,6 +291,23 @@ ALTER TABLE instance_entries ADD COLUMN merging_off TEXT;
 ALTER TABLE instance_entries ADD COLUMN failed_update TEXT;`)
 		return err
 	},
+	func(tx *sql.Tx) error {
+		// What a run cost: its stage, the card's stage while it waited for the
+		// run, and the result's cost and session; unread is 1 for an ended
+		// run whose result.json no core has read yet (ADR 0029, ADR 0032).
+		_, err := tx.Exec(`
+ALTER TABLE runs ADD COLUMN stage TEXT;
+ALTER TABLE runs ADD COLUMN cost REAL;
+ALTER TABLE runs ADD COLUMN session TEXT;
+ALTER TABLE runs ADD COLUMN unread INTEGER NOT NULL DEFAULT 0;
+UPDATE runs SET unread = 1 WHERE ending IS NOT NULL;
+UPDATE runs SET stage = (SELECT e.stage FROM entries e WHERE e.card = runs.card AND e.waits_for = 'run'
+	AND e.number < (SELECT min(x.number) FROM entries x WHERE x.run = runs.id)
+	ORDER BY e.number DESC LIMIT 1)
+	WHERE ending IS NOT NULL;
+UPDATE runs SET stage = (SELECT stage FROM cards WHERE cards.id = runs.card) WHERE ending IS NULL;`)
+		return err
+	},
 }
 
 // afterMigration, set only by the test, is called when the store has been moved
@@ -454,6 +471,7 @@ var afterCardWritten func() error
 type runEnd struct {
 	id     string
 	ending Ending
+	cost   Cost
 	docs   []Doc
 }
 
@@ -532,7 +550,12 @@ func (s *Store) change(e edit) (Card, error) {
 	}
 
 	if e.end != nil {
-		if _, err := tx.Exec(`UPDATE runs SET ending = ? WHERE id = ?`, e.end.ending, e.end.id); err != nil {
+		var session any
+		if e.end.cost.Session != "" {
+			session = e.end.cost.Session
+		}
+		if _, err := tx.Exec(`UPDATE runs SET ending = ?, cost = ?, session = ? WHERE id = ?`,
+			e.end.ending, e.end.cost.USD, session, e.end.id); err != nil {
 			return Card{}, err
 		}
 		for _, d := range e.end.docs {
@@ -763,8 +786,8 @@ func (s *Store) AddRun(r RunRow, limit int) error {
 	if n >= limit {
 		return fmt.Errorf("%w: run %s not written: %d runs are in flight, and the limit is %d", ErrLimit, r.ID, n, limit)
 	}
-	if _, err := tx.Exec(`INSERT INTO runs (id, card, commit_id, model, effort, started) VALUES (?, ?, ?, ?, ?, ?)`,
-		r.ID, r.Card, r.Commit, r.Model, r.Effort, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.Exec(`INSERT INTO runs (id, card, commit_id, model, effort, started, stage) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Card, r.Commit, r.Model, r.Effort, time.Now().UTC().Format(time.RFC3339Nano), card.Stage); err != nil {
 		return fmt.Errorf("run %s not written; card %d may have a run in flight already: %w", r.ID, r.Card, err)
 	}
 	return tx.Commit()
@@ -774,14 +797,21 @@ func (s *Store) AddRun(r RunRow, limit int) error {
 // than its limit.
 var ErrLimit = errors.New("the limit of runs in flight is reached")
 
+// Cost is what a run's result reports of its cost: total_cost_usd, nil when
+// it is unknown, and the session it belongs to.
+type Cost struct {
+	USD     *float64
+	Session string
+}
+
 // EndRun ends a run in flight, finished or failed, and moves its card to the
-// state to, in one transaction through change: the run's ending, the card's
+// state to, in one transaction through change: the run's ending, its cost, the card's
 // state, an entry with the cause run, the run's ID and the reason, and the
 // run's documents that are given, nil ones left out, are written together or
 // not at all. A run that has ended already writes nothing, so a repeat after a
 // kill is safe (ADR 0035), and a document is written once. A run writes at
 // most one document of each kind.
-func (s *Store) EndRun(id string, ending Ending, reason string, to State, docs ...*Doc) (Card, error) {
+func (s *Store) EndRun(id string, ending Ending, reason string, to State, cost Cost, docs ...*Doc) (Card, error) {
 	if ending != Finished && ending != Failed {
 		return Card{}, fmt.Errorf("%q is not an ending of a run (ADR 0043)", ending)
 	}
@@ -789,7 +819,7 @@ func (s *Store) EndRun(id string, ending Ending, reason string, to State, docs .
 	if err != nil {
 		return Card{}, err
 	}
-	return s.change(edit{next: fixed(to), cause: CauseRun, reason: reason, end: &runEnd{id, ending, kept}})
+	return s.change(edit{next: fixed(to), cause: CauseRun, reason: reason, end: &runEnd{id, ending, cost, kept}})
 }
 
 // keepDocs checks a run's documents, nil ones left out.
@@ -834,7 +864,7 @@ type Rule struct {
 // implement, waiting for a run, of a card at MaxSendBacks or more is refused
 // with ErrRefused, and so is a send-back that publishes, and nothing is
 // written. A run that has ended already writes nothing.
-func (s *Store) EndRunByRule(id string, ending Ending, reason string, to State, rule Rule, docs ...*Doc) (Card, error) {
+func (s *Store) EndRunByRule(id string, ending Ending, reason string, to State, rule Rule, cost Cost, docs ...*Doc) (Card, error) {
 	if ending != Finished && ending != Failed {
 		return Card{}, fmt.Errorf("%q is not an ending of a run (ADR 0043)", ending)
 	}
@@ -851,7 +881,7 @@ func (s *Store) EndRunByRule(id string, ending Ending, reason string, to State, 
 	if err != nil {
 		return Card{}, err
 	}
-	e := edit{next: fixed(to), cause: CauseRun, reason: reason, end: &runEnd{id, ending, kept}, rule: &rule, sendBack: rule.SendBack}
+	e := edit{next: fixed(to), cause: CauseRun, reason: reason, end: &runEnd{id, ending, cost, kept}, rule: &rule, sendBack: rule.SendBack}
 	if rule.Publish {
 		e.write = func(tx *sql.Tx, card int64) error { return writePublication(tx, card, "") }
 	}

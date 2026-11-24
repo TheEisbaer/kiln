@@ -262,7 +262,7 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .tile .foot { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .tile .foot .badge { flex: none; }
-.round { flex: none; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.round, .cost { flex: none; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .tile .docs { margin-left: auto; min-width: 0; font-size: 11px; color: var(--faint); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .badge {
   display: inline-flex;
@@ -533,6 +533,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
   </div>
   <div class="body" id="p-body">
     <h1 id="p-title"></h1>
+    <div class="cost" id="p-cost"></div>
     <div id="p-reason"></div>
     <div class="moves" id="p-moves"></div>
     <div id="p-note"></div>
@@ -786,6 +787,11 @@ function tileOf(c) {
   if (c.stage !== "done" || c.dropped || c.merged) foot.append(badge(c));
   const round = roundOf(c);
   if (round) foot.append(round);
+  if (c.cost) {
+    const cost = el("span", "cost", c.cost.text);
+    cost.title = c.cost.label;
+    foot.append(cost);
+  }
   if (c.documents.length) foot.append(el("span", "docs", c.documents.join(" · ")));
   t.append(foot);
   t.addEventListener("click", () => openCard(c.id));
@@ -1114,13 +1120,14 @@ function part(name, value, render) {
 
 function renderCard(c) {
   skew = Date.parse(c.now) - Date.now();
-  part("head", [c.id, c.title, c.stage, c.waits_for, !!c.run, c.run && c.run.since, c.send_backs], () => {
+  part("head", [c.id, c.title, c.stage, c.waits_for, !!c.run, c.run && c.run.since, c.send_backs, c.cost && c.cost.label], () => {
     $("p-id").textContent = "#" + c.id;
     const st = $("p-state");
     st.replaceChildren(el("span", "dot " + c.stage), el("span", null, STAGE_NAME[c.stage]), badge(c));
     const round = roundOf(c);
     if (round) st.append(round);
     $("p-title").textContent = c.title || "(no title)";
+    $("p-cost").textContent = c.cost ? c.cost.label : "";
   });
   const last = c.history[c.history.length - 1];
   part("reason", [c.stage, c.waits_for, c.reason, !!c.run, c.dropped, c.note, c.publishing, c.pull_request, c.merged], () => {

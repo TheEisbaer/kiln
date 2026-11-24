@@ -158,7 +158,7 @@ func TestPublishMoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s, theRun(other.ID, "r1"))
-	if _, err := s.EndRun("r1", Finished, "the review sends the change back; exit 0", needsYou, &Doc{KindReview, "Verdict: goes back\n"}); err != nil {
+	if _, err := s.EndRun("r1", Finished, "the review sends the change back; exit 0", needsYou, Cost{}, &Doc{KindReview, "Verdict: goes back\n"}); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := s.DecideWith(other.ID, Publish, "", with); !errors.Is(err, ErrRefused) || got.State != needsYou {
@@ -220,10 +220,10 @@ func TestTwoDocuments(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s, theRun(card.ID, "r1"))
-	if _, err := s.EndRun("r1", Finished, "", State{Review, Run}, &Doc{KindReport, "a"}, &Doc{KindReport, "b"}); err == nil {
+	if _, err := s.EndRun("r1", Finished, "", State{Review, Run}, Cost{}, &Doc{KindReport, "a"}, &Doc{KindReport, "b"}); err == nil {
 		t.Error("two reports of one run were kept")
 	}
-	if _, err := s.EndRun("r1", Finished, "", State{Review, Run}, &Doc{KindReport, "# Report"}, nil, &Doc{KindPullRequest, "The text."}); err != nil {
+	if _, err := s.EndRun("r1", Finished, "", State{Review, Run}, Cost{}, &Doc{KindReport, "# Report"}, nil, &Doc{KindPullRequest, "The text."}); err != nil {
 		t.Fatal(err)
 	}
 	want := []Document{{KindReport, "r1", "# Report", ""}, {KindPullRequest, "r1", "The text.", ""}}
@@ -292,7 +292,7 @@ func TestMigrateV6(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s, theRun(1, "ab12cd34-1-3"))
-	if _, err := s.EndRun("ab12cd34-1-3", Finished, "", State{Review, Run}, &Doc{KindReport, "r"}, &Doc{KindPullRequest, "p"}); err != nil {
+	if _, err := s.EndRun("ab12cd34-1-3", Finished, "", State{Review, Run}, Cost{}, &Doc{KindReport, "r"}, &Doc{KindPullRequest, "p"}); err != nil {
 		t.Fatal(err)
 	}
 	if docs, _ := s.Documents(1); len(docs) != 4 {

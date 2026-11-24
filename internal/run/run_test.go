@@ -643,8 +643,8 @@ func (f *fixture) assertDone(t *testing.T, c testCase) {
 	if _, err := os.Stat(filepath.Join(dir, "wayout.jsonl")); err == nil {
 		t.Error("a run without a list has wayout.jsonl")
 	}
-	if rec.Result == nil || rec.Result.Subtype != "success" || rec.ModelSeen != model || rec.Saved != save ||
-		rec.Ending.ExitCode != 0 || rec.Inputs.Commit != f.commit || rec.Inputs.Effort != effort {
+	if rec.Result == nil || rec.Result.Subtype != "success" || rec.Result.SessionID == "" || rec.Result.TotalCostUSD <= 0 ||
+		rec.ModelSeen != model || rec.Saved != save || rec.Ending.ExitCode != 0 || rec.Inputs.Commit != f.commit || rec.Inputs.Effort != effort {
 		t.Errorf("the record is %+v", rec)
 	}
 

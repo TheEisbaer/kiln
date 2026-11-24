@@ -106,6 +106,30 @@ func (rec *record) status() int {
 	return exitFailed
 }
 
+// cost is the result's total_cost_usd and session_id. It is nil, and the
+// session "", when there is no result, and when the result is an
+// error_during_execution with a cost of 0, which Claude Code may zero after a
+// crash.
+func (rec *record) cost() (*float64, string) {
+	if rec.Result == nil || (rec.Result.Subtype == "error_during_execution" && rec.Result.TotalCostUSD == 0) {
+		return nil, ""
+	}
+	c := rec.Result.TotalCostUSD
+	return &c, rec.Result.SessionID
+}
+
+// ReadCost reads the cost and the session of run id from
+// <runs>/<id>/result.json: nil and "" for a run without a record or without a
+// cost. It writes nothing.
+func ReadCost(runs, id string) (cost *float64, session string, err error) {
+	rec, err := readRecord(runs, id)
+	if err != nil || rec == nil {
+		return nil, "", err
+	}
+	cost, session = rec.cost()
+	return cost, session, nil
+}
+
 // reason is the verdict's line: the container's ending, the result's subtype,
 // turns and cost, and the saved commit, "no change" or "not saved". A run that
 // ended because the upstream refused the credential says so in words in place

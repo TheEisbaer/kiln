@@ -123,7 +123,7 @@ func TestBoard(t *testing.T) {
 	if err := f.store.AddRun(store.RunRow{ID: "r1", Card: spec, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.store.EndRun("r1", store.Finished, "exit 0, not saved", store.State{Stage: store.Spec, WaitsFor: store.Approval}, ptr("# Spec")); err != nil {
+	if _, err := f.store.EndRun("r1", store.Finished, "exit 0, not saved", store.State{Stage: store.Spec, WaitsFor: store.Approval}, store.Cost{}, ptr("# Spec")); err != nil {
 		t.Fatal(err)
 	}
 	running := f.card(t, "Runs", store.State{Stage: store.Spec, WaitsFor: store.Run})
@@ -164,7 +164,7 @@ func TestSendBacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	rule := store.Rule{To: store.State{Stage: store.Implement, WaitsFor: store.Run}, Reason: "sent back by the rule", SendBack: true}
-	if _, err := f.store.EndRunByRule("r1", store.Finished, "goes back", store.State{Stage: store.Review, WaitsFor: store.Developer}, rule,
+	if _, err := f.store.EndRunByRule("r1", store.Finished, "goes back", store.State{Stage: store.Review, WaitsFor: store.Developer}, rule, store.Cost{},
 		&store.Doc{Kind: store.KindReview, Text: "Verdict: goes back\n"}); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestCard(t *testing.T) {
 	if err := f.store.AddRun(store.RunRow{ID: "r1", Card: id, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.store.EndRun("r1", store.Finished, "exit 0", store.State{Stage: store.Spec, WaitsFor: store.Approval}, ptr(doc)); err != nil {
+	if _, err := f.store.EndRun("r1", store.Finished, "exit 0", store.State{Stage: store.Spec, WaitsFor: store.Approval}, store.Cost{}, ptr(doc)); err != nil {
 		t.Fatal(err)
 	}
 
