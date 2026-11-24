@@ -363,6 +363,7 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 		}
 		fmt.Fprintln(out, "kiln core: automatic merging is off until you turn it on from the screen")
 	}
+	fillCosts(s, filepath.Join(cfg.Data, "runs"), out)
 	instance, err := s.Instance()
 	if err != nil {
 		return err
@@ -990,10 +991,11 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 	}
 
 	f.mark("before-end")
+	cost := store.Cost{USD: verdict.Cost, Session: verdict.Session}
 	if rule != nil {
-		_, err = c.store.EndRunByRule(row.ID, d.ending, d.reason, d.to, *rule, d.doc, kept)
+		_, err = c.store.EndRunByRule(row.ID, d.ending, d.reason, d.to, *rule, cost, d.doc, kept)
 	} else {
-		_, err = c.store.EndRun(row.ID, d.ending, d.reason, d.to, d.doc, kept)
+		_, err = c.store.EndRun(row.ID, d.ending, d.reason, d.to, cost, d.doc, kept)
 	}
 	if err != nil {
 		return err

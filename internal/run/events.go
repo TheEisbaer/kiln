@@ -37,6 +37,7 @@ type event struct {
 	NumTurns       int     `json:"num_turns"`
 	TotalCostUSD   float64 `json:"total_cost_usd"`
 	APIErrorStatus int     `json:"api_error_status"`
+	SessionID      string  `json:"session_id"`
 }
 
 // refusedStatus is the status of an answer that refuses the credential.
@@ -58,6 +59,7 @@ type Result struct {
 	NumTurns       int     `json:"num_turns"`
 	TotalCostUSD   float64 `json:"total_cost_usd"`
 	APIErrorStatus int     `json:"api_error_status,omitempty"`
+	SessionID      string  `json:"session_id,omitempty"`
 }
 
 // summary is what a run's output says: the model system/init names, the last
@@ -114,7 +116,7 @@ func readEventsUpTo(r io.Reader, see func(event), limit int) (summary, error) {
 					s.model = e.Model
 				case e.Type == "result":
 					s.result = &Result{Subtype: e.Subtype, IsError: e.IsError, NumTurns: e.NumTurns, TotalCostUSD: e.TotalCostUSD,
-						APIErrorStatus: e.APIErrorStatus}
+						APIErrorStatus: e.APIErrorStatus, SessionID: e.SessionID}
 				}
 				if see != nil {
 					see(e)

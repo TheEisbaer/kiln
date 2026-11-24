@@ -53,17 +53,25 @@ func (s *Store) Documents(card int64) ([]Document, error) {
 type RunAt struct {
 	RunRow
 	Started time.Time
+	Stage   Stage // the stage its card waited in for it; "" when unknown
+	Cost    Cost
 }
 
-const runAtSelect = `SELECT id, card, commit_id, model, effort, ending, started FROM runs`
+const runAtSelect = `SELECT id, card, commit_id, model, effort, ending, started, stage, cost, session FROM runs`
 
 func scanRunAt(rows *sql.Rows) (RunAt, error) {
 	var r RunAt
-	var ending, started sql.NullString
-	if err := rows.Scan(&r.ID, &r.Card, &r.Commit, &r.Model, &r.Effort, &ending, &started); err != nil {
+	var ending, started, stage, session sql.NullString
+	var cost sql.NullFloat64
+	if err := rows.Scan(&r.ID, &r.Card, &r.Commit, &r.Model, &r.Effort, &ending, &started, &stage, &cost, &session); err != nil {
 		return RunAt{}, err
 	}
 	r.Ending = Ending(ending.String)
+	r.Stage = Stage(stage.String)
+	r.Cost.Session = session.String
+	if cost.Valid {
+		r.Cost.USD = &cost.Float64
+	}
 	if started.Valid {
 		t, err := time.Parse(time.RFC3339Nano, started.String)
 		if err != nil {
@@ -102,6 +110,105 @@ type Summary struct {
 	Merged   bool
 	InFlight *RunAt
 	Kinds    []string
+	Cost     *CardCost // nil when no run of the card has ended
+}
+
+// Part is what some of a card's runs cost.
+type Part struct {
+	USD     float64 // the sum of what its runs of known cost added
+	Runs    int     // its ended runs
+	Unknown int     // of them, those whose cost is unknown
+}
+
+// CardCost is what a card cost, in all and per stage.
+type CardCost struct{ Total, Spec, Implement, Review Part }
+
+// CostOf sums what a card's runs cost, from its runs in the order they were
+// written. A run counts what it added: its reported cost less that of the
+// card's latest earlier run of known cost with the same session, since a
+// resumed run reports the whole conversation (ADR 0053). A difference below 0
+// is unknown. Runs in flight are skipped; it is nil when no run has ended.
+func CostOf(runs []RunAt) *CardCost {
+	var c CardCost
+	last := map[string]float64{} // the latest known reported cost of a session
+	for _, r := range runs {
+		if r.Ending == "" {
+			continue
+		}
+		var counted *float64
+		if r.Cost.USD != nil {
+			v := *r.Cost.USD
+			if r.Cost.Session != "" {
+				if prev, ok := last[r.Cost.Session]; ok {
+					v -= prev
+				}
+				last[r.Cost.Session] = *r.Cost.USD
+			}
+			if v >= 0 {
+				counted = &v
+			}
+		}
+		parts := []*Part{&c.Total}
+		switch r.Stage {
+		case Spec:
+			parts = append(parts, &c.Spec)
+		case Implement:
+			parts = append(parts, &c.Implement)
+		case Review:
+			parts = append(parts, &c.Review)
+		}
+		for _, p := range parts {
+			p.Runs++
+			if counted == nil {
+				p.Unknown++
+			} else {
+				p.USD += *counted
+			}
+		}
+	}
+	if c.Total.Runs == 0 {
+		return nil
+	}
+	return &c
+}
+
+// UnreadCosts lists the IDs of the runs whose result.json no core has read.
+func (s *Store) UnreadCosts() ([]string, error) {
+	rows, err := s.db.Query(`SELECT id FROM runs WHERE unread = 1 ORDER BY rowid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// FillCosts writes the cost of runs that are still unread and marks them
+// read, in one transaction. A run that is no longer unread is left as it is.
+func (s *Store) FillCosts(costs map[string]Cost) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for id, c := range costs {
+		var session any
+		if c.Session != "" {
+			session = c.Session
+		}
+		if _, err := tx.Exec(`UPDATE runs SET cost = ?, session = ?, unread = 0 WHERE id = ? AND unread = 1`,
+			c.USD, session, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // Board reads every card's summary, by ID, in one transaction, so that the
@@ -155,10 +262,11 @@ func (s *Store) Board() ([]Summary, error) {
 		return nil, err
 	}
 
-	rows, err = tx.Query(runAtSelect + ` WHERE ending IS NULL`)
+	rows, err = tx.Query(runAtSelect + ` ORDER BY rowid`)
 	if err != nil {
 		return nil, err
 	}
+	runs := map[int64][]RunAt{}
 	for rows.Next() {
 		r, err := scanRunAt(rows)
 		if err != nil {
@@ -166,11 +274,17 @@ func (s *Store) Board() ([]Summary, error) {
 			return nil, err
 		}
 		if i, ok := at[r.Card]; ok {
-			out[i].InFlight = &r
+			if r.Ending == "" {
+				out[i].InFlight = &r
+			}
+			runs[r.Card] = append(runs[r.Card], r)
 		}
 	}
 	if err := errorsOf(rows); err != nil {
 		return nil, err
+	}
+	for card, rs := range runs {
+		out[at[card]].Cost = CostOf(rs)
 	}
 
 	// Each kind once, in the order of its first document.

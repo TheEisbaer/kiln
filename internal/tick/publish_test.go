@@ -124,7 +124,7 @@ func (p *publishing) stage(t *testing.T, s *store.Store, files map[string]string
 		if err := s.AddRun(store.RunRow{ID: id, Card: c.ID, Commit: p.commit, Model: "m", Effort: "high"}, MaxRuns); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.EndRun(id, store.Finished, "staged", to, docs...); err != nil {
+		if _, err := s.EndRun(id, store.Finished, "staged", to, store.Cost{}, docs...); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -469,7 +469,7 @@ func TestPublishConflict(t *testing.T) {
 	// A kill after the merge and before the card moved leaves the branch at
 	// the merge: the next publishing sends the card back as it is.
 	p.with(t, func(s *store.Store) {
-		if _, err := s.EndRun(run, store.Failed, "stopped by the test", implementNeedsYou); err != nil {
+		if _, err := s.EndRun(run, store.Failed, "stopped by the test", implementNeedsYou, store.Cost{}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.Move(card, atHost, store.CauseDeveloper); err != nil {
@@ -892,7 +892,7 @@ func TestPublishMarkers(t *testing.T) {
 	// The run resolves NOTES.md, its save is kept, and it fails.
 	partial := p.resolve(t, card, map[string]string{"NOTES.md": "# Notes\nA line of other work.\nA line of the card.\n"})
 	p.with(t, func(s *store.Store) {
-		if _, err := s.EndRun(fmt.Sprintf("%s-1-4", p.instance), store.Failed, "exit 1, no result, saved", implementNeedsYou); err != nil {
+		if _, err := s.EndRun(fmt.Sprintf("%s-1-4", p.instance), store.Failed, "exit 1, no result, saved", implementNeedsYou, store.Cost{}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.Decide(card, store.Again, ""); err != nil {
@@ -915,7 +915,7 @@ func TestPublishMarkers(t *testing.T) {
 				t.Errorf("the run %s is %+v (%v), want it on claude-opus-5-5", id, r, err)
 			}
 		}
-		if _, err := s.EndRun(run, store.Finished, "exit 0, result success, 1 turns, $0.0001, no change", reviewPassed); err != nil {
+		if _, err := s.EndRun(run, store.Finished, "exit 0, result success, 1 turns, $0.0001, no change", reviewPassed, store.Cost{}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -964,7 +964,7 @@ func TestPublishBranchKept(t *testing.T) {
 		if err := s.AddRun(store.RunRow{ID: id, Card: card, Commit: p.commit, Model: "m", Effort: "high"}, MaxRuns); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.EndRun(id, store.Finished, "staged", finished, &store.Doc{Kind: store.KindSpec, Text: "# Spec\n\nPull request title: `feat: another name entirely`\n"}); err != nil {
+		if _, err := s.EndRun(id, store.Finished, "staged", finished, store.Cost{}, &store.Doc{Kind: store.KindSpec, Text: "# Spec\n\nPull request title: `feat: another name entirely`\n"}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.Move(card, reviewPassed, store.CauseRun); err != nil {
@@ -1303,7 +1303,7 @@ func TestPublishByRuleAfterConflict(t *testing.T) {
 	waitUntil(t, "the second implement run starts", func() bool { return slices.Contains(e.snapshot().started, card) })
 	core.stop(t)
 	p.with(t, func(s *store.Store) {
-		if _, err := s.EndRun(fmt.Sprintf("%s-1-5", p.instance), store.Finished, "resolved by the test", reviewWaits); err != nil {
+		if _, err := s.EndRun(fmt.Sprintf("%s-1-5", p.instance), store.Finished, "resolved by the test", reviewWaits, store.Cost{}); err != nil {
 			t.Fatal(err)
 		}
 	})

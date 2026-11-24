@@ -381,6 +381,8 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 	return e.verdict(in), nil
 }
 
+func ptr[T any](v T) *T { return &v }
+
 // verdict is how a run of the fake ends: failed for a card the test fails,
 // and finished otherwise, with the web for a spec run and no change for an
 // implement run, or a saved commit for one of a card that saves.
@@ -391,9 +393,11 @@ func (e *fakeEngine) verdict(in run.Inputs) run.Verdict {
 		return run.Verdict{Reason: "exit 1, no result, not saved", Saved: "not saved"}
 	}
 	if !in.SkipSave && e.saves[cardOf(in.ID)] {
-		return run.Verdict{Finished: true, Reason: "exit 0, result success, 1 turns, $0.0001, saved", Saved: "5a7ed" + in.ID}
+		return run.Verdict{Finished: true, Reason: "exit 0, result success, 1 turns, $0.0001, saved", Saved: "5a7ed" + in.ID,
+			Cost: ptr(0.0001), Session: "fake"}
 	}
-	return run.Verdict{Finished: true, Reason: "exit 0, result success, 1 turns, $0.0001, no change", Hosts: in.Hosts, Saved: "no change"}
+	return run.Verdict{Finished: true, Reason: "exit 0, result success, 1 turns, $0.0001, no change", Hosts: in.Hosts, Saved: "no change",
+		Cost: ptr(0.0001), Session: "fake"}
 }
 
 // seen is what the fake has seen so far.
@@ -515,7 +519,7 @@ func (b *bench) card(t *testing.T, s *store.Store, stage store.Stage) int64 {
 		if err := s.AddRun(store.RunRow{ID: id, Card: c.ID, Commit: b.commit, Model: "m", Effort: "high"}, MaxRuns); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.EndRun(id, store.Finished, "staged", to, doc); err != nil {
+		if _, err := s.EndRun(id, store.Finished, "staged", to, store.Cost{}, doc); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -754,6 +758,48 @@ func TestFollowersApart(t *testing.T) {
 		t.Errorf("the runs were carried %v times, and %v had two followers at once", s.carried, s.twice)
 	}
 	b.assertEnded(t, map[int64]store.Ending{ok: store.Finished, fails: store.Failed, errs: store.Finished})
+	// A finished run's cost and session are kept; a failed run, with no
+	// result, has none.
+	b.with(t, func(s *store.Store) {
+		for card, known := range map[int64]bool{ok: true, fails: false} {
+			runs, err := s.Runs(card)
+			if err != nil || len(runs) != 1 {
+				t.Fatalf("card %d has runs %+v (%v)", card, runs, err)
+			}
+			if c := runs[0].Cost; known != (c.USD != nil) || (known && (*c.USD != 0.0001 || c.Session != "fake")) || (!known && c.Session != "") {
+				t.Errorf("card %d: the run's cost is %+v", card, c)
+			}
+		}
+	})
+}
+
+// TestGoneRunCost has a run in flight in the store with no container and no
+// record: the core carries it to its end as gone, and its cost is unknown.
+func TestGoneRunCost(t *testing.T) {
+	b := newBench(t, 1)
+	var card int64
+	b.with(t, func(s *store.Store) {
+		card = b.card(t, s, store.Spec)
+		id := fmt.Sprintf("%s-%d-1", b.instance, card)
+		if err := s.AddRun(store.RunRow{ID: id, Card: card, Commit: b.commit, Model: "m", Effort: "high"}, MaxRuns); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e := newFakeEngine()
+	core := b.start(t, e, 1)
+	b.waitEnded(t, e, card)
+	core.stop(t)
+
+	b.assertEnded(t, map[int64]store.Ending{card: store.Failed})
+	b.with(t, func(s *store.Store) {
+		runs, err := s.Runs(card)
+		if err != nil || len(runs) != 1 {
+			t.Fatalf("card %d has runs %+v (%v)", card, runs, err)
+		}
+		if c := runs[0].Cost; c.USD != nil || c.Session != "" {
+			t.Errorf("the gone run's cost is %+v, want unknown", c)
+		}
+	})
 }
 
 // TestFollowersPickedUp stops a core with three runs in flight, as Ctrl-C

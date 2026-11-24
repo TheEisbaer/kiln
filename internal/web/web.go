@@ -336,6 +336,21 @@ type (
 		// SendBacks is the card's number of send-backs since its spec was
 		// approved (ADR 0054).
 		SendBacks int `json:"send_backs"`
+		// Cost is what the card's ended runs cost; null with none.
+		Cost *costJSON `json:"cost"`
+	}
+	partJSON struct {
+		USD     float64 `json:"usd"`
+		Runs    int     `json:"runs"`
+		Unknown int     `json:"unknown"`
+	}
+	costJSON struct {
+		Total     partJSON `json:"total"`
+		Spec      partJSON `json:"spec"`
+		Implement partJSON `json:"implement"`
+		Review    partJSON `json:"review"`
+		Text      string   `json:"text"`
+		Label     string   `json:"label"`
 	}
 	flightJSON struct {
 		ID    string     `json:"id"`
@@ -483,9 +498,49 @@ func started(t time.Time) *time.Time {
 	return &t
 }
 
+// costText is a part of a card's cost as the tile shows it: dollars with two
+// decimals, "+?" after it when some of its runs have no cost, and "?" when
+// none has.
+func costText(p store.Part) string {
+	switch {
+	case p.Runs > 0 && p.Unknown >= p.Runs:
+		return "?"
+	case p.Unknown > 0:
+		return fmt.Sprintf("$%.2f+?", p.USD)
+	}
+	return fmt.Sprintf("$%.2f", p.USD)
+}
+
+// costLabel says whose figure the cost is, and its stages with runs.
+func costLabel(c store.CardCost) string {
+	var stages []string
+	for _, s := range []struct {
+		name string
+		p    store.Part
+	}{{"spec", c.Spec}, {"implement", c.Implement}, {"review", c.Review}} {
+		if s.p.Runs > 0 {
+			stages = append(stages, s.name+" "+costText(s.p))
+		}
+	}
+	label := "Claude Code's estimate: " + costText(c.Total)
+	if len(stages) > 0 {
+		label += " (" + strings.Join(stages, ", ") + ")"
+	}
+	return label
+}
+
+func costOf(c *store.CardCost) *costJSON {
+	if c == nil {
+		return nil
+	}
+	part := func(p store.Part) partJSON { return partJSON{USD: p.USD, Runs: p.Runs, Unknown: p.Unknown} }
+	return &costJSON{Total: part(c.Total), Spec: part(c.Spec), Implement: part(c.Implement), Review: part(c.Review),
+		Text: costText(c.Total), Label: costLabel(*c)}
+}
+
 func tile(s store.Summary) tileJSON {
 	t := tileJSON{ID: s.ID, Title: title(s.Text), Headline: headline(title(s.Text)), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
-		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds, SendBacks: s.SendBacks}
+		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds, SendBacks: s.SendBacks, Cost: costOf(s.Cost)}
 	if t.Documents == nil {
 		t.Documents = []string{}
 	}
@@ -643,6 +698,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 			sum.Kinds = append(sum.Kinds, d.Kind)
 		}
 	}
+	sum.Cost = store.CostOf(runs)
 	out.tileJSON = tile(sum)
 	if sum.InFlight != nil && h.act != nil {
 		for _, a := range h.act.Of(sum.InFlight.ID) {

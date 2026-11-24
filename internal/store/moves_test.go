@@ -158,7 +158,7 @@ func TestDropInFlight(t *testing.T) {
 		if got, err := s.Decide(card.ID, Drop, "not needed"); !errors.Is(err, ErrRefused) || got.State != from {
 			t.Errorf("drop from %v with a run in flight: %+v, %v", from, got, err)
 		}
-		if _, err := s.EndRun(id, Failed, "exit 1", State{from.Stage, Developer}, nil); err != nil {
+		if _, err := s.EndRun(id, Failed, "exit 1", State{from.Stage, Developer}, Cost{}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := s.Decide(card.ID, Drop, ""); err != nil || got.State != (State{Done, Nothing}) {
@@ -207,7 +207,7 @@ func TestNote(t *testing.T) {
 	note("Name the table.")
 	mustAddRun(t, s, theRun(card.ID, "r1"))
 	note("Name the table.")
-	if _, err := s.EndRun("r1", Finished, "exit 0", State{Spec, Approval}, specDoc("# Spec")); err != nil {
+	if _, err := s.EndRun("r1", Finished, "exit 0", State{Spec, Approval}, Cost{}, specDoc("# Spec")); err != nil {
 		t.Fatal(err)
 	}
 	note("")
@@ -257,7 +257,7 @@ func TestDocuments(t *testing.T) {
 			t.Fatal(err)
 		}
 		mustAddRun(t, s, theRun(card.ID, id))
-		if _, err := s.EndRun(id, Finished, "", State{Spec, Approval}, specDoc(text)); err != nil {
+		if _, err := s.EndRun(id, Finished, "", State{Spec, Approval}, Cost{}, specDoc(text)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -266,11 +266,11 @@ func TestDocuments(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s, theRun(card.ID, "r3"))
-	if _, err := s.EndRun("r3", Finished, "", State{Review, Run}, &Doc{KindReport, "the report"}); err != nil {
+	if _, err := s.EndRun("r3", Finished, "", State{Review, Run}, Cost{}, &Doc{KindReport, "the report"}); err != nil {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s, theRun(card.ID, "r4"))
-	if _, err := s.EndRun("r4", Finished, "", State{Review, Approval}, &Doc{KindReview, "Verdict: passes\n"}); err != nil {
+	if _, err := s.EndRun("r4", Finished, "", State{Review, Approval}, Cost{}, &Doc{KindReview, "Verdict: passes\n"}); err != nil {
 		t.Fatal(err)
 	}
 	want := []Document{{"spec", "r1", "the first <script>", ""}, {"spec", "r2", "the second \x1b[2J", ""},
@@ -297,7 +297,7 @@ func TestBoard(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAddRun(t, s, theRun(ended.ID, "r1"))
-	if _, err := s.EndRun("r1", Failed, "exit 1", State{Spec, Developer}, specDoc("# Spec")); err != nil {
+	if _, err := s.EndRun("r1", Failed, "exit 1", State{Spec, Developer}, Cost{}, specDoc("# Spec")); err != nil {
 		t.Fatal(err)
 	}
 	before := time.Now()
@@ -357,7 +357,7 @@ func TestApproveNote(t *testing.T) {
 			t.Fatal(err)
 		}
 		mustAddRun(t, s, theRun(card.ID, id))
-		if _, err := s.EndRun(id, Finished, "", State{Spec, Approval}, specDoc("spec "+id)); err != nil {
+		if _, err := s.EndRun(id, Finished, "", State{Spec, Approval}, Cost{}, specDoc("spec "+id)); err != nil {
 			t.Fatal(err)
 		}
 		if i == 0 {

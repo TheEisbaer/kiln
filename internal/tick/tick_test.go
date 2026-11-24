@@ -620,7 +620,7 @@ func endRun(t *testing.T, c *core, s store.Stage, to store.State, doc *store.Doc
 	if err := c.store.AddRun(store.RunRow{ID: id, Card: 1, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.store.EndRun(id, store.Finished, "", to, doc); err != nil {
+	if _, err := c.store.EndRun(id, store.Finished, "", to, store.Cost{}, doc); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1419,7 +1419,7 @@ func TestSpecModel(t *testing.T) {
 		if err := c.store.AddRun(store.RunRow{ID: id, Card: 1, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := c.store.EndRunByRule(id, store.Finished, "", reviewNeedsYou, *sentBackRule(0),
+		if _, err := c.store.EndRunByRule(id, store.Finished, "", reviewNeedsYou, *sentBackRule(0), store.Cost{},
 			&store.Doc{Kind: store.KindReview, Text: "Verdict: goes back\n"}); err != nil {
 			t.Fatal(err)
 		}
