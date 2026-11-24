@@ -221,10 +221,13 @@ var ErrInterrupted = errors.New("following ended; the run goes on")
 
 // Verdict is how a recorded run ended.
 type Verdict struct {
-	// Finished is true when the container exited with 0, the result is
-	// success, the model was the one asked for, and the work is saved or
-	// nothing changed.
+	// Finished is true when the container exited with 0, it was not killed
+	// for memory, the result is success and not an error, the model was the
+	// one asked for, and the work is saved or nothing changed.
 	Finished bool
+	// Refused is true when the run ended because the upstream refused the
+	// credential: its result carries api_error_status 401.
+	Refused bool
 	// Reason is one line: the container's ending, the result's subtype,
 	// turns and cost, and the saved commit, "no change" or "not saved".
 	Reason string
@@ -305,7 +308,7 @@ func Carry(ctx context.Context, in Inputs, starting func() error, notes io.Write
 		return Verdict{}, err
 	}
 	cost, session := rec.cost()
-	return Verdict{Finished: rec.status() == 0, Reason: rec.reason(),
+	return Verdict{Finished: rec.status() == 0, Refused: rec.refused(), Reason: rec.reason(),
 		Hosts: rec.Hosts, WayOutGone: rec.WayOut == wayOutGone, Saved: rec.Saved,
 		Cost: cost, Session: session}, nil
 }

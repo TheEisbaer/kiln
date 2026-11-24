@@ -60,6 +60,12 @@ type fakeEngine struct {
 	models     map[string]string    // the model in the inputs of each run's Carry, by the run's ID
 	builds     []seal.Program       // the calls of Build
 	buildFails bool                 // whether a build fails
+	// The outcomes of a card's runs, taken in order, one per run: "fail",
+	// "oom", "refused" or "finish"; then as fail and saves say. outcome is the
+	// outcome each run was given, by the run's ID, the same for every verdict
+	// of one run.
+	outcomes map[int64][]string
+	outcome  map[string]string
 	// The images, and the calls on them, of Build ("program <image>") and of
 	// KeepProxy ("keep <image> <its ID>") in the book's events too, in order.
 	book        imageBook
@@ -137,7 +143,8 @@ func newFakeEngine() *fakeEngine {
 	return &fakeEngine{containers: map[string]string{}, carrying: map[int64]int{}, carried: map[int64]int{},
 		gates: map[string]chan struct{}{}, held: map[string]bool{}, fail: map[int64]bool{}, errOnce: map[int64]bool{},
 		refuse: map[int64]bool{}, imageFails: map[string]bool{}, inputs: map[int64]run.Inputs{}, firstTick: -1,
-		reviews: map[int64][]string{}, reviewed: map[string]string{}, saves: map[int64]bool{}, models: map[string]string{}}
+		reviews: map[int64][]string{}, reviewed: map[string]string{}, saves: map[int64]bool{}, models: map[string]string{},
+		outcomes: map[int64][]string{}, outcome: map[string]string{}}
 }
 
 func (e *fakeEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {
@@ -383,13 +390,32 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 
 func ptr[T any](v T) *T { return &v }
 
-// verdict is how a run of the fake ends: failed for a card the test fails,
-// and finished otherwise, with the web for a spec run and no change for an
-// implement run, or a saved commit for one of a card that saves.
+// verdict is how a run of the fake ends: as its outcome says, if its card has
+// one; failed for a card the test fails; and finished otherwise, with the web
+// for a spec run and no change for an implement run, or a saved commit for one
+// of a card that saves.
 func (e *fakeEngine) verdict(in run.Inputs) run.Verdict {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.fail[cardOf(in.ID)] {
+	outcome, ok := e.outcome[in.ID]
+	if !ok {
+		if next := e.outcomes[cardOf(in.ID)]; len(next) > 0 {
+			outcome, e.outcomes[cardOf(in.ID)] = next[0], next[1:]
+		}
+		e.outcome[in.ID] = outcome
+	}
+	switch outcome {
+	case "fail":
+		return run.Verdict{Reason: "exit 1, no result, not saved", Saved: "not saved"}
+	case "oom":
+		return run.Verdict{Reason: "exit 137, killed for memory, no result, not saved", Saved: "not saved"}
+	case "refused":
+		return run.Verdict{Refused: true, Reason: "the upstream refused the Claude credential (401), 23 turns, $1.5000, not saved", Saved: "not saved"}
+	case "", "finish":
+	default:
+		panic("no outcome " + outcome)
+	}
+	if outcome == "" && e.fail[cardOf(in.ID)] {
 		return run.Verdict{Reason: "exit 1, no result, not saved", Saved: "not saved"}
 	}
 	if !in.SkipSave && e.saves[cardOf(in.ID)] {
@@ -722,9 +748,9 @@ func TestFollowersLimitAndOrder(t *testing.T) {
 	b.assertEnded(t, map[int64]store.Ending{review: store.Finished, implement: store.Finished, spec1: store.Finished, spec2: store.Finished})
 }
 
-// TestFollowersApart has one run that fails, and one whose follower fails
-// after its start; each touches only its card, is printed with the card's ID,
-// and the other followers and the tick go on.
+// TestFollowersApart has one run that fails, and its retry as well, and one
+// whose follower fails after its start; each touches only its card, is printed
+// with the card's ID, and the other followers and the tick go on.
 func TestFollowersApart(t *testing.T) {
 	b := newBench(t, 3)
 	var ok, fails, errs int64
@@ -738,6 +764,7 @@ func TestFollowersApart(t *testing.T) {
 
 	e.waitStarted(t, group(ok, fails, errs))
 	e.open(fails, "exit")
+	waitUntil(t, "the failed run's retry", func() bool { return e.snapshot().carried[fails] == 2 })
 	e.waitGone(t, fails)
 	e.open(errs, "exit")
 	e.waitGone(t, errs)
@@ -751,23 +778,26 @@ func TestFollowersApart(t *testing.T) {
 
 	out := core.out.String()
 	if !strings.Contains(out, fmt.Sprintf("card %d: run %s-%d-1 failed: exit 1", fails, b.instance, fails)) ||
+		!strings.Contains(out, fmt.Sprintf("card %d: run %s-%d-2 failed: exit 1", fails, b.instance, fails)) ||
 		!strings.Contains(out, fmt.Sprintf("kiln core: card %d: the start failed, as the test has it", errs)) {
 		t.Errorf("the core printed\n%s", out)
 	}
-	if s := e.snapshot(); s.carried[errs] != 2 || s.carried[ok] != 1 || len(s.twice) != 0 {
+	if s := e.snapshot(); s.carried[errs] != 2 || s.carried[fails] != 2 || s.carried[ok] != 1 || len(s.twice) != 0 {
 		t.Errorf("the runs were carried %v times, and %v had two followers at once", s.carried, s.twice)
 	}
 	b.assertEnded(t, map[int64]store.Ending{ok: store.Finished, fails: store.Failed, errs: store.Finished})
 	// A finished run's cost and session are kept; a failed run, with no
-	// result, has none.
+	// result, has none, and neither has its retry.
 	b.with(t, func(s *store.Store) {
 		for card, known := range map[int64]bool{ok: true, fails: false} {
 			runs, err := s.Runs(card)
-			if err != nil || len(runs) != 1 {
-				t.Fatalf("card %d has runs %+v (%v)", card, runs, err)
+			if want := map[bool]int{true: 1, false: 2}[known]; err != nil || len(runs) != want {
+				t.Fatalf("card %d has runs %+v (%v), want %d", card, runs, err, want)
 			}
-			if c := runs[0].Cost; known != (c.USD != nil) || (known && (*c.USD != 0.0001 || c.Session != "fake")) || (!known && c.Session != "") {
-				t.Errorf("card %d: the run's cost is %+v", card, c)
+			for _, r := range runs {
+				if c := r.Cost; known != (c.USD != nil) || (known && (*c.USD != 0.0001 || c.Session != "fake")) || (!known && c.Session != "") {
+					t.Errorf("card %d: run %s's cost is %+v", card, r.ID, c)
+				}
 			}
 		}
 	})
@@ -785,15 +815,28 @@ func TestGoneRunCost(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	// The gone run is failed, and its retry fails as well, so the card
+	// stops with two runs.
 	e := newFakeEngine()
+	e.fail[card] = true
+	e.open(card, "exit")
 	core := b.start(t, e, 1)
-	b.waitEnded(t, e, card)
+	waitUntil(t, fmt.Sprintf("card %d to stop after its retry", card), func() bool {
+		s, err := store.Open(filepath.Join(b.cfg.Data, "store.db"))
+		if err != nil {
+			return false
+		}
+		defer s.Close()
+		c, err := s.Card(card)
+		n, _ := s.RunCount(card)
+		return err == nil && c.WaitsFor == store.Developer && n == 2
+	})
 	core.stop(t)
 
 	b.assertEnded(t, map[int64]store.Ending{card: store.Failed})
 	b.with(t, func(s *store.Store) {
 		runs, err := s.Runs(card)
-		if err != nil || len(runs) != 1 {
+		if err != nil || len(runs) != 2 {
 			t.Fatalf("card %d has runs %+v (%v)", card, runs, err)
 		}
 		if c := runs[0].Cost; c.USD != nil || c.Session != "" {

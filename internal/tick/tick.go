@@ -175,7 +175,7 @@ func at(point string) {
 // on to wait for the developer's approval when the run finished with a spec and
 // the web, or for the developer, "needs you", otherwise (see specDestination).
 // After an implement run and a review run the card goes where laterDestination
-// says.
+// says. A failed run's card goes on where failedRule says, from "needs you".
 var (
 	waiting  = store.State{Stage: store.Spec, WaitsFor: store.Run}
 	finished = store.State{Stage: store.Spec, WaitsFor: store.Approval}
@@ -948,7 +948,8 @@ func (c *core) follow(ctx context.Context, f *follower) {
 
 // carry carries a card's run to its end: it follows the run, records its
 // ending with the card's new state and its document in one transaction, and
-// removes what is left of the run.
+// removes what is left of the run. A failed run's entry is followed in the
+// same transaction by the rule's, which runs it once more (failedRule).
 func (c *core) carry(ctx context.Context, f *follower) error {
 	id, row, in := f.card.ID, f.row, f.in
 	// Following gives the run's output from its first event, so its activity
@@ -988,6 +989,13 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 	}
 	if f.card.Stage == store.Review && d.ending == store.Finished && d.doc != nil && verdictLine(d.doc.Text) == goesBack {
 		rule = sentBackRule(f.card.SendBacks)
+	}
+	if d.ending == store.Failed {
+		first, retrying, err := c.store.Retrying(id)
+		if err != nil {
+			return err
+		}
+		rule = failedRule(d.to, verdict, first, retrying)
 	}
 
 	f.mark("before-end")
@@ -1064,6 +1072,27 @@ func sentBackRule(n int) *store.Rule {
 	}
 	return &store.Rule{To: reviewNeedsYou, SendBack: true, Reason: fmt.Sprintf(
 		"the review sent the change back again, send-back %d; the rule sends a change back twice at most, so it waits for you", n+1)}
+}
+
+// failedRule is the rule's step after a failed run (ADR 0016), from to, the
+// state "needs you" of the run's stage; first, the first run's reason; and
+// whether the run was the retry already, as store.Retrying reads them before
+// the run's end is written. A failed first run is run once more in the same
+// stage, a failed retry waits for the developer with both reasons, and a run
+// that the upstream refused the credential to is run again once the
+// credential works, and uses up no retry: a refused retry stays the retry.
+func failedRule(to store.State, v run.Verdict, first string, retrying bool) *store.Rule {
+	again := store.State{Stage: to.Stage, WaitsFor: store.Run}
+	switch {
+	case v.Refused && !retrying:
+		return &store.Rule{To: again, Reason: store.RefusedReason}
+	case v.Refused:
+		return &store.Rule{To: again, Reason: store.RefusedRetryPrefix + first}
+	case !retrying:
+		return &store.Rule{To: again, Reason: store.RetryPrefix + v.Reason}
+	}
+	return &store.Rule{To: to, Reason: "the retry failed as well, and the rule runs a failed run once more at most, so it waits for you; " +
+		"the first run: " + first + "; the retry: " + v.Reason}
 }
 
 // hold stops a card that waits for a run, before the run is in the store: the
