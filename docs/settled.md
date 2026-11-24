@@ -266,6 +266,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The note on an approval is state, kept on the approved spec's row, and the core never reads it from the history (rule 3) (2026-11-23).
 - A run's end and the rule's step that follows it are one change: `EndRunByRule` in `internal/store` writes the run's entry, at the state the run's end gives, and after it the rule's entry, of the cause rule and with no run, in the one transaction of `change`. The card's row has the rule's state (2026-11-23).
 - A card's cost is a query over its runs, made when the board or the card is read, not a counter (rule 1) (2026-11-24).
+- In a card's history on the screen, a run's entry that the rule's entry follows in the same step, the one transaction of `EndRunByRule`, told by the two entries having the same time, is titled by its stage and what the run did: failed, passed, sent back or finished, never by the state it was written at. The card's JSON carries this as `did` on the entry, empty on every other entry (2026-11-24).
 
 ## ADR 0043: A card stores its stage and what it waits for; a run is in flight or has ended in one of four ways
 

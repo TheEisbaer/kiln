@@ -408,6 +408,10 @@ type (
 		Reason   string         `json:"reason"`
 		Note     string         `json:"note"`
 		Dropped  bool           `json:"dropped"`
+		// Did is what a run's entry did, when the rule's entry follows it in the
+		// same step: "failed", "passed", "sent back" or "finished". Empty on
+		// every other entry.
+		Did string `json:"did"`
 	}
 	runJSON struct {
 		ID      string       `json:"id"`
@@ -674,10 +678,14 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 			out.Note = last.Note()
 		}
 	}
-	for _, e := range history {
+	endings := make(map[string]store.Ending, len(runs))
+	for _, r := range runs {
+		endings[r.ID] = r.Ending
+	}
+	for i, e := range history {
 		out.History = append(out.History, entryJSON{Number: e.Number, At: e.At, Cause: e.Cause, Stage: e.Stage,
 			WaitsFor: e.WaitsFor, Run: e.Run, Reason: e.Reason, Note: e.Note(),
-			Dropped: store.Dropped(e.State, e.Cause, e.Reason)})
+			Dropped: store.Dropped(e.State, e.Cause, e.Reason), Did: did(history, i, endings)})
 	}
 	for _, r := range runs {
 		out.Runs = append(out.Runs, runJSON{ID: r.ID, Commit: r.Commit, Model: r.Model, Effort: r.Effort,
@@ -888,4 +896,31 @@ func reply(w http.ResponseWriter, status int, v any) {
 
 func fail(w http.ResponseWriter, status int, msg string) {
 	reply(w, status, map[string]string{"error": run.Printable(msg)})
+}
+
+// did says what the run's entry history[i] did, when the rule's entry follows
+// it in the same step, and is "" for every other entry. It tells the step by
+// the time: EndRunByRule writes the run's entry and the rule's entry in one
+// transaction of change, with one time (store.go, "The card's row and its
+// entries carry the same time"), and every other change takes its own time.
+// Consecutive numbers do not tell it.
+func did(history []store.Entry, i int, endings map[string]store.Ending) string {
+	e := history[i]
+	if e.Cause != store.CauseRun || e.Run == "" || i+1 >= len(history) {
+		return ""
+	}
+	next := history[i+1]
+	if next.Cause != store.CauseRule || next.Run != "" || !next.At.Equal(e.At) {
+		return ""
+	}
+	switch {
+	case endings[e.Run] == store.Failed:
+		return "failed"
+	case e.Stage == store.Review && e.WaitsFor == store.Approval:
+		return "passed"
+	// The prefix is the one laterDestination in internal/tick writes.
+	case e.Stage == store.Review && e.WaitsFor == store.Developer && strings.HasPrefix(e.Reason, "the review sends the change back"):
+		return "sent back"
+	}
+	return "finished"
 }
