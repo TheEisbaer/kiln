@@ -218,6 +218,7 @@ func Handler(s *store.Store, info Info, act *Activity, addr string) (http.Handle
 	mux.HandleFunc("GET /api/cards/{id}", h.card)
 	mux.HandleFunc("POST /api/cards", h.create)
 	mux.HandleFunc("POST /api/cards/{id}/decide", h.decide)
+	mux.HandleFunc("POST /api/instance/decide", h.decideInstance)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hosts[r.Host] {
 			fail(w, http.StatusForbidden, "the request's Host is not the core's address")
@@ -298,8 +299,20 @@ type (
 		Now     time.Time  `json:"now"`
 		// Paused is why the instance is paused, empty when it is not: then
 		// no run starts (ADR 0016, ADR 0055).
-		Paused string     `json:"paused"`
-		Cards  []tileJSON `json:"cards"`
+		Paused string `json:"paused"`
+		// MergingOff is set while automatic merging is off after a failed
+		// update, and null while it is on (ADR 0019, rule 3).
+		MergingOff *mergingJSON `json:"merging_off"`
+		Cards      []tileJSON   `json:"cards"`
+	}
+	mergingJSON struct {
+		// Reason names the failed update, why it failed, and the version
+		// the core went back to.
+		Reason string `json:"reason"`
+		// Failed is the commit of the failed update, empty when the failed
+		// program had none in its name.
+		Failed string     `json:"failed"`
+		Moves  []moveJSON `json:"moves"`
 	}
 	modelsJSON struct {
 		Spec      string `json:"spec"`
@@ -493,8 +506,13 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	merging, err := h.mergingOff()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Version: h.info.Version, Repo: h.info.Repo, Models: h.models(), Runs: h.info.Runs, Now: time.Now().UTC(),
-		Paused: paused, Cards: []tileJSON{}}
+		Paused: paused, MergingOff: merging, Cards: []tileJSON{}}
 	for _, c := range cards {
 		b.Cards = append(b.Cards, tile(c))
 	}
@@ -734,6 +752,45 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 	}
 	out.Change = h.change(r.Context(), c.ID)
 	reply(w, http.StatusOK, out)
+}
+
+// mergingOn is the developer's move that turns automatic merging on again.
+const mergingOn store.Action = "merging-on"
+
+// mergingOff is the board's state of automatic merging: nil while it is on.
+func (h *handler) mergingOff() (*mergingJSON, error) {
+	m, err := h.store.Merging()
+	if err != nil || m.Off == "" {
+		return nil, err
+	}
+	return &mergingJSON{Reason: m.Off, Failed: m.Failed, Moves: []moveJSON{{Action: mergingOn, Note: store.NoNote}}}, nil
+}
+
+// decideInstance makes a move of the developer's on the instance: turning
+// automatic merging on again after a failed update (ADR 0019, rule 3).
+func (h *handler) decideInstance(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Action store.Action `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Action != mergingOn {
+		fail(w, http.StatusBadRequest, `the body must be {"action": "merging-on"}`)
+		return
+	}
+	err := h.store.TurnMergingOn()
+	if err != nil && !errors.Is(err, store.ErrRefused) {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	merging, merr := h.mergingOff()
+	if merr != nil {
+		fail(w, http.StatusInternalServerError, merr.Error())
+		return
+	}
+	if err != nil {
+		reply(w, http.StatusConflict, map[string]any{"error": "automatic merging is on", "merging_off": merging})
+		return
+	}
+	reply(w, http.StatusOK, map[string]any{"merging_off": merging})
 }
 
 // refuse answers a move that is refused with 409: the sentence, the card's

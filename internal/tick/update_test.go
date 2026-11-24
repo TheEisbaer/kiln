@@ -994,8 +994,8 @@ func (k *kilnBench) failedEnv(b string) []string {
 // TestRestore starts the previous core after a failed update to main's head,
 // over a store the newer core moved forward and left a journal beside: it
 // says why, puts the copy back before it opens the store, reports, reads
-// every card of the copy, and does not update to the failed commit again. Its
-// children see neither variable.
+// every card of the copy, turns automatic merging off with an entry, and does
+// not update to the failed commit again. Its children see neither variable.
 func TestRestore(t *testing.T) {
 	k := newKilnBench(t, kilnModule)
 	cards := k.twoCards(t)
@@ -1019,11 +1019,23 @@ func TestRestore(t *testing.T) {
 		"kiln core: the update failed: the new core " + filepath.Join(k.programs(), "kiln-"+b) + " did not report healthy within 2m0s\n",
 		"kiln core: the store is put back from " + copied + "\n",
 		"kiln core: " + b + " failed as an update; this core waits for main to move past it\n",
+		"kiln core: automatic merging is off until you turn it on from the screen\n",
 	} {
 		if strings.Count(out, want) != 1 {
 			t.Errorf("the core did not say %q once:\n%s%s", want, out, l.stderr)
 		}
 	}
+	k.with(t, func(s *store.Store) {
+		reason := "the update to " + b + " failed: the new core " + filepath.Join(k.programs(), "kiln-"+b) +
+			" did not report healthy within 2m0s; the core went back to " + k.a
+		if m, err := s.Merging(); err != nil || m != (store.Merging{Off: reason, Failed: b}) {
+			t.Errorf("merging is %+v, %v, want off with %q", m, err, reason)
+		}
+		h, err := s.InstanceHistory()
+		if err != nil || len(h) != 1 || h[0].Cause != store.CauseRule || h[0].MergingOff != reason || h[0].Failed != b {
+			t.Errorf("the instance's history is %+v, %v, want one entry by the rule", h, err)
+		}
+	})
 	if got := cardsIn(t, filepath.Join(k.cfg.Data, "store.db")); !slices.Equal(got, cards) {
 		t.Errorf("the store holds %q, want %q", got, cards)
 	}
@@ -1193,4 +1205,98 @@ func TestUpdateThroughLauncher(t *testing.T) {
 	if got := cardsIn(t, filepath.Join(k.cfg.Data, "store.db")); !slices.Equal(got, cards) {
 		t.Errorf("the store holds %q", got)
 	}
+}
+
+// buildCount is how often the core built a program on the engine.
+func buildCount(e *fakeEngine) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.builds)
+}
+
+// besideCore opens the bench's store beside a running core, gives it to f,
+// and closes it.
+func (k *kilnBench) besideCore(t *testing.T, f func(s *store.Store)) {
+	t.Helper()
+	s, err := store.Open(filepath.Join(k.cfg.Data, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	f(s)
+}
+
+// TestNoUpdateToFailed starts the previous core after a failed update to b,
+// and then starts it again without the launcher's variables: automatic
+// merging is still off, the core does not update to b, and it updates once
+// main has moved past b.
+func TestNoUpdateToFailed(t *testing.T) {
+	k := newKilnBench(t, kilnModule)
+	setFetchEvery(t, 20*time.Millisecond)
+	k.twoCards(t)
+	k.copyStore(t)
+	b := k.move(t, "", map[string]string{"NOTES.md": "# Notes\nMoved.\n"})
+	l := launch(t, child{Command: "core", Config: k.cfg, NoEngine: true}, k.failedEnv(b)...)
+	l.until(t, "healthy")
+	l.cmd.Process.Signal(os.Interrupt)
+	l.exited(t, 0)
+
+	e := newFakeEngine()
+	h := startHanding(t, k.cfg, e, true)
+	if line := h.line(t); line != "healthy" {
+		t.Fatalf("the core wrote %q\n%s", line, h.out)
+	}
+	waitRounds(t, e, 10)
+	h.noLine(t, 50*time.Millisecond)
+	if n := buildCount(e); n != 0 {
+		t.Errorf("the restarted core built %d times", n)
+	}
+	if out := h.out.String(); strings.Count(out, "kiln core: "+b+" failed as an update; this core waits for main to move past it\n") != 1 {
+		t.Errorf("the restarted core did not say once that %s failed:\n%s", b, out)
+	}
+	k.besideCore(t, func(s *store.Store) {
+		if m, err := s.Merging(); err != nil || m.Off == "" || m.Failed != b {
+			t.Errorf("merging is %+v, %v, want off for %s", m, err, b)
+		}
+	})
+
+	c := k.move(t, "", map[string]string{"NOTES.md": "# Notes\nMoved again.\n"}) // on top of b
+	if line, want := h.line(t), "replace "+filepath.Join(k.programs(), "kiln-"+c); line != want {
+		t.Fatalf("the core wrote %q, want %q\n%s", line, want, h.out)
+	}
+	h.returned(t)
+}
+
+// TestMergingOnRetries has automatic merging off for b with main at b: the
+// core does not update, and once the developer has turned merging on it
+// updates to b.
+func TestMergingOnRetries(t *testing.T) {
+	k := newKilnBench(t, kilnModule)
+	setFetchEvery(t, 20*time.Millisecond)
+	k.twoCards(t)
+	b := k.move(t, "", map[string]string{"NOTES.md": "# Notes\nMoved.\n"})
+	k.with(t, func(s *store.Store) {
+		if _, err := s.TurnMergingOff("the update to "+b+" failed: it exited; the core went back to "+k.a, b); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e := newFakeEngine()
+	h := startHanding(t, k.cfg, e, true)
+	if line := h.line(t); line != "healthy" {
+		t.Fatalf("the core wrote %q\n%s", line, h.out)
+	}
+	waitRounds(t, e, 10)
+	h.noLine(t, 50*time.Millisecond)
+	if n := buildCount(e); n != 0 {
+		t.Errorf("the core built %d times while merging was off", n)
+	}
+	k.besideCore(t, func(s *store.Store) {
+		if err := s.TurnMergingOn(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if line, want := h.line(t), "replace "+filepath.Join(k.programs(), "kiln-"+b); line != want {
+		t.Fatalf("the core wrote %q, want %q\n%s", line, want, h.out)
+	}
+	h.returned(t)
 }

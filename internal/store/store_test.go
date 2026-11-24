@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 11"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 12"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 11 was opened")
+		t.Fatal("a store of version 12 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 11") || !strings.Contains(msg, "version 10") {
+	if msg := err.Error(); !strings.Contains(msg, "version 12") || !strings.Contains(msg, "version 11") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 11 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 11 and 0", v, tables)
+	if v != 12 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 12 and 0", v, tables)
 	}
 }
 
@@ -806,7 +806,7 @@ func TestMigrateV2(t *testing.T) {
 	keep := func(d string, migrated bool) string {
 		var out []string
 		for _, line := range strings.Split(d, "\n") {
-			if migrated && line == "ab12cd34 | <nil>" { // the instance's row, not paused
+			if migrated && line == "ab12cd34 | <nil> | <nil> | <nil>" { // the instance's row, not paused, merging on
 				line = "ab12cd34"
 			}
 			if migrated && strings.HasPrefix(line, "ab12cd34-") { // a run's row
@@ -956,7 +956,7 @@ func TestMigrateV3(t *testing.T) {
 	keep := func(d string, migrated bool) string {
 		var out []string
 		for _, line := range strings.Split(d, "\n") {
-			if migrated && line == "ab12cd34 | <nil>" { // the instance's row, not paused
+			if migrated && line == "ab12cd34 | <nil> | <nil> | <nil>" { // the instance's row, not paused, merging on
 				line = "ab12cd34"
 			}
 			if migrated && strings.HasPrefix(line, "ab12cd34-") { // a run's row
@@ -1157,8 +1157,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 10 {
-		t.Fatalf("the store is version %d after Open, want 10", v)
+	if v := userVersion(t, s); v != version || version != 11 {
+		t.Fatalf("the store is version %d after Open, want 11", v)
 	}
 	// What version 1 held is still there, and has no run or reason, and no
 	// send-back.
@@ -1197,8 +1197,9 @@ func TestMigrate(t *testing.T) {
 	}
 }
 
-// TestMigrateV9 moves a store of version 9 with a card forward: the card has
-// the number of send-backs 0.
+// TestMigrateV9 moves a store of version 9 with a card and a pause forward:
+// the card has the number of send-backs 0, and the pause's entry is by the
+// rule, with merging on.
 func TestMigrateV9(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	s, err := Open(path)
@@ -1211,15 +1212,24 @@ func TestMigrateV9(t *testing.T) {
 	if _, err := s.Move(1, State{Review, Developer}, CauseRun); err != nil {
 		t.Fatal(err)
 	}
-	// Back to version 9: the column did not exist.
-	if _, err := s.db.Exec(`ALTER TABLE cards DROP COLUMN send_backs; PRAGMA user_version = 9`); err != nil {
+	if _, err := s.SetPaused("paused before version 11"); err != nil {
+		t.Fatal(err)
+	}
+	// Back to version 9: the columns of versions 10 and 11 did not exist.
+	if _, err := s.db.Exec(`ALTER TABLE cards DROP COLUMN send_backs;
+ALTER TABLE instance DROP COLUMN merging_off;
+ALTER TABLE instance DROP COLUMN failed_update;
+ALTER TABLE instance_entries DROP COLUMN cause;
+ALTER TABLE instance_entries DROP COLUMN merging_off;
+ALTER TABLE instance_entries DROP COLUMN failed_update;
+PRAGMA user_version = 9`); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
 
 	s = reopen(t, path)
-	if v := userVersion(t, s); v != 10 {
-		t.Fatalf("the store is version %d, want 10", v)
+	if v := userVersion(t, s); v != version {
+		t.Fatalf("the store is version %d, want %d", v, version)
 	}
 	card, err := s.Card(1)
 	if err != nil || card.State != (State{Review, Developer}) || card.SendBacks != 0 {
@@ -1227,6 +1237,14 @@ func TestMigrateV9(t *testing.T) {
 	}
 	if b, err := s.Board(); err != nil || len(b) != 1 || b[0].SendBacks != 0 {
 		t.Errorf("the board after the move forward: %+v, %v", b, err)
+	}
+	// The pause of before version 11 was by the rule, with merging on.
+	if h, err := s.InstanceHistory(); err != nil || len(h) != 1 || h[0].Cause != CauseRule ||
+		h[0].Paused != "paused before version 11" || h[0].MergingOff != "" || h[0].Failed != "" {
+		t.Errorf("the instance's history after the move forward: %+v, %v", h, err)
+	}
+	if m, err := s.Merging(); err != nil || m != (Merging{}) {
+		t.Errorf("merging after the move forward: %+v, %v, want on", m, err)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/seal"
+	"github.com/TheEisbaer/kiln/internal/store"
 )
 
 // The update of the core (ADR 0019, ADR 0036, ADR 0037). Once main of Kiln's
@@ -90,6 +91,23 @@ func (f failedUpdate) commit() string {
 	return c
 }
 
+// turnMergingOff turns automatic merging off after a failed update, with a
+// reason that names the failed update, why it failed and the version the core
+// of version went back to, and the failed commit, which the core does not
+// update to while merging is off.
+func turnMergingOff(s *store.Store, f failedUpdate, version string) error {
+	what := f.commit()
+	if what == "" {
+		what = f.program
+	}
+	back := versionOf(version)
+	if back == "" {
+		back = "a core built by hand"
+	}
+	_, err := s.TurnMergingOff(run.Printable("the update to "+what+" failed: "+f.reason+"; the core went back to "+back), f.commit())
+	return err
+}
+
 // objectID is a commit's full hash, SHA-1 or SHA-256.
 var objectID = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 
@@ -97,7 +115,6 @@ var objectID = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 type updateState struct {
 	launched bool        // the core has a launcher
 	merged   atomic.Bool // a card of this instance was closed as merged since the core started
-	failed   string      // the commit of a failed update, which the core does not update to
 	seen     string      // main's head at the last look, read by the tick only
 
 	mu       sync.Mutex
@@ -167,8 +184,9 @@ func (c *core) checkUpdate(ctx context.Context, moved bool) {
 // updateDue is the commit the core updates to, or "" when no update is due:
 // the repo is Kiln's own; main's head is past the running version, or, for a
 // core built by hand, one of the instance's cards merged since it started;
-// the core has a launcher; and the head is neither a failed update's commit
-// nor one whose build failed in this core's life.
+// the core has a launcher; and the head is neither the commit of a failed
+// update while automatic merging is off, which the store keeps across
+// restarts, nor one whose build failed in this core's life.
 func (c *core) updateDue(ctx context.Context, target string) (string, error) {
 	own, err := kilnsOwn(ctx, c.Repo, target)
 	if err != nil || !own {
@@ -192,7 +210,11 @@ func (c *core) updateDue(ctx context.Context, target string) (string, error) {
 		c.sayOnceAs(c.out, "no launcher", "kiln core: main is at "+target+", past this core's version; a core without a launcher does not update itself")
 		return "", nil
 	}
-	if target == c.update.failed {
+	merging, err := c.store.Merging()
+	if err != nil {
+		return "", err
+	}
+	if merging.Failed != "" && merging.Failed == target {
 		c.sayOnce(c.out, "kiln core: "+target+" failed as an update; this core waits for main to move past it")
 		return "", nil
 	}

@@ -145,6 +145,10 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .offline::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); animation: blink 1.4s ease-in-out infinite; }
 @keyframes blink { 50% { opacity: .25; } }
+#merging { flex-wrap: wrap; }
+#merging .note, #merging .err { font-size: 12.5px; }
+#merging .note { color: var(--muted); }
+#merging .err { color: var(--amber-ink); }
 
 /* The strip */
 .strip { padding: 18px 28px 6px; }
@@ -515,6 +519,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
   <button id="new" class="primary" type="button">New card</button>
 </header>
 <div id="paused" class="offline" role="status" hidden></div>
+<div id="merging" class="offline" role="status" hidden></div>
 <div id="offline" class="offline" hidden>the core does not answer; trying again every 2 seconds</div>
 <div id="stale" class="offline" hidden>the core serves another version of this page; reload the page to use it</div>
 <section id="strip" class="strip" aria-label="What needs you"></section>
@@ -804,6 +809,7 @@ function renderBoard(b) {
   // A paused instance starts no run; the reason says why.
   $("paused").hidden = !b.paused;
   $("paused").textContent = b.paused ? "Paused: " + b.paused : "";
+  renderMerging(b.merging_off);
   const ids = new Set();
   const per = Object.fromEntries(STAGES.map(([s]) => [s, []]));
   for (const c of b.cards) {
@@ -1659,6 +1665,50 @@ async function addCard() {
 }
 
 // Asking
+
+// Automatic merging off after a failed update (ADR 0019, rule 3): the strip
+// says why, and has the developer's move that turns it on again. It is built
+// again only when the state changes, so that a refusal stays beside the
+// button.
+let mergingKey = "null";
+
+function renderMerging(m) {
+  const key = JSON.stringify(m || null);
+  if (key === mergingKey) return;
+  mergingKey = key;
+  const box = $("merging");
+  box.replaceChildren();
+  box.hidden = !m;
+  if (!m) return;
+  box.append(el("span", null, sentence(m.reason) + " Automatic merging is off: a review that passes waits for you."));
+  const b = el("button", null, "Turn automatic merging on");
+  b.type = "button";
+  b.addEventListener("click", () => turnMergingOn(box, b));
+  box.append(b);
+  if (m.failed) box.append(el("span", "note", "If main is still at " + m.failed.slice(0, 12) + ", this tries that update again."));
+}
+
+async function turnMergingOn(box, button) {
+  button.disabled = true;
+  for (const e of box.querySelectorAll(".err")) e.remove();
+  let refused = "";
+  try {
+    const r = await api("POST", "/api/instance/decide", { action: "merging-on" });
+    if (r.status === 409 || r.status === 503 || r.status === 400) {
+      refused = sentence((r.data && r.data.error) || "the move was refused");
+    } else if (!r.ok) {
+      throw new Error(r.data && r.data.error);
+    } else {
+      setOnline(true);
+    }
+  } catch (e) {
+    setOnline(false);
+    refused = "The core does not answer; automatic merging is still off.";
+  }
+  button.disabled = false;
+  if (refused) box.append(el("span", "err", refused));
+  refreshBoard().catch(() => {});
+}
 
 async function refreshBoard() {
   const r = await api("GET", "/api/board");
