@@ -20,6 +20,7 @@ type row struct {
 // row dropped or changed in the code fails the test.
 var wantMoves = map[Action]map[State]row{
 	"approve": {{"spec", "approval"}: {State{"implement", "run"}, "optional"}},
+	"start":   {{"backlog", "developer"}: {State{"spec", "run"}, "none"}},
 	"again": {
 		{"spec", "approval"}:       {State{"spec", "run"}, "required"},
 		{"spec", "developer"}:      {State{"spec", "run"}, "optional"},
@@ -59,7 +60,7 @@ func TestDecide(t *testing.T) {
 	s := open(t)
 	// Without a publish command the table has no publish, and a card at the
 	// Git host, which a core with one left there, has its moves.
-	actions := []Action{"approve", "again", "send-back", "done", "to-spec", "drop", "publish", ""}
+	actions := []Action{"approve", "again", "send-back", "done", "to-spec", "drop", "publish", "start", ""}
 	for from := range validPairings {
 		for _, action := range actions {
 			for _, note := range []string{"", " \n ", "  Use the store's words.\n"} {
@@ -233,7 +234,7 @@ func TestNote(t *testing.T) {
 func TestMoves(t *testing.T) {
 	for from := range validPairings {
 		var want []Allowed
-		for _, action := range []Action{"approve", "again", "done", "send-back", "to-spec", "drop"} {
+		for _, action := range []Action{"start", "approve", "again", "done", "send-back", "to-spec", "drop"} {
 			if r, ok := wantMoves[action][from]; ok {
 				want = append(want, Allowed{action, r.note})
 			}

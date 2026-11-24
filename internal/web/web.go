@@ -348,6 +348,10 @@ type (
 		SendBacks int `json:"send_backs"`
 		// Cost is what the card's ended runs cost; null with none.
 		Cost *costJSON `json:"cost"`
+		// Predecessors are the cards it names as predecessors, and
+		// QueuedFor those of them not done while it is queued (ADR 0010).
+		Predecessors []int64 `json:"predecessors"`
+		QueuedFor    []int64 `json:"queued_for"`
 		// Interventions is the card's number of interventions, 0 included.
 		Interventions int `json:"interventions"`
 	}
@@ -379,6 +383,9 @@ type (
 		Documents []documentJSON `json:"documents"`
 		Activity  []activityJSON `json:"activity"`
 		Change    *changeJSON    `json:"change"`
+		// NamedBy are the cards that name it as a predecessor and are not
+		// in done (ADR 0011).
+		NamedBy []namedJSON `json:"named_by"`
 		// The card's pull request, once it has an address, and whether the
 		// core is publishing it, from when the developer publishes until it
 		// has one (card 19).
@@ -405,6 +412,10 @@ type (
 		Command   string       `json:"command"`
 		Workflows []string     `json:"workflows"`
 		Error     string       `json:"error,omitempty"`
+	}
+	namedJSON struct {
+		ID    int64  `json:"id"`
+		Title string `json:"title"`
 	}
 	commitJSON struct {
 		Hash  string `json:"hash"`
@@ -560,6 +571,8 @@ func tile(s store.Summary) tileJSON {
 	if t.Documents == nil {
 		t.Documents = []string{}
 	}
+	t.Predecessors = append([]int64{}, s.Predecessors...)
+	t.QueuedFor = append([]int64{}, s.QueuedFor...)
 	if r := s.InFlight; r != nil {
 		t.Run = &flightJSON{ID: r.ID, Model: r.Model, Since: started(r.Started)}
 	}
@@ -693,9 +706,16 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	if err != nil {
 		return cardJSON{}, err
 	}
-	sum := store.Summary{Card: c}
+	order, err := h.store.Order(c.ID)
+	if err != nil {
+		return cardJSON{}, err
+	}
+	sum := store.Summary{Card: c, Predecessors: order.Predecessors, QueuedFor: order.QueuedFor}
 	out := cardJSON{Text: c.Text, History: []entryJSON{}, Runs: []runJSON{},
-		Documents: []documentJSON{}, Activity: []activityJSON{}, Now: time.Now().UTC(), Moves: movesJSON(moves)}
+		Documents: []documentJSON{}, Activity: []activityJSON{}, Now: time.Now().UTC(), Moves: movesJSON(moves), NamedBy: []namedJSON{}}
+	for _, n := range order.NamedBy {
+		out.NamedBy = append(out.NamedBy, namedJSON{ID: n.ID, Title: title(n.Text)})
+	}
 	// The pull request shows while the card is at the Git host, and on a card
 	// the Git host merged.
 	atHost := c.State == store.State{Stage: store.Review, WaitsFor: store.Host}
@@ -748,25 +768,30 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	return out, nil
 }
 
-// waiting is where a new card goes, as `kiln card` puts it (tick.AddCard):
-// in spec, waiting for a run.
-var waiting = store.State{Stage: store.Spec, WaitsFor: store.Run}
-
+// create writes a new card with its predecessors, if any, and starts it: to
+// spec, waiting for a run, or queued while a predecessor is not done. A
+// predecessor the store refuses is said with its reason, and no card is
+// written.
 func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Text *string `json:"text"`
+		Text         *string `json:"text"`
+		Predecessors []int64 `json:"predecessors"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Text == nil {
-		fail(w, http.StatusBadRequest, `the body must be {"text": …}`)
+		fail(w, http.StatusBadRequest, `the body must be {"text": …, "predecessors": [card, …]}, the predecessors optional`)
 		return
 	}
 	if strings.TrimSpace(*body.Text) == "" {
 		fail(w, http.StatusBadRequest, "a card needs a text")
 		return
 	}
-	c, err := h.store.Create(*body.Text)
+	c, err := h.store.Create(*body.Text, body.Predecessors...)
+	if errors.Is(err, store.ErrPredecessor) {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err == nil {
-		c, err = h.store.Move(c.ID, waiting, store.CauseDeveloper)
+		c, err = h.store.Start(c.ID)
 	}
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())

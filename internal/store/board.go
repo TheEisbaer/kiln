@@ -102,15 +102,18 @@ func (s *Store) Runs(card int64) ([]RunAt, error) {
 
 // Summary is what the board shows of a card: the card, the reason of its last
 // entry and whether that entry dropped it or the Git host merged it, its run
-// in flight, if any, and the kinds of the documents it has.
+// in flight, if any, the kinds of the documents it has, its predecessors, and
+// those of them that are not done while it is queued for them.
 type Summary struct {
 	Card
-	Reason   string
-	Dropped  bool
-	Merged   bool
-	InFlight *RunAt
-	Kinds    []string
-	Cost     *CardCost // nil when no run of the card has ended
+	Reason       string
+	Dropped      bool
+	Merged       bool
+	InFlight     *RunAt
+	Kinds        []string
+	Cost         *CardCost // nil when no run of the card has ended
+	Predecessors []int64
+	QueuedFor    []int64
 	// Interventions is the card's number of interventions (Interventions).
 	Interventions int
 }
@@ -326,6 +329,32 @@ func (s *Store) Board() ([]Summary, error) {
 		}
 		if i, ok := at[card]; ok {
 			out[i].Kinds = append(out[i].Kinds, kind)
+		}
+	}
+	if err := errorsOf(rows); err != nil {
+		return nil, err
+	}
+
+	// A predecessor is open while it is not in done; a queued card waits for
+	// its open ones.
+	rows, err = tx.Query(`SELECT card, predecessor FROM predecessors ORDER BY card, predecessor`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var card, p int64
+		if err := rows.Scan(&card, &p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		i, ok := at[card]
+		j, known := at[p]
+		if !ok || !known {
+			continue
+		}
+		out[i].Predecessors = append(out[i].Predecessors, p)
+		if out[i].State == queued && out[j].Stage != Done {
+			out[i].QueuedFor = append(out[i].QueuedFor, p)
 		}
 	}
 	if err := errorsOf(rows); err != nil {

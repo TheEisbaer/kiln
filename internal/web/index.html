@@ -329,6 +329,7 @@ button:disabled { opacity: .55; cursor: default; }
 .panel .bar .close:hover { color: var(--text); background: var(--surface); }
 .panel .body { overflow-y: auto; padding: 22px 28px 60px; flex: 1; }
 .panel h1 { font-size: 21px; line-height: 1.3; margin: 0 0 14px; font-weight: 650; overflow-wrap: anywhere; }
+.panel .order { margin: -8px 0 14px; font-size: 12.5px; color: var(--muted); }
 .reason {
   border-radius: 10px; padding: 10px 14px; margin: 0 0 16px;
   background: var(--surface); border: 1px solid var(--line-soft); color: var(--text-2); font-size: 13px;
@@ -488,6 +489,12 @@ dialog textarea {
   font: 14px/1.5 var(--sans);
 }
 dialog .need { margin: 8px 0 0; font-size: 12.5px; color: var(--amber-ink); }
+dialog input[type=text] {
+  width: 100%; background: var(--surface); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px;
+  font: 14px/1.5 var(--sans);
+}
+dialog .after { margin-top: 12px; }
 dialog .act { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 14px; }
 dialog .act .hint { margin-right: auto; font-size: 12px; color: var(--faint); }
 dialog .act .err { margin-right: auto; font-size: 12.5px; color: var(--amber-ink); }
@@ -543,6 +550,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
   </div>
   <div class="body" id="p-body">
     <h1 id="p-title"></h1>
+    <div class="order" id="p-order"></div>
     <div class="cost" id="p-cost"></div>
     <div class="cost" id="p-interventions"></div>
     <div id="p-reason"></div>
@@ -557,9 +565,13 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
 <dialog id="dialog" aria-labelledby="d-title">
   <div class="in">
     <h2 id="d-title">New card</h2>
-    <p>One idea, small enough for one pull request. Its first line is its title. It waits for a spec run once it is added.</p>
+    <p>One idea, small enough for one pull request. Its first line is its title. It waits for a spec run once it is added; with earlier cards named, until they are done.</p>
     <textarea id="d-text" placeholder="What should change, and why?" spellcheck="true"></textarea>
     <div class="need" id="d-need" hidden>Write what the card is about.</div>
+    <div class="after">
+      <label for="d-after">After cards (optional)</label>
+      <input type="text" id="d-after" placeholder="3, 5" autocomplete="off" spellcheck="false">
+    </div>
     <div class="act">
       <span class="hint" id="d-hint"><kbd>&#8984;</kbd> <kbd>Enter</kbd> adds it</span>
       <button type="button" id="d-cancel">Cancel</button>
@@ -610,6 +622,7 @@ const MOVES = {
   done: "Done",
   "to-spec": "Send back to spec",
   drop: "Drop the card",
+  start: "Start",
 };
 const AGAIN = { spec: "Run the spec again", implement: "Run implement again", review: "Run the review again" };
 function moveLabel(c, action) {
@@ -644,6 +657,17 @@ const tiles = new Map(); // id -> {el, key}
 const columns = {};
 
 function needsYou(c) { return c.waits_for === "developer" && c.stage !== "backlog"; }
+
+// A card in the backlog waits for the developer, once a predecessor was
+// dropped, with a reason that begins with the store's
+// PredecessorDroppedPrefix; the strip lists it under "Needs you".
+const PREDECESSOR_DROPPED = "its predecessor";
+function heldByDrop(c) {
+  return c.stage === "backlog" && c.waits_for === "developer" && (c.reason || "").startsWith(PREDECESSOR_DROPPED);
+}
+
+// cardList writes card IDs as the store does: "#3, #5".
+function cardList(ids) { return ids.map((id) => "#" + id).join(", "); }
 
 // A reason ends with its run's line, as the run writes it: "exit 0, result
 // success, 1 turns, $0.0001, not saved". The part before it is the reason, said
@@ -889,7 +913,7 @@ function renderBoard(b) {
 
 let stripKey = null;
 function renderStrip(cards) {
-  const needs = cards.filter(needsYou);
+  const needs = cards.filter((c) => needsYou(c) || heldByDrop(c));
   const approvals = cards.filter((c) => c.waits_for === "approval");
   const key = JSON.stringify([needs.map((c) => [c.id, c.headline, c.reason]), approvals.map((c) => [c.id, c.headline, c.reason])]);
   if (key === stripKey) return;
@@ -1146,7 +1170,7 @@ function renderMissing(id) {
   $("p-id").textContent = "#" + id;
   $("p-state").replaceChildren();
   $("p-title").textContent = "There is no card #" + id + ".";
-  for (const k of ["p-reason", "p-moves", "p-note", "p-live", "p-docs", "p-history"]) $(k).replaceChildren();
+  for (const k of ["p-order", "p-reason", "p-moves", "p-note", "p-live", "p-docs", "p-history"]) $(k).replaceChildren();
   $("p-text").textContent = "";
   cardKeys = {};
 }
@@ -1170,6 +1194,11 @@ function renderCard(c) {
     $("p-title").textContent = c.title || "(no title)";
     $("p-cost").textContent = c.cost ? c.cost.label : "";
     $("p-interventions").textContent = interventionsText(c.interventions);
+  });
+  part("order", [c.predecessors, c.queued_for], () => {
+    const o = $("p-order");
+    o.textContent = c.predecessors.length ? "After " + cardList(c.predecessors) + (c.queued_for.length ? " · waits for " + cardList(c.queued_for) : "") : "";
+    o.hidden = !c.predecessors.length;
   });
   const last = c.history[c.history.length - 1];
   part("reason", [c.stage, c.waits_for, c.reason, !!c.run, c.dropped, c.note, c.publishing, c.pull_request, c.merged], () => {
@@ -1252,10 +1281,11 @@ function sentBack(c) {
   return !!d && d.kind === "review" && /^Verdict: goes back[ \t\r]*(\n|$)/.test(d.text);
 }
 
-// first is the move that matters first in a state: approving a spec, marking
-// a passed review done, sending back a change a review sent back, and running
-// the stage again otherwise.
+// first is the move that matters first in a state: starting a card in the
+// backlog, approving a spec, marking a passed review done, sending back a
+// change a review sent back, and running the stage again otherwise.
 function first(c) {
+  if (c.moves.some((m) => m.action === "start")) return "start";
   if (canPublish(c)) return "publish";
   if (c.waits_for === "host") return null;
   if (c.waits_for === "approval") return c.stage === "review" ? "done" : "approve";
@@ -1410,7 +1440,7 @@ function noteText(c, m) {
     case "drop": {
       const branch = c.change && c.change.branch ? " Its branch " + c.change.branch + " stays." : "";
       return { title: "Drop #" + c.id + " “" + (c.title || "(no title)") + "”?",
-        what: "It goes to done as dropped, and no run is started for it." + branch,
+        what: "It goes to done as dropped, and no run is started for it." + branch + waitersOf(c),
         label: "Why? Optional; the history keeps it.", go: "Drop the card" };
     }
     case "to-spec":
@@ -1432,6 +1462,18 @@ function noteText(c, m) {
         label: "What should change?", go: moveLabel(c, "again") };
   }
   return { title: moveLabel(c, m.action), what: optional.trim(), label: "What should change?", go: moveLabel(c, m.action) };
+}
+
+// waitersOf is what the drop's dialog says of the cards that name the card as
+// a predecessor and are not done, "" with none.
+function waitersOf(c) {
+  const n = c.named_by || [];
+  if (!n.length) return "";
+  const names = n.map((w) => "#" + w.id + " “" + (w.title || "(no title)") + "”");
+  const list = names.length === 1 ? names[0] : names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+  return n.length === 1 ?
+    " " + list + " waits for this card. Once its other predecessors are done, it waits for you, to be started without this card or dropped." :
+    " " + list + " wait for this card. Once their other predecessors are done, they wait for you, to be started without this card or dropped.";
 }
 
 function openNote(m) {
@@ -1693,14 +1735,36 @@ function openDialog() {
   $("d-text").focus();
 }
 
+// afterCards reads the field "After cards": numbers split on commas and white
+// space, each with a "#" before it or not; null when a part is not a number.
+function afterCards(value) {
+  const ids = [];
+  for (const part of value.split(/[\s,]+/)) {
+    if (!part) continue;
+    const m = /^#?(\d+)$/.exec(part);
+    if (!m) return null;
+    ids.push(Number(m[1]));
+  }
+  return ids;
+}
+
 async function addCard() {
   const text = $("d-text").value;
   if (!text.trim()) { $("d-need").hidden = false; $("d-text").focus(); return; }
+  const predecessors = afterCards($("d-after").value);
+  if (!predecessors) {
+    const hint = $("d-hint");
+    hint.className = "err";
+    hint.textContent = "Name earlier cards by their numbers, such as 3, 5.";
+    $("d-after").focus();
+    return;
+  }
   $("d-add").disabled = true;
   try {
-    const r = await api("POST", "/api/cards", { text });
+    const r = await api("POST", "/api/cards", { text, predecessors });
     if (!r.ok) throw new Error(r.data && r.data.error);
     $("d-text").value = "";
+    $("d-after").value = "";
     $("dialog").close();
     setOnline(true);
     await refreshBoard();
@@ -1819,6 +1883,7 @@ $("dialog").addEventListener("close", () => $("new").blur());
 $("d-text").addEventListener("input", () => { if ($("d-text").value.trim()) $("d-need").hidden = true; });
 $("d-add").addEventListener("click", addCard);
 $("d-text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addCard(); } });
+$("d-after").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addCard(); } });
 $("n-cancel").addEventListener("click", () => $("note").close());
 $("n-go").addEventListener("click", sendNote);
 $("n-text").addEventListener("input", noteReady);
