@@ -219,6 +219,18 @@ var ErrGone = errors.New("its container is gone and nothing was recorded")
 // followed the run. The run goes on.
 var ErrInterrupted = errors.New("following ended; the run goes on")
 
+// ErrOtherInstruction is what Carry's refusal of a run matches when the run
+// was recorded, or its container started, with another instruction than the
+// one it is given now: the instruction's file was removed by hand and written
+// again with another text.
+var ErrOtherInstruction = errors.New("the run was started with another instruction")
+
+// otherInstruction is a refusal for another instruction, with its own text.
+type otherInstruction struct{ text string }
+
+func (e *otherInstruction) Error() string        { return e.text }
+func (e *otherInstruction) Is(target error) bool { return target == ErrOtherInstruction }
+
 // Verdict is how a recorded run ended.
 type Verdict struct {
 	// Finished is true when the container exited with 0, it was not killed
@@ -347,7 +359,11 @@ func carry(ctx context.Context, in Inputs, out, errOut, notes io.Writer, startin
 		got := maps.Clone(state.Labels)
 		maps.DeleteFunc(got, func(k, _ string) bool { _, ok := want[k]; return !ok })
 		if !maps.Equal(got, want) {
-			return nil, fmt.Errorf("the container %s was started with other inputs (%v, not %v); it is left alone", "kiln-run-"+r.ID, got, want)
+			text := fmt.Sprintf("the container %s was started with other inputs (%v, not %v); it is left alone", "kiln-run-"+r.ID, got, want)
+			if got[labelInstruction] != want[labelInstruction] {
+				return nil, &otherInstruction{text}
+			}
+			return nil, errors.New(text)
 		}
 	}
 	status := ""

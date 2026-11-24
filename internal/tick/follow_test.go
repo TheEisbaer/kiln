@@ -42,6 +42,7 @@ type fakeEngine struct {
 	lists      int               // the calls of ListRuns, one per tick and one per comparison
 	listFails  int               // the calls of ListRuns still to fail
 	inspects   int               // the calls of InspectRun
+	inspected  map[string]int    // the calls of InspectRun, by the run's ID
 	gates      map[string]chan struct{}
 	held       map[string]bool      // the points that hold a card's run, as <card>/<point>
 	fail       map[int64]bool       // the cards whose runs fail
@@ -71,6 +72,18 @@ type fakeEngine struct {
 	book        imageBook
 	imageBuilds []imageBuild    // the calls of BuildImage
 	imageFails  map[string]bool // the names of the images whose builds fail
+	// The next starts of a card's created container that fail, also after
+	// starting has returned: the container stays created, as when the engine
+	// refuses a start.
+	startFails map[int64]int
+	// The cards whose Carry of a run in the store is refused for another
+	// instruction, as after the instruction's file was written again.
+	otherInstruction map[int64]bool
+	docsFail         map[int64]error // the error of ReadDocument, by card
+	removeFails      map[string]bool // the runs whose RemoveRun fails
+	// The cards whose Carry of a running container breaks off with an error
+	// at once, so that the next tick looks at the container again.
+	breakOff map[int64]bool
 }
 
 // imageBuild is a call of BuildImage, with the names in its context.
@@ -144,7 +157,9 @@ func newFakeEngine() *fakeEngine {
 		gates: map[string]chan struct{}{}, held: map[string]bool{}, fail: map[int64]bool{}, errOnce: map[int64]bool{},
 		refuse: map[int64]bool{}, imageFails: map[string]bool{}, inputs: map[int64]run.Inputs{}, firstTick: -1,
 		reviews: map[int64][]string{}, reviewed: map[string]string{}, saves: map[int64]bool{}, models: map[string]string{},
-		outcomes: map[int64][]string{}, outcome: map[string]string{}}
+		outcomes: map[int64][]string{}, outcome: map[string]string{}, inspected: map[string]int{},
+		startFails: map[int64]int{}, otherInstruction: map[int64]bool{}, docsFail: map[int64]error{},
+		removeFails: map[string]bool{}, breakOff: map[int64]bool{}}
 }
 
 func (e *fakeEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {
@@ -253,6 +268,9 @@ func (e *fakeEngine) ListRuns(_ context.Context, instance string) ([]string, err
 func (e *fakeEngine) RemoveRun(_ context.Context, id, _ string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.removeFails[id] {
+		return fmt.Errorf("the engine cannot remove kiln-run-%s, as the test has it", id)
+	}
 	e.removed = append(e.removed, id)
 	delete(e.containers, id)
 	return nil
@@ -262,6 +280,7 @@ func (e *fakeEngine) InspectRun(_ context.Context, id string) (*seal.RunState, e
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.inspects++
+	e.inspected[id]++
 	if status, ok := e.containers[id]; ok {
 		return &seal.RunState{Status: status}, nil
 	}
@@ -279,6 +298,12 @@ func (e *fakeEngine) Remove(_ context.Context, in run.Inputs) error {
 // of its card's reviews, Verdict: passes when there are none left, the same
 // for every read of one run; a review that goes back has a finding.
 func (e *fakeEngine) ReadDocument(_, id, kind string) (run.Document, error) {
+	e.mu.Lock()
+	fails := e.docsFail[cardOf(id)]
+	e.mu.Unlock()
+	if fails != nil {
+		return run.Document{}, fails
+	}
 	text := map[string]string{store.KindSpec: "# Spec\n", store.KindReport: "# Report\n", store.KindReview: "Verdict: passes\n"}[kind]
 	if kind == store.KindReview {
 		e.mu.Lock()
@@ -326,6 +351,8 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 	errOnce := e.errOnce[card]
 	delete(e.errOnce, card)
 	refuse := e.refuse[card]
+	other := e.otherInstruction[card]
+	breakOff := e.breakOff[card]
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()
@@ -333,6 +360,9 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 		e.mu.Unlock()
 	}()
 
+	if other && starting == nil {
+		return run.Verdict{}, fmt.Errorf("refused, as the test has it: %w", run.ErrOtherInstruction)
+	}
 	record := filepath.Join(in.Runs, in.ID, "result.json")
 	recorded, err := exists(record)
 	if err != nil || recorded {
@@ -340,6 +370,11 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 	}
 	if !there && starting == nil {
 		return run.Verdict{}, run.ErrGone
+	}
+	if there && status != "created" && status != "running" && status != "exited" {
+		// The tick never gives a follower such a run; one that the test
+		// changed under it fails.
+		return run.Verdict{}, fmt.Errorf("the container is %s, as the test has it", status)
 	}
 	if refuse && starting != nil {
 		// As Carry refuses a branch that is neither absent nor at the commit,
@@ -364,6 +399,15 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 		if errOnce {
 			return run.Verdict{}, errors.New("the start failed, as the test has it")
 		}
+		e.mu.Lock()
+		startFails := e.startFails[card] > 0
+		if startFails {
+			e.startFails[card]--
+		}
+		e.mu.Unlock()
+		if startFails {
+			return run.Verdict{}, fmt.Errorf("the engine refused to start kiln-run-%s, as the test has it", in.ID)
+		}
 		if err := e.wait(ctx, card, "start"); err != nil {
 			return run.Verdict{}, err
 		}
@@ -371,6 +415,9 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 		status = "running"
 	}
 	if status == "running" {
+		if breakOff {
+			return run.Verdict{}, errors.New("the follow broke off, as the test has it")
+		}
 		if err := e.wait(ctx, card, "exit"); err != nil {
 			return run.Verdict{}, run.ErrInterrupted
 		}

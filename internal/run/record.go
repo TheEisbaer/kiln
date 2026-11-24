@@ -77,7 +77,8 @@ func (r *run) recordInputs() RecordInputs {
 
 // matches refuses a run recorded with other inputs than those it is started
 // with again: the commit, the branch, the model, the effort and the
-// instruction, as on the container's labels.
+// instruction, as on the container's labels. Another instruction matches
+// ErrOtherInstruction.
 func (in RecordInputs) matches(r *run) error {
 	want := r.recordInputs()
 	for _, f := range []struct{ what, got, want string }{
@@ -88,7 +89,11 @@ func (in RecordInputs) matches(r *run) error {
 		{"instruction", in.InstructionSHA256, want.InstructionSHA256},
 	} {
 		if f.got != f.want {
-			return fmt.Errorf("the run %s is recorded with the %s %q, not %q; it is left alone", r.ID, f.what, f.got, f.want)
+			text := fmt.Sprintf("the run %s is recorded with the %s %q, not %q; it is left alone", r.ID, f.what, f.got, f.want)
+			if f.what == "instruction" {
+				return &otherInstruction{text}
+			}
+			return errors.New(text)
 		}
 	}
 	return nil

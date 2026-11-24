@@ -71,6 +71,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - A failed run is run once more by the rule, in the same stage, from where a second run of that stage starts: a spec run from the head of `main`, and an implement or review run from the card's branch. The run's entry is under "needs you" with its reason, and an entry of the rule follows in the same transaction, with the card waiting for a run, "the run failed, and the rule runs it once more; " and the run's reason. When that retry fails as well, the rule's entry keeps the card under "needs you" with both reasons. A finished run that stops under "needs you" has no retry. Finished and failed are told apart by the run's record (ADR 0043) (2026-11-24).
 - A run whose result carries `api_error_status` 401 uses up no retry. The rule's entry has the card wait for a run, which the tick starts once the instance is not paused. A refusal on the retry keeps it the retry. A refused run whose result is missing is an ordinary failure (2026-11-24).
 - A move of the developer's makes the card's next run a first run, with a retry of its own (2026-11-24).
+- A run ended by that bound, or for its removed instruction or its unreadable `documents.tar`, is a failed run: its reason says what was wrong and what to do, the rule runs it once more, and a second failure keeps the card under "needs you" with both reasons (2026-11-24).
 
 ## ADR 0017: Every run is sealed, and credentials stay behind a proxy
 
@@ -206,6 +207,8 @@ A line says what was settled and ends with the date in brackets, for example (20
 - Under a launcher, `main` is fetched at most once in 30 seconds on every tick, also when no run may start and no card waits for the Git host, so that an update is seen. The tick does not wait for that fetch (2026-11-23).
 - After the store is opened and before the screen, the core reads the cost of every unread run from `<data>/runs/<id>/result.json`, once, in one transaction. A run without a record, or with one that cannot be read, keeps an unknown cost and is read no more. A failure is printed and the core goes on; the runs are read at the next start (2026-11-24).
 - Of the check result command, the core keeps only when it last ran it for a card's commit, whether it runs, and the text it said last, in memory. A core started again runs it at once (2026-11-24).
+- A run in flight with no record whose container is created, paused, restarting, being removed or dead holds its place for ever by itself. The core notes, in memory, when it first sees a run in one of those states, and the rule ends the run as failed once the same core has seen it in the same state for 5 minutes on its clock. Seen running, exited, gone or recorded, the note is dropped. A created container is still started on every tick until then, so a start that fails and then works passes. A core started again notes from its first tick: that only delays an end, by one bound per restart. A run that a kill left created after `AddRun` is started by the next core however long it was down (2026-11-24).
+- An ended run's container, way out and network are removed as for any ended run, by its follower or else by the sweep. A removal that fails in the sweep is printed with the run's ID, and the sweep goes on to the next run; a failed list or store read still ends the tick (2026-11-24).
 
 ## ADR 0036: A small launcher judges every update, and the store is copied before it
 
@@ -285,6 +288,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - Until dropped is a mark on the card, a dropped card is in done, waiting for nothing, and the reason of its last entry, the developer's, begins with "dropped by the developer", followed by the note; the board tells it apart by that entry. No column is added. `AddRun` refuses a run of a card that does not wait for one, and the tick's hold moves a card only from the state it read, so that a drop between the tick's read and the run's start wins (card 16, 2026-11-20).
 - A card whose review passed waits for the Git host, review waiting for the Git host, once the developer publishes it, until it is merged, closed or sent back; a done card the Git host merged is told apart by its last entry, by the Git host with the reason `merged`, and the board shows it as merged (card 19, 2026-11-20).
 - A card whose review passed waits in review for approval only without a publish command, or with a change to the workflow files, or without its branch. Otherwise it goes on by the rule to review, waiting for the Git host, in the transaction that ends the review run (2026-11-23).
+- A recorded run whose `documents.tar` cannot be opened or read is failed, whatever its record says, with the reason naming the file, and its cost is kept. A damaged archive leaves the run finished, and the card needs you, as before (2026-11-24).
 
 ## ADR 0044: The UI sends requests; the core tells it about changes over one one-way event stream
 
@@ -353,6 +357,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - `instructions/implement.md` and `instructions/review.md` are embedded beside `instructions/spec.md`. A run is told its stage's instruction and then, each under its heading, `## The card`, `## The approved spec`, `## The last review` and `## The change`, as its stage has them (card 14, 2026-11-19).
 - A part of what a run is told that a run wrote (`## The last spec`, `## The last report`, `## The last review` and `## The approved spec`) is told inside a code fence with the info string `markdown`, as the change is told inside one with `diff`. The fence is backticks, one longer than the longest run of backticks in the part, so nothing in the part ends it and only the tick's own headings are headings. The card and the developer's note are not fenced, and the store keeps every document as the run wrote it (2026-11-20).
 - The developer's note on the spec is told unfenced, like the card and the developer's note, between the approved spec and the parts after it (2026-11-23).
+- A run in flight whose `instructions/<run>.md` is missing has it written again. If the text differs from the one its container or record was started with, or it cannot be written again, the run is ended as failed at once, with the reason naming the file (2026-11-24).
 
 ## ADR 0060: Kiln may change workflow files, and the developer says yes before such a change is published
 
