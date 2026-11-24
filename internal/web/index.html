@@ -150,6 +150,9 @@ button:disabled { opacity: .55; cursor: default; }
 #merging .note { color: var(--muted); }
 #merging .err { color: var(--amber-ink); }
 
+/* The measures */
+.measures { padding: 4px 28px 0; color: var(--muted); font-size: 12px; }
+
 /* The strip */
 .strip { padding: 18px 28px 6px; }
 .strip .quiet { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 8px; }
@@ -498,6 +501,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
 @media (max-width: 900px) {
   .top { padding: 12px 16px; gap: 12px; }
   .strip { padding: 14px 16px 4px; }
+  .measures { padding: 4px 16px 0; }
   .board { padding: 14px 16px 24px; grid-template-columns: repeat(5, minmax(230px, 1fr)); }
   .panel .body { padding: 18px 18px 48px; }
 }
@@ -528,6 +532,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
 <div id="offline" class="offline" hidden>the core does not answer; trying again every 2 seconds</div>
 <div id="stale" class="offline" hidden>the core serves another version of this page; reload the page to use it</div>
 <section id="strip" class="strip" aria-label="What needs you"></section>
+<section id="measures" class="measures" aria-label="Measures" title="Over the whole history. An intervention is a move of yours on a card other than writing it, starting it and the first approval of its spec; sending a spec back belongs to that approval. Not counted yet: your approvals of protected paths on the Git host, which the core does not see, and turning automatic merging on, which belongs to no card."></section>
 <main id="board" class="board" aria-label="Board"></main>
 <div id="scrim" class="scrim"></div>
 <aside id="panel" class="panel" aria-label="Card" aria-hidden="true">
@@ -539,6 +544,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
   <div class="body" id="p-body">
     <h1 id="p-title"></h1>
     <div class="cost" id="p-cost"></div>
+    <div class="cost" id="p-interventions"></div>
     <div id="p-reason"></div>
     <div class="moves" id="p-moves"></div>
     <div id="p-note"></div>
@@ -797,6 +803,18 @@ function buildColumns() {
   }
 }
 
+// The card's interventions in words, on its tile and on its page.
+function interventionsText(n) {
+  return n === 1 ? "1 intervention" : n + " interventions";
+}
+
+let measuresText = null;
+function renderMeasures(m) {
+  if (m.text === measuresText) return;
+  measuresText = m.text;
+  $("measures").textContent = m.text;
+}
+
 function tileOf(c) {
   const t = el("article", "tile" + (needsYou(c) ? " needs" : "") + (c.dropped ? " dropped" : ""));
   t.tabIndex = 0;
@@ -813,6 +831,7 @@ function tileOf(c) {
     cost.title = c.cost.label;
     foot.append(cost);
   }
+  if (c.interventions > 0) foot.append(el("span", "cost", interventionsText(c.interventions)));
   if (c.documents.length) foot.append(el("span", "docs", c.documents.join(" · ")));
   t.append(foot);
   t.addEventListener("click", () => openCard(c.id));
@@ -863,6 +882,7 @@ function renderBoard(b) {
     empty.hidden = want.length > 0;
   }
   renderStrip(b.cards);
+  renderMeasures(b.measures);
   tickClocks();
   boardSeen = true;
 }
@@ -1141,7 +1161,7 @@ function part(name, value, render) {
 
 function renderCard(c) {
   skew = Date.parse(c.now) - Date.now();
-  part("head", [c.id, c.title, c.stage, c.waits_for, !!c.run, c.run && c.run.since, c.send_backs, c.cost && c.cost.label], () => {
+  part("head", [c.id, c.title, c.stage, c.waits_for, !!c.run, c.run && c.run.since, c.send_backs, c.cost && c.cost.label, c.interventions], () => {
     $("p-id").textContent = "#" + c.id;
     const st = $("p-state");
     st.replaceChildren(el("span", "dot " + c.stage), el("span", null, STAGE_NAME[c.stage]), badge(c));
@@ -1149,6 +1169,7 @@ function renderCard(c) {
     if (round) st.append(round);
     $("p-title").textContent = c.title || "(no title)";
     $("p-cost").textContent = c.cost ? c.cost.label : "";
+    $("p-interventions").textContent = interventionsText(c.interventions);
   });
   const last = c.history[c.history.length - 1];
   part("reason", [c.stage, c.waits_for, c.reason, !!c.run, c.dropped, c.note, c.publishing, c.pull_request, c.merged], () => {

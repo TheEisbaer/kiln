@@ -111,6 +111,8 @@ type Summary struct {
 	InFlight *RunAt
 	Kinds    []string
 	Cost     *CardCost // nil when no run of the card has ended
+	// Interventions is the card's number of interventions (Interventions).
+	Interventions int
 }
 
 // Part is what some of a card's runs cost.
@@ -260,6 +262,29 @@ func (s *Store) Board() ([]Summary, error) {
 	}
 	if err := errorsOf(rows); err != nil {
 		return nil, err
+	}
+
+	// The entries' causes and states, by number, for the interventions.
+	rows, err = tx.Query(`SELECT card, cause, stage, waits_for FROM entries ORDER BY number`)
+	if err != nil {
+		return nil, err
+	}
+	entries := map[int64][]Entry{}
+	for rows.Next() {
+		var e Entry
+		if err := rows.Scan(&e.Card, &e.Cause, &e.Stage, &e.WaitsFor); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		entries[e.Card] = append(entries[e.Card], e)
+	}
+	if err := errorsOf(rows); err != nil {
+		return nil, err
+	}
+	for card, es := range entries {
+		if i, ok := at[card]; ok {
+			out[i].Interventions = Interventions(es)
+		}
 	}
 
 	rows, err = tx.Query(runAtSelect + ` ORDER BY rowid`)
