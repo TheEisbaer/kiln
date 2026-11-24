@@ -25,5 +25,5 @@ This follows Claude Code's own guidance, read on 2026-11-16: build from a spec i
 
 - A headless run can resume by a session's identifier or by the path to its record, by Claude Code's documentation. Resuming in a new container from a record that was carried there is not yet tested.
 - A send-back moves implement to a stronger model (ADR 0030), so a resumed session continues on another model than it began with. Not yet tested.
-- A resumed run reports the cost of the whole conversation, earlier runs included, by the same documentation. The budget ceiling (ADR 0029) has to allow for that.
+- A resumed run reports the cost of the whole conversation, earlier runs included, by the same documentation. The budget ceiling (ADR 0029) need not allow for that: `--max-budget-usd` counts only a run's own spend (Claude Code 2.1.326, 2026-11-24).
 - In the stretch built by hand the same rule applies, and rule 2 of ADR 0052 is reworded to say so.
