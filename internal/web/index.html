@@ -616,6 +616,8 @@ const WAITS = {
   room: "queued", host: "waits for the Git host", nothing: "done",
 };
 
+const DID = { failed: "the run failed", "sent back": "sent the change back", passed: "passed the change", finished: "the run finished" };
+
 const $ = (id) => document.getElementById(id);
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -1624,7 +1626,7 @@ function renderHistory(history) {
     const li = el("li");
     const mark = el("span", "mark dot " + e.stage);
     const l1 = el("div", "line1");
-    const to = e.dropped ? "dropped" : e.stage === "backlog" && e.waits_for === "developer" ? "not started" : WAITS[e.waits_for] || e.waits_for;
+    const to = e.did ? DID[e.did] || e.did : e.dropped ? "dropped" : e.stage === "backlog" && e.waits_for === "developer" ? "not started" : WAITS[e.waits_for] || e.waits_for;
     l1.append(el("span", "to", STAGE_NAME[e.stage] + ", " + to));
     l1.append(el("span", "by", "by " + (e.cause === "developer" ? "you" : e.cause === "run" ? "its run" : e.cause === "host" ? "the Git host" : "the " + e.cause)));
     l1.append(el("span", "when", when(e.at)));

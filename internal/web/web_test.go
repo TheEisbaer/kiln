@@ -1067,3 +1067,99 @@ func TestMergingOn(t *testing.T) {
 		t.Errorf("the refused move wrote an entry: %+v", h)
 	}
 }
+
+// TestHistoryStep checks that a run's entry the rule's entry follows in the
+// same step says what the run did, and that every other entry says nothing,
+// and that the page puts words to it.
+func TestHistoryStep(t *testing.T) {
+	f := newFixture(t)
+	rv := store.State{Stage: store.Review, WaitsFor: store.Developer}
+	doc := &store.Doc{Kind: store.KindReview, Text: "Verdict: goes back\n"}
+	start := func(stage store.Stage, run string) int64 {
+		id := f.card(t, "Step "+run, store.State{Stage: stage, WaitsFor: store.Run})
+		if err := f.store.AddRun(store.RunRow{ID: run, Card: id, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	// dids returns the did of each entry, in order, with the entry's cause.
+	dids := func(id int64) (got []string, causes []store.Cause) {
+		c := decode[cardJSON](t, f.do(t, "GET", fmt.Sprintf("/api/cards/%d", id), ""))
+		for _, e := range c.History {
+			got, causes = append(got, e.Did), append(causes, e.Cause)
+		}
+		return
+	}
+	last2 := func(t *testing.T, id int64, run, rule string) {
+		t.Helper()
+		got, causes := dids(id)
+		n := len(got)
+		if got[n-2] != run || got[n-1] != rule || causes[n-2] != store.CauseRun || causes[n-1] != store.CauseRule {
+			t.Errorf("the last two entries say %q, %q (causes %v), want %q, %q", got[n-2], got[n-1], causes, run, rule)
+		}
+		for _, d := range got[:n-2] {
+			if d != "" {
+				t.Errorf("an earlier entry says %q: %q", d, got)
+			}
+		}
+	}
+
+	t.Run("send-back pair", func(t *testing.T) {
+		id := start(store.Review, "r1")
+		rule := store.Rule{To: store.State{Stage: store.Implement, WaitsFor: store.Run}, SendBack: true, Reason: "the review sent the change back; implement runs again by the rule, send-back 1 of 2"}
+		if _, err := f.store.EndRunByRule("r1", store.Finished, "the review sends the change back; exit 0, result success, 3 turns, $0.10, not saved", rv, rule, store.Cost{}, doc); err != nil {
+			t.Fatal(err)
+		}
+		last2(t, id, "sent back", "")
+		if body := f.do(t, "GET", fmt.Sprintf("/api/cards/%d", id), "").Body.String(); !strings.Contains(body, `"did":"sent back"`) {
+			t.Errorf("the JSON lacks did: %s", body)
+		}
+	})
+	t.Run("retry pair", func(t *testing.T) {
+		id := start(store.Spec, "r2")
+		rule := store.Rule{To: store.State{Stage: store.Spec, WaitsFor: store.Run}, Reason: "the run failed; the rule runs it again"}
+		if _, err := f.store.EndRunByRule("r2", store.Failed, "exit 137, no result", store.State{Stage: store.Spec, WaitsFor: store.Developer}, rule, store.Cost{}); err != nil {
+			t.Fatal(err)
+		}
+		last2(t, id, "failed", "")
+	})
+	t.Run("passed pair", func(t *testing.T) {
+		id := start(store.Review, "r3")
+		rule := store.Rule{To: store.State{Stage: store.Review, WaitsFor: store.Host}, Publish: true, Reason: "the review passed; the rule publishes it"}
+		if _, err := f.store.EndRunByRule("r3", store.Finished, "exit 0, result success, 3 turns, $0.10, not saved", store.State{Stage: store.Review, WaitsFor: store.Approval}, rule, store.Cost{},
+			&store.Doc{Kind: store.KindReview, Text: "Verdict: passes\n"}); err != nil {
+			t.Fatal(err)
+		}
+		last2(t, id, "passed", "")
+	})
+	t.Run("a run's entry that stays under needs you", func(t *testing.T) {
+		id := start(store.Implement, "r4")
+		if _, err := f.store.EndRun("r4", store.Failed, "exit 1, no result", store.State{Stage: store.Implement, WaitsFor: store.Developer}, store.Cost{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range func() []string { g, _ := dids(id); return g }() {
+			if d != "" {
+				t.Errorf("an entry says %q", d)
+			}
+		}
+		// The rule moves the card in a later step: numbers follow, times do not.
+		if _, err := f.store.MoveWithReason(id, store.State{Stage: store.Implement, WaitsFor: store.Developer},
+			store.State{Stage: store.Implement, WaitsFor: store.Run}, store.CauseRule, "the rule runs it again"); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := dids(id)
+		for _, d := range got {
+			if d != "" {
+				t.Errorf("after a later step an entry says %q: %q", d, got)
+			}
+		}
+	})
+	for _, want := range []string{
+		`const DID = { failed: "the run failed", "sent back": "sent the change back", passed: "passed the change", finished: "the run finished" };`,
+		`e.did ? DID[e.did]`,
+	} {
+		if !strings.Contains(string(page), want) {
+			t.Errorf("the page lacks %s", want)
+		}
+	}
+}
