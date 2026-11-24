@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
@@ -29,8 +30,12 @@ import (
 // tick, like a run's follower and counted in no limit, brings main up to date,
 // puts the change onto it as one commit, and runs the developer's publish
 // command with it; the command's address is kept with the card. Once it has
-// one, the tick looks after every fetch whether the change is in main, and
-// closes the card when it is.
+// one, the tick tests it after a fetch that moved main, with the merge
+// publishing makes of main and the published commit: a change that is in main
+// closes the card, and a commit that no longer merges onto main makes the card
+// one the publisher publishes again, which sends it back to implement with
+// main merged into its branch and Kiln's markers, or publishes it again onto
+// the same pull request (testAtHost).
 //
 // Every step looks at what is there and goes on from it (ADR 0035): the commit
 // to publish is made the same from the same branch and main, so a publisher
@@ -213,10 +218,12 @@ func detach(cmd *exec.Cmd) {
 // atHostRound is what the tick does for the cards at the Git host: main is
 // brought up to date when a run may start or a card waits for the Git host,
 // and on every tick under a launcher, and after each round every card with a
-// pull request whose change is in main is closed, and the update looks at
-// main (update.go); then a checker is started for every card at the Git host
-// whose check is due (checkresult.go), and a publisher for every card the core
-// publishes.
+// pull request is tested against main when main or its commit moved since its
+// last test: closed when its change is in main, published again when it no
+// longer merges (testAtHost); and the update looks at main (update.go). Then a
+// checker is started for every card still at the Git host whose check is due
+// (checkresult.go), never for one the test moved in this round, and a
+// publisher for every card the core publishes.
 //
 // The tick waits for a fetch at most fetchWait, so that a slow origin holds
 // no run back for long; a publisher waits for it to its end.
@@ -241,18 +248,7 @@ func (c *core) atHostRound(ctx context.Context, starts bool) error {
 		}
 		if rounds := c.refreshMain(ctx, wait); rounds != c.checked {
 			c.checked, moved = rounds, true
-			ids := slices.Sorted(func(yield func(int64) bool) {
-				for id := range published {
-					if !yield(id) {
-						return
-					}
-				}
-			})
-			for _, id := range ids {
-				if err := c.closeIfMerged(ctx, id, published[id]); err != nil {
-					fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", id, run.Printable(err.Error()))
-				}
-			}
+			c.testAtHost(ctx, published)
 		}
 	}
 	c.startCheckers(ctx, published)
@@ -289,12 +285,122 @@ func (c *core) closeIfMerged(ctx context.Context, card int64, commit string) err
 	if err != nil || !in {
 		return err
 	}
+	return c.closeMerged(card)
+}
+
+// closeMerged closes a card at the Git host as merged by the Git host.
+func (c *core) closeMerged(card int64) error {
 	if _, err := c.store.MoveWithReason(card, atHost, closed, store.CauseHost, store.MergedReason); err != nil {
 		return err
 	}
 	c.update.merged.Store(true)
 	fmt.Fprintf(c.out, "card %d: merged\n", card)
 	return nil
+}
+
+// hostTest is what a card at the Git host was last tested with: main and its
+// published commit.
+type hostTest struct{ main, commit string }
+
+// testAtHost tests every card at the Git host with a published commit, by ID,
+// with the one merge that publishing makes, of main and the commit, unless
+// main and the commit are what they were at this core's last test of it
+// (ADR 0035): the test is a pace kept in memory only, so a core started again
+// tests every card at once. A merge without a conflict whose tree is main's
+// closes the card as merged: a merge is found first. A merge with a conflict
+// makes the card one the core publishes again (store.PublishAgain), its
+// publication cleared and its branch kept; the publisher then sends it back to
+// implement with main merged into its branch and Kiln's markers, publishes it
+// again onto the same pull request when its branch no longer collides, or
+// closes it when its change is all in main. Without a publish command the
+// card stays, and that is said once per main.
+//
+// The test and the check result command's round never both move one card:
+// each moves it only while it is at the Git host and its publication has the
+// commit it looked at, checked in the transaction that writes, and the second
+// is refused and writes nothing. The test touches no branch: only the
+// publisher does, once the card has no address, which store.CheckFailed
+// needs. A card the test moved, closed or cleared is taken out of published,
+// so that no checker is started for it in this round.
+//
+// A test that ended without an error, a refusal included, is kept in tested;
+// an error is printed and keeps nothing, and the card is tested again after
+// the next round.
+func (c *core) testAtHost(ctx context.Context, published map[int64]string) {
+	if c.tested == nil {
+		c.tested = map[int64]hostTest{}
+	}
+	for id := range c.tested {
+		if _, ok := published[id]; !ok {
+			delete(c.tested, id)
+		}
+	}
+	if len(published) == 0 {
+		return
+	}
+	main, mainTree, err := mainAndTree(ctx, c.Repo)
+	if err != nil {
+		fmt.Fprintf(c.errOut, "kiln core: the cards at the Git host are not tested: %s\n", run.Printable(err.Error()))
+		return
+	}
+	for _, id := range slices.Sorted(maps.Keys(published)) {
+		if ctx.Err() != nil {
+			return
+		}
+		commit := published[id]
+		if commit == "" || c.tested[id] == (hostTest{main, commit}) {
+			continue
+		}
+		gone, err := c.testCard(ctx, id, main, mainTree, commit)
+		if errors.Is(err, store.ErrRefused) {
+			gone, err = true, nil // moved meanwhile, by the checker or the developer
+		}
+		if err != nil {
+			fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", id, run.Printable(err.Error()))
+			continue
+		}
+		c.tested[id] = hostTest{main, commit}
+		if gone {
+			delete(published, id)
+		}
+	}
+}
+
+// mainAndTree reads main and its tree.
+func mainAndTree(ctx context.Context, repo string) (string, string, error) {
+	main, err := head(ctx, repo)
+	if err != nil {
+		return "", "", err
+	}
+	tree, err := gitLine(ctx, repo, "rev-parse", "--verify", main+"^{tree}")
+	return main, tree, err
+}
+
+// testCard tests one card at the Git host with main, and reports whether it
+// moved, was closed or had its publication cleared.
+func (c *core) testCard(ctx context.Context, id int64, main, mainTree, commit string) (bool, error) {
+	at("host-tested")
+	tree, conflicts, err := mergeTree(ctx, c.Repo, main, commit)
+	switch {
+	case err != nil:
+		return false, err
+	case len(conflicts) == 0 && tree == mainTree:
+		return true, c.closeMerged(id)
+	case len(conflicts) == 0:
+		return false, nil
+	case c.PublishCommand == "":
+		fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", id, run.Printable(fmt.Sprintf(
+			"the published commit %s no longer merges onto main: %s; without a publish command it stays at the Git host",
+			commit, fileNames(conflicts))))
+		return false, nil
+	}
+	reason := run.Printable(fmt.Sprintf("main moved, and the published commit %s no longer merges onto it: %s; the core publishes the change again",
+		commit, fileNames(conflicts)))
+	if _, err := c.store.PublishAgain(id, commit, reason); err != nil {
+		return false, err
+	}
+	fmt.Fprintf(c.out, "card %d: %s\n", id, reason)
+	return true, nil
 }
 
 // changesNothing reports whether merging a commit into main changes nothing:

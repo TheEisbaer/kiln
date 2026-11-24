@@ -255,3 +255,39 @@ func (s *Store) FailedCheck(card int64) (Entry, bool, error) {
 	}
 	return e, true, nil
 }
+
+// PublishAgain makes a card at the Git host whose published commit no longer
+// merges onto main one the core publishes again (Publishing lists it), by the
+// rule, with the reason, the card staying where it is and counting no
+// send-back: the publisher that publishes it sends it back, when its branch
+// collides with main. In the same transaction the card's publication must
+// still have the commit and an address; its commit and address are cleared,
+// and its branch on the Git host and the developer's yes are kept, so that it
+// is published again onto the same pull request. A card that is no longer at
+// the Git host, or whose publication has another commit or no address, is
+// refused with ErrRefused, nothing is written, and the card is returned as it
+// is. No store version is needed: the row is the one a review that passes
+// writes.
+func (s *Store) PublishAgain(card int64, commit, reason string) (Card, error) {
+	if commit == "" || reason == "" {
+		return Card{}, errors.New("publishing again needs a commit and a reason")
+	}
+	c, err := s.change(edit{id: card, next: atHost.only(atHost), cause: CauseRule, reason: reason, always: true,
+		write: func(tx *sql.Tx, card int64) error {
+			p, err := readPublication(tx, card)
+			if err != nil {
+				return err
+			}
+			if p.Commit != commit || p.Address == "" {
+				return fmt.Errorf("%w: card %d is published as %q, not as %s with an address", ErrRefused, card, p.Commit, commit)
+			}
+			return writePublication(tx, card, p.WorkflowYes)
+		}})
+	if errors.Is(err, ErrRefused) && c.ID == 0 {
+		// The refusal came from the write, which rolled everything back.
+		if cur, cerr := s.Card(card); cerr == nil {
+			c = cur
+		}
+	}
+	return c, err
+}

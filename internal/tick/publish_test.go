@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1362,5 +1363,321 @@ func TestMergingOffHoldsPublish(t *testing.T) {
 	lines, _ := p.states(t, card)
 	if want := []string{"review/run by run", "review/approval by run", "review/approval by rule"}; len(lines) < 3 || !slices.Equal(lines[:3], want) {
 		t.Errorf("the history is %q, want it to begin %q", lines, want)
+	}
+}
+
+// The files of a card at the Git host whose change main collides with, the
+// change of main that collides with it, and the reason of the rule's entry
+// that publishes it again, after the published commit.
+var (
+	hostFiles     = map[string]string{"NOTES.md": "# Notes\nA line of the card.\n"}
+	hostCollision = map[string]string{"NOTES.md": "# Notes\nA line of other work.\n"}
+)
+
+func publishAgainReason(commit string) string {
+	return "main moved, and the published commit " + commit + " no longer merges onto it: NOTES.md; the core publishes the change again"
+}
+
+// atHost has a core on the engine publish a card that writes hostFiles, or
+// the card stage writes and publishes, and waits until the card is at the Git
+// host; it returns the card, the published commit and the core.
+func (p *publishing) atHost(t *testing.T, e *fakeEngine, stage func(s *store.Store) int64) (int64, string, *running) {
+	t.Helper()
+	var card int64
+	p.with(t, func(s *store.Store) {
+		if stage != nil {
+			card = stage(s)
+			return
+		}
+		card = p.card(t, s, hostFiles)
+		p.publish(t, s, card, false)
+	})
+	core := p.start(t, e, 3)
+	p.waitFor(t, card, atHost, "published as ")
+	return card, gitIn(t, p.cfg.Repo, "rev-parse", fmt.Sprintf("refs/kiln/publish/card-%d", card)), core
+}
+
+// countAt counts the calls of at with the point, for one test.
+func countAt(t *testing.T, point string) *atomic.Int64 {
+	var n atomic.Int64
+	atPoint = func(p string) {
+		if p == point {
+			n.Add(1)
+		}
+	}
+	t.Cleanup(func() { atPoint = nil })
+	return &n
+}
+
+// fetchRounds waits for n rounds of fetching and n ticks.
+func fetchRounds(t *testing.T, e *fakeEngine, n int) {
+	t.Helper()
+	from := time.Now()
+	waitUntil(t, fmt.Sprintf("%d rounds of fetching", n), func() bool { return time.Since(from) > time.Duration(n)*fetchEvery })
+	e.waitTicks(t, n)
+}
+
+// TestAtHostConflict has main move under a card at the Git host so that its
+// published commit no longer merges: the rule publishes it again, and the
+// publisher sends it back to implement with main merged into its branch and
+// the files, as a send-back; the implement run starts from the merge and is
+// told what changed in main, and the publish command does not run again.
+func TestAtHostConflict(t *testing.T) {
+	p := newPublishing(t)
+	e := newFakeEngine()
+	card, commit, core := p.atHost(t, e, nil)
+	tip := gitIn(t, p.cfg.Repo, "rev-parse", "refs/heads/kiln/card-1")
+	main := p.moveOrigin(t, hostCollision)
+	p.waitFor(t, card, implementWaits, conflictReason)
+	waitUntil(t, "the implement run starts", func() bool { return slices.Contains(e.snapshot().started, card) })
+	core.stop(t)
+
+	lines, reasons := p.states(t, card)
+	n := len(lines)
+	if n < 2 || lines[n-2] != "review/host by rule" || reasons[n-2] != publishAgainReason(commit) ||
+		lines[n-1] != "implement/run by rule" || reasons[n-1] != conflictReason+": NOTES.md" {
+		t.Errorf("the history is %q, with the reasons %q", lines, reasons)
+	}
+	if !strings.Contains(core.out.String(), "card 1: "+publishAgainReason(commit)+"\n") {
+		t.Errorf("the core said\n%s", core.out)
+	}
+	merge := gitIn(t, p.cfg.Repo, "rev-parse", "refs/heads/kiln/card-1")
+	if got := gitIn(t, p.cfg.Repo, "log", "--format=%P", "-1", merge); got != tip+" "+main {
+		t.Errorf("the merge's parents are %q, want the tip %s and main %s", got, tip, main)
+	}
+	notes := gitIn(t, p.cfg.Repo, "show", merge+":NOTES.md")
+	for _, want := range []string{"<<<<<<< refs/heads/kiln/card-1", ">>>>>>> refs/heads/main"} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("NOTES.md of the merge lacks %q:\n%s", want, notes)
+		}
+	}
+	run := fmt.Sprintf("%s-1-4", p.instance)
+	p.look(t, func(s *store.Store) {
+		if c, _ := s.Card(card); c.SendBacks != 1 {
+			t.Errorf("the card has %d send-backs, want 1", c.SendBacks)
+		}
+		if r, err := s.Run(run); err != nil || r.Commit != merge || r.Model != "claude-opus-5-5" {
+			t.Errorf("the implement run is %+v (%v), want it from the merge %s on claude-opus-5-5", r, err, merge)
+		}
+	})
+	if told := string(readFile(t, filepath.Join(p.cfg.Data, "instructions", run+".md"))); !strings.Contains(told, "## What changed in main") {
+		t.Errorf("the implement run is told\n%s", told)
+	}
+	if n := p.calls(t); n != 1 {
+		t.Errorf("the command ran %d times, want 1", n)
+	}
+}
+
+// TestAtHostStillMerges leaves a card at the Git host whose published commit
+// still merges onto a main that moved.
+func TestAtHostStillMerges(t *testing.T) {
+	p := newPublishing(t)
+	e := newFakeEngine()
+	card, commit, core := p.atHost(t, e, nil)
+	tip := gitIn(t, p.cfg.Repo, "rev-parse", "refs/heads/kiln/card-1")
+	p.moveOrigin(t, map[string]string{"other.txt": "other work\n"})
+	fetchRounds(t, e, 5)
+	core.stop(t)
+	p.waitFor(t, card, atHost, "published as ")
+	p.look(t, func(s *store.Store) {
+		if c, _ := s.Card(card); c.SendBacks != 0 {
+			t.Errorf("the card has %d send-backs", c.SendBacks)
+		}
+	})
+	if got := gitIn(t, p.cfg.Repo, "rev-parse", "refs/heads/kiln/card-1"); got != tip {
+		t.Errorf("the branch moved from %s to %s", tip, got)
+	}
+	if got := gitIn(t, p.cfg.Repo, "rev-parse", "refs/kiln/publish/card-1"); got != commit {
+		t.Errorf("the published commit moved from %s to %s", commit, got)
+	}
+	if n := p.calls(t); n != 1 {
+		t.Errorf("the command ran %d times, want 1", n)
+	}
+}
+
+// TestAtHostMerged closes a card whose published commit is in origin's main,
+// also when other work followed it, as merged, and does not send it back.
+func TestAtHostMerged(t *testing.T) {
+	for _, tc := range []struct {
+		what  string
+		other bool
+	}{{"the commit", false}, {"the commit and other work", true}} {
+		t.Run(tc.what, func(t *testing.T) {
+			p := newPublishing(t)
+			card, commit, core := p.atHost(t, newFakeEngine(), nil)
+			core.stop(t)
+			gitIn(t, p.cfg.Repo, "push", "--quiet", "origin", commit+":refs/heads/main")
+			if tc.other {
+				p.moveOrigin(t, map[string]string{"other.txt": "other work\n"})
+			}
+			core = p.start(t, newFakeEngine(), 3)
+			last := p.waitFor(t, card, closed, "")
+			core.stop(t)
+			if last.Reason != store.MergedReason || last.Cause != store.CauseHost {
+				t.Errorf("the entry is %+v", last)
+			}
+			if _, reasons := p.states(t, card); slices.ContainsFunc(reasons, func(r string) bool { return strings.HasPrefix(r, "main moved") }) {
+				t.Errorf("the reasons are %q", reasons)
+			}
+			p.look(t, func(s *store.Store) {
+				if c, _ := s.Card(card); c.SendBacks != 0 {
+					t.Errorf("the card has %d send-backs", c.SendBacks)
+				}
+			})
+		})
+	}
+}
+
+// TestAtHostConflictThird has the published commit of a card that was sent
+// back twice already stop merging: it waits in implement for the developer,
+// with 3 send-backs, and no run starts.
+func TestAtHostConflictThird(t *testing.T) {
+	p := newPublishing(t)
+	e := newFakeEngine()
+	card, _, core := p.atHost(t, e, func(s *store.Store) int64 {
+		card := p.card(t, s, hostFiles)
+		if _, err := s.MoveSentBack(card, reviewPassed, reviewNeedsYou, "sent back by the test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.MoveSentBack(card, reviewNeedsYou, reviewPassed, "sent back by the test"); err != nil {
+			t.Fatal(err)
+		}
+		p.publish(t, s, card, false)
+		return card
+	})
+	p.moveOrigin(t, hostCollision)
+	last := p.waitFor(t, card, implementNeedsYou, "")
+	e.waitTicks(t, 3)
+	core.stop(t)
+	if want := conflictReason + ": NOTES.md; the card was sent back twice already, so it waits for you"; last.Reason != want {
+		t.Errorf("the entry is %+v, want the reason %q", last, want)
+	}
+	p.look(t, func(s *store.Store) {
+		if c, _ := s.Card(card); c.SendBacks != 3 {
+			t.Errorf("the card has %d send-backs, want 3", c.SendBacks)
+		}
+	})
+	if s := e.snapshot(); len(s.started) != 0 {
+		t.Errorf("runs started for %v", s.started)
+	}
+}
+
+// TestAtHostTestedOnce tests a card at the Git host once while main does not
+// move, once more after it moved, and once at once in a core started again.
+func TestAtHostTestedOnce(t *testing.T) {
+	p := newPublishing(t)
+	tested := countAt(t, "host-tested")
+	e := newFakeEngine()
+	_, _, core := p.atHost(t, e, nil)
+	waitUntil(t, "the first test", func() bool { return tested.Load() >= 1 })
+	fetchRounds(t, e, 10)
+	if n := tested.Load(); n != 1 {
+		t.Errorf("the card was tested %d times while main did not move, want 1", n)
+	}
+	p.moveOrigin(t, map[string]string{"other.txt": "other work\n"})
+	waitUntil(t, "the test after main moved", func() bool { return tested.Load() >= 2 })
+	fetchRounds(t, e, 5)
+	core.stop(t)
+	if n := tested.Load(); n != 2 {
+		t.Errorf("the card was tested %d times after main moved once, want 2", n)
+	}
+
+	tested.Store(0)
+	e = newFakeEngine()
+	core = p.start(t, e, 3)
+	waitUntil(t, "the test of the core started again", func() bool { return tested.Load() >= 1 })
+	fetchRounds(t, e, 5)
+	core.stop(t)
+	if n := tested.Load(); n != 1 {
+		t.Errorf("the core started again tested the card %d times, want 1", n)
+	}
+}
+
+// TestAtHostPublishedAgain publishes a card sent back from the Git host
+// because main moved, once it is resolved and its review passed, on the
+// branch it was published on, and so onto the same pull request, with a
+// commit on the new main.
+func TestAtHostPublishedAgain(t *testing.T) {
+	p := newPublishing(t)
+	const kept = "card/1-kept-by-the-test"
+	e := newFakeEngine()
+	card, _, core := p.atHost(t, e, func(s *store.Store) int64 {
+		card := p.card(t, s, hostFiles)
+		p.publish(t, s, card, false)
+		if _, err := s.PublishBranch(card, kept); err != nil {
+			t.Fatal(err)
+		}
+		return card
+	})
+	main := p.moveOrigin(t, hostCollision)
+	p.waitFor(t, card, implementWaits, conflictReason)
+	waitUntil(t, "the implement run starts", func() bool { return slices.Contains(e.snapshot().started, card) })
+	core.stop(t)
+
+	p.resolve(t, card, map[string]string{"NOTES.md": "# Notes\nA line of other work.\nA line of the card.\n"})
+	p.with(t, func(s *store.Store) {
+		if _, err := s.EndRun(fmt.Sprintf("%s-1-4", p.instance), store.Finished, "resolved by the test", reviewWaits, store.Cost{}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e = newFakeEngine()
+	core = p.start(t, e, 3)
+	e.open(card, "exit")
+	p.waitFor(t, card, atHost, "published as https://git.example/pull/1")
+	core.stop(t)
+
+	if _, reasons := p.states(t, card); slices.Index(reasons, "published as https://git.example/pull/1") < 0 {
+		t.Errorf("the reasons are %q", reasons)
+	}
+	if n := p.calls(t); n != 2 {
+		t.Fatalf("the command ran %d times, want 2", n)
+	}
+	first, second := p.env(t, 1), p.env(t, 2)
+	if first[envBranch] != kept || second[envBranch] != kept {
+		t.Errorf("the command was told the branches %q and %q, want %q", first[envBranch], second[envBranch], kept)
+	}
+	commit := second[envCommit]
+	if got := gitIn(t, p.cfg.Repo, "log", "--format=%P", "-1", commit); got != main {
+		t.Errorf("the second commit's parent is %q, want the new main %s", got, main)
+	}
+	p.look(t, func(s *store.Store) {
+		if pub, err := s.Publication(card); err != nil || pub.Commit != commit || pub.Address != "https://git.example/pull/1" || pub.Branch != kept {
+			t.Errorf("the publication is %+v (%v)", pub, err)
+		}
+	})
+}
+
+// TestAtHostAndCheckMoveOnce has a check fail for the published commit while
+// the card goes back to implement because main moved: the failed check finds
+// the card gone and writes nothing, and the card is sent back once.
+func TestAtHostAndCheckMoveOnce(t *testing.T) {
+	p := newChecking(t)
+	p.checkMode(t, 1, "gate")
+	checked := countAt(t, "checked")
+	e := newFakeEngine()
+	card, _, core := p.atHost(t, e, nil)
+	waitUntil(t, "the check waits", func() bool { return p.exists("waiting") })
+	p.moveOrigin(t, hostCollision)
+	p.waitFor(t, card, implementWaits, conflictReason)
+	waitUntil(t, "the implement run starts", func() bool { return slices.Contains(e.snapshot().started, card) })
+	write(t, p.check, map[string]string{"gate": "failed"})
+	waitUntil(t, "the check ends", func() bool { return checked.Load() >= 1 })
+	e.waitTicks(t, 5)
+	core.stop(t)
+
+	if got := p.checkEntries(t, card); len(got) != 0 {
+		t.Errorf("entries of the check: %+v", got)
+	}
+	p.look(t, func(s *store.Store) {
+		c, _ := s.Card(card)
+		if c.SendBacks != 1 || c.State != implementWaits {
+			t.Errorf("the card is %+v, want it in implement with 1 send-back", c)
+		}
+		if n, err := s.RunCount(card); err != nil || n != 4 {
+			t.Errorf("the card has %d runs (%v), want 4", n, err)
+		}
+	})
+	if s := e.snapshot(); !slices.Equal(s.started, []int64{card}) {
+		t.Errorf("runs started for %v, want one for %d", s.started, card)
 	}
 }
