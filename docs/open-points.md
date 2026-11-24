@@ -31,6 +31,7 @@ The spec for a card settles the points listed for it and removes them here in th
 
 ## Notes for later cards
 
+- **The start script.** `scripts/kiln-up` builds the program from `KILN_SOURCE` as it is. A source behind `main` gives a program that may be older than the store, which then refuses to start, or that updates itself at once. A source at a commit that is not in the copy gives a core that cannot tell whether `main` is past it, and never updates. The script warns about neither (2026-11-24).
 - **The limits card (ADR 0014).** Backlog, waiting for room, now also holds cards queued for predecessors. The per-repo limit must start only queued cards with no open predecessor. The rule's release would then queue for room, instead of moving to spec, when the limit is reached (2026-11-24).
 - **The measures card (ADR 0042, rule 2).** Starting is not an intervention. A `start` after a dropped predecessor is a start that the developer had to make, and whether it counts is that card's call (2026-11-24).
 - **The card that resumes a sent-back stage** (ADR 0053). Resume by the session's ID or the path to its record and never with `--fork-session`. A fork has a new `session_id` and restores the earlier totals as well, so the cost counted for it would be the whole conversation's (docs/settled.md, ADR 0053). Claude Code writes a session's totals into its record when the process exits normally; a session whose run was killed is not resumed (ADR 0053, rule 2).
