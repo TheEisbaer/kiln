@@ -354,7 +354,10 @@ func TestRefusedRenews(t *testing.T) {
 	r.stop(t)
 }
 
-// waitEnded waits until a card's run has ended in the store.
+// waitEnded waits until a card's run has ended in the store: the card has
+// a run, none is in flight, and the card no longer waits for one. A card
+// that b.card staged in implement or review already has ended runs, so the
+// count alone holds before the core has started the stage's run.
 func (b *bench) waitEnded(t *testing.T, e *fakeEngine, card int64) {
 	t.Helper()
 	waitUntil(t, fmt.Sprintf("the run of card %d to end", card), func() bool {
@@ -363,9 +366,45 @@ func (b *bench) waitEnded(t *testing.T, e *fakeEngine, card int64) {
 			return false
 		}
 		defer s.Close()
-		r, err := s.InFlight(card)
-		n, _ := s.RunCount(card)
-		return err == nil && r == nil && n > 0
+		return runEnded(s, card)
+	})
+}
+
+// runEnded reports whether the card has had a run, has none in flight and
+// no longer waits for one.
+func runEnded(s *store.Store, card int64) bool {
+	c, err := s.Card(card)
+	if err != nil || c.WaitsFor == store.Run {
+		return false
+	}
+	r, err := s.InFlight(card)
+	n, _ := s.RunCount(card)
+	return err == nil && r == nil && n > 0
+}
+
+// TestRunEnded checks runEnded at each step of a review card's run, with no
+// core: the card staged in review already has two ended runs, so the count
+// alone would hold before the review run starts.
+func TestRunEnded(t *testing.T) {
+	b := newBench(t, 1)
+	b.with(t, func(s *store.Store) {
+		card := b.card(t, s, store.Review)
+		if runEnded(s, card) {
+			t.Fatal("a card staged in review counts as ended before its review run started")
+		}
+		id := b.runID(card, 3)
+		if err := s.AddRun(store.RunRow{ID: id, Card: card, Commit: b.commit, Model: "m", Effort: "high"}, MaxRuns); err != nil {
+			t.Fatal(err)
+		}
+		if runEnded(s, card) {
+			t.Fatal("a card with a run in flight counts as ended")
+		}
+		if _, err := s.EndRun(id, store.Finished, "ended by the test", reviewPassed, store.Cost{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if !runEnded(s, card) {
+			t.Fatal("a card whose review run ended does not count as ended")
+		}
 	})
 }
 
