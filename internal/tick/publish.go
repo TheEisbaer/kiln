@@ -251,27 +251,26 @@ func detach(cmd *exec.Cmd) {
 	cmd.WaitDelay = 5 * time.Second
 }
 
-// atHostRound is what the tick does for the cards at the Git host: a repo's
-// main is brought up to date when a run of one of its cards may start, those
-// in fetch; Kiln's own also when a card waits for the Git host, and on every
-// tick under a launcher; and after each round of Kiln's own every card with a
-// pull request is tested against main when main or its commit moved since its
-// last test: closed when its change is in main, published again when it no
-// longer merges (testAtHost); and the update looks at main (update.go). Then a
-// checker is started for every card still at the Git host whose check is due
+// atHostRound is what the tick does for the cards at the Git host, repo by
+// repo, in the settings' order: a repo's main is brought up to date when a
+// run of one of its cards may start, those in fetch, or when one of its cards
+// waits for the Git host; Kiln's own also on every tick under a launcher. After
+// each round of a repo, every card of it with a pull request is tested against
+// its main when main or its commit moved since its last test: closed when its
+// change is in main, published again when it no longer merges (testAtHost).
+// The update looks at Kiln's own main only (update.go). Then a checker is
+// started for every card still at the Git host whose check is due
 // (checkresult.go), never for one the test moved in this round, and a
-// publisher for every card the core publishes.
+// publisher for every card the core publishes, each with its card's repo.
 //
-// The tick waits for a fetch at most fetchWait, so that a slow origin holds
-// no run back for long; a publisher waits for it to its end.
+// The tick waits for the fetches at most fetchWait in all, so that a slow
+// origin holds no run back for long; a publisher waits for it to its end.
 func (c *core) atHostRound(ctx context.Context, fetch map[string]bool) error {
-	toPublish, err := c.store.Publishing()
-	if err != nil {
-		return err
-	}
-	published, err := c.store.AtHost()
-	if err != nil {
-		return err
+	type side struct {
+		repo      settings.Repo
+		toPublish []int64
+		published map[int64]string
+		fetched   bool
 	}
 	// The rounds of every repo that needs one are started first, and then
 	// waited for at most fetchWait in all, so that two slow origins do not
@@ -279,73 +278,103 @@ func (c *core) atHostRound(ctx context.Context, fetch map[string]bool) error {
 	// own main up to date on every tick as well, so that an update is seen
 	// while nothing else needs main, without waiting for the fetch
 	// (update.go).
-	atHost := len(toPublish) > 0 || len(published) > 0
+	var sides []side
 	deadline := time.Now().Add(fetchWait)
 	var waits []<-chan struct{}
-	own := c.own()
-	ownFetched := false
 	for _, r := range c.repos() {
-		needed := fetch[r.Name] || (r.Own && atHost)
-		if !needed && !(r.Own && c.update.launched) {
-			continue
+		toPublish, err := c.store.Publishing(r.Name)
+		if err != nil {
+			return err
 		}
-		done := c.startRound(ctx, r)
-		if needed {
-			waits = append(waits, done)
+		published, err := c.store.AtHost(r.Name)
+		if err != nil {
+			return err
 		}
-		ownFetched = ownFetched || r.Own
+		needed := fetch[r.Name] || len(toPublish) > 0 || len(published) > 0
+		s := side{repo: r, toPublish: toPublish, published: published, fetched: needed || (r.Own && c.update.launched)}
+		if s.fetched {
+			done := c.startRound(ctx, r)
+			if needed {
+				waits = append(waits, done)
+			}
+		}
+		sides = append(sides, s)
 	}
 	awaitRounds(ctx, deadline, waits...)
-	moved := false
-	if ownFetched {
-		if rounds := c.rounds(own.Name); rounds != c.checked {
-			c.checked, moved = rounds, true
-			c.testAtHost(ctx, published)
+	// What a card was last tested with is dropped once it is at the Git host
+	// in no repo, so that one repo's round keeps another's.
+	for id := range c.tested {
+		if !slices.ContainsFunc(sides, func(s side) bool { _, ok := s.published[id]; return ok }) {
+			delete(c.tested, id)
 		}
 	}
-	c.startCheckers(ctx, published)
+	if c.checked == nil {
+		c.checked = map[string]int{}
+	}
+	moved := false
+	for _, s := range sides {
+		if !s.fetched {
+			continue
+		}
+		if rounds := c.rounds(s.repo.Name); rounds != c.checked[s.repo.Name] {
+			c.checked[s.repo.Name] = rounds
+			moved = moved || s.repo.Own
+			c.testAtHost(ctx, s.repo, s.published)
+		}
+	}
+	for _, s := range sides {
+		c.startCheckers(ctx, s.repo, s.published)
+	}
 	c.checkUpdate(ctx, moved)
-	return c.startPublishers(ctx, toPublish)
+	for _, s := range sides {
+		if err := c.startPublishers(ctx, s.repo, s.toPublish); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// startPublishers starts a publisher for each card the core publishes, when it
-// has a publish command.
-func (c *core) startPublishers(ctx context.Context, toPublish []int64) error {
-	if c.own().PublishCommand == "" {
+// startPublishers starts a publisher for each card of a repo the core
+// publishes, when the repo has a publish command.
+func (c *core) startPublishers(ctx context.Context, repo settings.Repo, toPublish []int64) error {
+	if repo.PublishCommand == "" {
 		return nil
 	}
 	for _, id := range toPublish {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		c.startPublisher(ctx, id)
+		c.startPublisher(ctx, repo, id)
 	}
 	return nil
 }
 
 // closeIfMerged closes a card at the Git host whose published commit, merged
-// into main, changes nothing: the Git host merged it.
-func (c *core) closeIfMerged(ctx context.Context, card int64, commit string) error {
+// into its repo's main, changes nothing: the Git host merged it.
+func (c *core) closeIfMerged(ctx context.Context, repo settings.Repo, card int64, commit string) error {
 	if commit == "" {
 		return nil
 	}
-	main, err := head(ctx, c.own().Copy)
+	main, err := head(ctx, repo.Copy)
 	if err != nil {
 		return err
 	}
-	in, err := changesNothing(ctx, c.own().Copy, main, commit)
+	in, err := changesNothing(ctx, repo.Copy, main, commit)
 	if err != nil || !in {
 		return err
 	}
-	return c.closeMerged(card)
+	return c.closeMerged(repo, card)
 }
 
-// closeMerged closes a card at the Git host as merged by the Git host.
-func (c *core) closeMerged(card int64) error {
+// closeMerged closes a card of a repo at the Git host as merged by the Git
+// host. Only a merge in Kiln's own repo counts for the update (ADR 0019).
+func (c *core) closeMerged(repo settings.Repo, card int64) error {
 	if _, err := c.store.MoveWithReason(card, atHost, closed, store.CauseHost, store.MergedReason); err != nil {
 		return err
 	}
-	c.update.merged.Store(true)
+	if repo.Own {
+		c.update.merged.Store(true)
+	}
 	fmt.Fprintf(c.out, "card %d: merged\n", card)
 	return nil
 }
@@ -354,8 +383,8 @@ func (c *core) closeMerged(card int64) error {
 // published commit.
 type hostTest struct{ main, commit string }
 
-// testAtHost tests every card at the Git host with a published commit, by ID,
-// with the one merge that publishing makes, of main and the commit, unless
+// testAtHost tests every card of a repo at the Git host with a published
+// commit, by ID, against the repo's main, with the one merge that publishing makes, of main and the commit, unless
 // main and the commit are what they were at this core's last test of it
 // (ADR 0035): the test is a pace kept in memory only, so a core started again
 // tests every card at once. A merge without a conflict whose tree is main's
@@ -378,19 +407,14 @@ type hostTest struct{ main, commit string }
 // A test that ended without an error, a refusal included, is kept in tested;
 // an error is printed and keeps nothing, and the card is tested again after
 // the next round.
-func (c *core) testAtHost(ctx context.Context, published map[int64]string) {
+func (c *core) testAtHost(ctx context.Context, repo settings.Repo, published map[int64]string) {
 	if c.tested == nil {
 		c.tested = map[int64]hostTest{}
-	}
-	for id := range c.tested {
-		if _, ok := published[id]; !ok {
-			delete(c.tested, id)
-		}
 	}
 	if len(published) == 0 {
 		return
 	}
-	main, mainTree, err := mainAndTree(ctx, c.own().Copy)
+	main, mainTree, err := mainAndTree(ctx, repo.Copy)
 	if err != nil {
 		fmt.Fprintf(c.errOut, "kiln core: the cards at the Git host are not tested: %s\n", run.Printable(err.Error()))
 		return
@@ -403,7 +427,7 @@ func (c *core) testAtHost(ctx context.Context, published map[int64]string) {
 		if commit == "" || c.tested[id] == (hostTest{main, commit}) {
 			continue
 		}
-		gone, err := c.testCard(ctx, id, main, mainTree, commit)
+		gone, err := c.testCard(ctx, repo, id, main, mainTree, commit)
 		if errors.Is(err, store.ErrRefused) {
 			gone, err = true, nil // moved meanwhile, by the checker or the developer
 		}
@@ -428,19 +452,19 @@ func mainAndTree(ctx context.Context, repo string) (string, string, error) {
 	return main, tree, err
 }
 
-// testCard tests one card at the Git host with main, and reports whether it
-// moved, was closed or had its publication cleared.
-func (c *core) testCard(ctx context.Context, id int64, main, mainTree, commit string) (bool, error) {
+// testCard tests one card at the Git host with its repo's main, and reports
+// whether it moved, was closed or had its publication cleared.
+func (c *core) testCard(ctx context.Context, repo settings.Repo, id int64, main, mainTree, commit string) (bool, error) {
 	at("host-tested")
-	tree, conflicts, err := mergeTree(ctx, c.own().Copy, main, commit)
+	tree, conflicts, err := mergeTree(ctx, repo.Copy, main, commit)
 	switch {
 	case err != nil:
 		return false, err
 	case len(conflicts) == 0 && tree == mainTree:
-		return true, c.closeMerged(id)
+		return true, c.closeMerged(repo, id)
 	case len(conflicts) == 0:
 		return false, nil
-	case c.own().PublishCommand == "":
+	case repo.PublishCommand == "":
 		fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", id, run.Printable(fmt.Sprintf(
 			"the published commit %s no longer merges onto main: %s; without a publish command it stays at the Git host",
 			commit, fileNames(conflicts))))
@@ -466,11 +490,11 @@ func changesNothing(ctx context.Context, repo, main, commit string) (bool, error
 	return tree == mainTree, err
 }
 
-// startPublisher starts a publisher for a card beside the tick, unless one
-// publishes it already. The card is published from now until the publisher
+// startPublisher starts a publisher for a card of a repo beside the tick,
+// unless one publishes it already. The card is published from now until the publisher
 // has returned; an error of it is printed with the card's ID, and the next
 // tick starts another.
-func (c *core) startPublisher(ctx context.Context, id int64) {
+func (c *core) startPublisher(ctx context.Context, repo settings.Repo, id int64) {
 	c.mu.Lock()
 	if c.publishing[id] {
 		c.mu.Unlock()
@@ -481,7 +505,7 @@ func (c *core) startPublisher(ctx context.Context, id int64) {
 	c.followers.Add(1)
 	go func() {
 		defer c.followers.Done()
-		err := c.publish(ctx, id)
+		err := c.publish(ctx, repo, id)
 		if ctx.Err() == nil {
 			// An error of the publishing itself leaves the card under
 			// "needs you" too, with its moves, and is not tried again on
@@ -503,14 +527,14 @@ func (c *core) startPublisher(ctx context.Context, id int64) {
 	}()
 }
 
-// publish publishes one card that waits for the Git host without a pull
-// request: main is brought up to date; a branch that still holds an earlier
+// publish publishes one card of a repo that waits for the Git host without a
+// pull request, all of it in the repo's copy: its main is brought up to date; a branch that still holds an earlier
 // merge of main with its conflicts, or a change that collides with main,
 // sends the card back to implement; a change that is all in main closes it;
 // and otherwise the change is put onto main as one commit and the publish
 // command is run with it. The command's address is kept with the card, and
 // its failure moves the card to "needs you".
-func (c *core) publish(ctx context.Context, id int64) error {
+func (c *core) publish(ctx context.Context, repo settings.Repo, id int64) error {
 	card, err := c.store.Card(id)
 	if err != nil {
 		return err
@@ -522,7 +546,6 @@ func (c *core) publish(ctx context.Context, id int64) error {
 	if card.State != atHost || pub.Address != "" {
 		return nil
 	}
-	repo := c.own()
 	c.refreshMain(ctx, repo, fetchLimit+10*time.Second)
 	branch := branchOf(id)
 	tip, err := branchTip(ctx, repo.Copy, branch)
@@ -550,7 +573,7 @@ func (c *core) publish(ctx context.Context, id int64) error {
 		return err
 	}
 	if len(conflicts) > 0 {
-		if err := c.mergeMain(ctx, id, tip, main); err != nil {
+		if err := c.mergeMain(ctx, repo, id, tip, main); err != nil {
 			return err
 		}
 		return c.toImplement(card, conflicts)
@@ -620,7 +643,7 @@ func (c *core) publish(ctx context.Context, id int64) error {
 	}
 	at("publish/before-command")
 	fmt.Fprintf(c.out, "card %d: publishes %s\n", id, commit)
-	address, failure := c.runPublish(ctx, env)
+	address, failure := c.runPublish(ctx, repo.PublishCommand, env)
 	if ctx.Err() != nil {
 		return ctx.Err() // an interrupt: the next core publishes again
 	}
@@ -715,9 +738,10 @@ func mergeMessage(card int64) string {
 // mergeMain merges main into a card's branch whose change collides with it,
 // as one commit with the branch's tip and main as its parents and the merge's
 // tree, conflict markers included, and moves the branch to it, guarded by
-// its tip. The implement run that follows starts there (told).
-func (c *core) mergeMain(ctx context.Context, card int64, tip, main string) error {
-	repo := c.own().Copy
+// its tip, all in the copy of the card's repo. The implement run that follows
+// starts there (told).
+func (c *core) mergeMain(ctx context.Context, r settings.Repo, card int64, tip, main string) error {
+	repo := r.Copy
 	// Merged by the refs, so that the conflict markers name them, and only
 	// while the refs are where they were read.
 	tree, _, err := mergeTree(ctx, repo, "refs/heads/"+branchOf(card), "refs/heads/main")
@@ -944,17 +968,17 @@ func workflowFiles(ctx context.Context, repo, commit string) ([]string, error) {
 	return files, nil
 }
 
-// runPublish runs the publish command (card 19): with sh -c, in the data
-// directory, with no standard input, for at most publishLimit, its process
-// group ended with it, and with the environment of the core, from which the
-// command's variables are taken out, and env. It returns the pull request's
-// address, the last line of its standard output that starts with https://,
-// or the failure: its exit status and its standard error, made printable and
-// cut to its last 2 KiB.
-func (c *core) runPublish(ctx context.Context, env []string) (address, failure string) {
+// runPublish runs command, the publish command of a card's repo (card 19):
+// with sh -c, in the data directory, with no standard input, for at most
+// publishLimit, its process group ended with it, and with the environment of
+// the core, from which the command's variables are taken out, and env. It
+// returns the pull request's address, the last line of its standard output
+// that starts with https://, or the failure: its exit status and its standard
+// error, made printable and cut to its last 2 KiB.
+func (c *core) runPublish(ctx context.Context, command string, env []string) (address, failure string) {
 	ctx, cancel := context.WithTimeout(ctx, publishLimit)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", c.own().PublishCommand)
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = c.Data
 	for _, e := range os.Environ() {
 		name, _, _ := strings.Cut(e, "=")

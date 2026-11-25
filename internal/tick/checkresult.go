@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/TheEisbaer/kiln/internal/run"
+	"github.com/TheEisbaer/kiln/internal/settings"
 	"github.com/TheEisbaer/kiln/internal/store"
 )
 
@@ -62,27 +63,32 @@ const maxLastLine = 200
 var commitName = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // checkState is what the core knows of the checks of one card's published
-// commit: the commit, when its last check started, whether a checker runs
-// for it, and the text last said on the error output about it.
+// commit: the card's repo, the commit, when its last check started, whether a
+// checker runs for it, and the text last said on the error output about it.
 type checkState struct {
+	repo    settings.Repo
 	commit  string
 	last    time.Time
 	running bool
 	said    string
 }
 
-// startCheckers starts a checker for each card at the Git host whose check is
-// due, when the core has a check result command: one that has none running,
-// whose commit this core sees for the first time or was checked checkEvery
-// ago. The state of a card that is no longer at the Git host, or whose commit
-// changed, is dropped once no checker runs for it.
-func (c *core) startCheckers(ctx context.Context, published map[int64]string) {
-	if c.own().CheckResultCommand == "" {
+// startCheckers starts a checker for each card of a repo at the Git host whose
+// check is due, when the repo has a check result command: one that has none
+// running, whose commit this core sees for the first time or was checked
+// checkEvery ago. The state of a card of the repo that is no longer at the Git
+// host, or whose commit changed, is dropped once no checker runs for it; the
+// other repos' states are left to their own rounds.
+func (c *core) startCheckers(ctx context.Context, repo settings.Repo, published map[int64]string) {
+	if repo.CheckResultCommand == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for id, st := range c.checking {
+		if st.repo.Name != repo.Name {
+			continue
+		}
 		if commit, ok := published[id]; !st.running && (!ok || commit != st.commit) {
 			delete(c.checking, id)
 		}
@@ -100,7 +106,7 @@ func (c *core) startCheckers(ctx context.Context, published map[int64]string) {
 		commit := published[id]
 		st := c.checking[id]
 		if st == nil {
-			st = &checkState{commit: commit}
+			st = &checkState{repo: repo, commit: commit}
 			c.checking[id] = st
 		}
 		if st.commit != commit || st.running || (!st.last.IsZero() && time.Since(st.last) < checkEvery) {
@@ -136,7 +142,7 @@ func (c *core) sayCheck(st *checkState, text string) {
 // check runs the check result command once for a card's commit and acts on
 // its result.
 func (c *core) check(ctx context.Context, id int64, st *checkState) {
-	result, output, failure := c.runCheckResult(ctx, st.commit)
+	result, output, failure := c.runCheckResult(ctx, st.repo.CheckResultCommand, st.commit)
 	if ctx.Err() != nil {
 		return // an interrupt: the next core checks again
 	}
@@ -148,25 +154,25 @@ func (c *core) check(ctx context.Context, id int64, st *checkState) {
 	}
 	c.mu.Unlock()
 	if result == checkFailed {
-		if err := c.checkFailed(ctx, id, st.commit, output); err != nil && ctx.Err() == nil {
+		if err := c.checkFailed(ctx, st.repo, id, st.commit, output); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(c.errOut, "kiln core: card %d: the failed check is not acted on: %s\n", id, run.Printable(err.Error()))
 		}
 	}
 	at("checked")
 }
 
-// checkFailed acts on a failed check for a card's commit: main is brought up
-// to date, a change that is in main already closes the card as merged, and
+// checkFailed acts on a failed check for a card's commit: the main of the
+// card's repo is brought up to date, a change that is in main already closes the card as merged, and
 // otherwise the card goes to implement by the rule, as a send-back, with the
 // check's output in the entry; to implement waiting for the developer when it
 // was sent back twice already. A card that is no longer at the Git host with
 // this commit is left as it is.
-func (c *core) checkFailed(ctx context.Context, id int64, commit, output string) error {
-	c.refreshMain(ctx, c.own(), fetchLimit+10*time.Second)
+func (c *core) checkFailed(ctx context.Context, repo settings.Repo, id int64, commit, output string) error {
+	c.refreshMain(ctx, repo, fetchLimit+10*time.Second)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if err := c.closeIfMerged(ctx, id, commit); err != nil && !errors.Is(err, store.ErrRefused) {
+	if err := c.closeIfMerged(ctx, repo, id, commit); err != nil && !errors.Is(err, store.ErrRefused) {
 		return err
 	}
 	card, err := c.store.Card(id)
@@ -195,16 +201,16 @@ func (c *core) checkFailed(ctx context.Context, id int64, commit, output string)
 	return nil
 }
 
-// runCheckResult runs the check result command for a commit: with sh -c, in
-// the data directory, with no standard input, for at most checkLimit, its
-// session killed with it, and with the environment of the core without any
-// name that begins with KILN_, and KILN_COMMIT, the commit. Its standard
-// error is only said, in a failure. It returns the result and, for a failed
-// check, its output (see readCheck), or the failure.
-func (c *core) runCheckResult(ctx context.Context, commit string) (result, output, failure string) {
+// runCheckResult runs command, the check result command of a card's repo, for
+// a commit: with sh -c, in the data directory, with no standard input, for at
+// most checkLimit, its session killed with it, and with the environment of the
+// core without any name that begins with KILN_, and KILN_COMMIT, the commit.
+// Its standard error is only said, in a failure. It returns the result and,
+// for a failed check, its output (see readCheck), or the failure.
+func (c *core) runCheckResult(ctx context.Context, command, commit string) (result, output, failure string) {
 	cctx, cancel := context.WithTimeout(ctx, checkLimit)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "sh", "-c", c.own().CheckResultCommand)
+	cmd := exec.CommandContext(cctx, "sh", "-c", command)
 	cmd.Dir = c.Data
 	for _, e := range os.Environ() {
 		if !strings.HasPrefix(e, "KILN_") {

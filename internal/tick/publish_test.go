@@ -2,6 +2,7 @@ package tick
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,6 +57,7 @@ echo "https://git.example/pull/$KILN_CARD"
 // the publish command's directory.
 type publishing struct {
 	*bench
+	repo   string // the name of the repo its cards are written in, kiln when empty
 	origin string // the origin, a bare repo
 	dir    string // the publish command's directory
 	data   string // the store's file
@@ -112,7 +114,7 @@ func (p *publishing) reviewing(t *testing.T, s *store.Store, files map[string]st
 
 func (p *publishing) stage(t *testing.T, s *store.Store, files map[string]string, passed bool) int64 {
 	t.Helper()
-	c, err := s.Create("Add a line to the notes.\n\nThe second paragraph.")
+	c, err := s.CreateIn(cmp.Or(p.repo, store.KilnRepo), "Add a line to the notes.\n\nThe second paragraph.", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +759,7 @@ func TestRunPublish(t *testing.T) {
 			strings.Repeat("x", 2048-len("\nthe end")) + "\nthe end"},
 	} {
 		c.PublishCommand = tc.command
-		address, failure := c.runPublish(t.Context(), nil)
+		address, failure := c.runPublish(t.Context(), c.PublishCommand, nil)
 		if address != tc.address || failure != tc.failure {
 			t.Errorf("%s: %q, %q; want %q, %q", tc.command, address, failure, tc.address, tc.failure)
 		}
@@ -769,7 +771,7 @@ func TestRunPublish(t *testing.T) {
 	pid := filepath.Join(t.TempDir(), "pid")
 	c.PublishCommand = "sleep 60 & echo $! > " + pid + "; wait"
 	start := time.Now()
-	if _, failure := c.runPublish(t.Context(), nil); failure != "the publish command did not end within 200ms" || time.Since(start) > 10*time.Second {
+	if _, failure := c.runPublish(t.Context(), c.PublishCommand, nil); failure != "the publish command did not end within 200ms" || time.Since(start) > 10*time.Second {
 		t.Errorf("a command that takes too long: %q after %s", failure, time.Since(start))
 	}
 	var n int

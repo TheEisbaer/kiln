@@ -33,9 +33,10 @@ var (
 // reports false when the context was cancelled first. An error is printed
 // once per text.
 func (c *core) compareUntilPassed(ctx context.Context, every time.Duration) bool {
-	var printed, hostPrinted string
+	var printed string
+	hostPrinted := map[string]string{}
 	for {
-		err := c.compare(ctx, &hostPrinted)
+		err := c.compare(ctx, hostPrinted)
 		if ctx.Err() != nil {
 			return false
 		}
@@ -54,11 +55,12 @@ func (c *core) compareUntilPassed(ctx context.Context, every time.Duration) bool
 	}
 }
 
-// compare is one comparison: the store, the container engine, main at the
-// Git host and the core's own screen, each only read. A Git host that does
-// not answer is printed, once per text in hostPrinted, and does not fail the
-// comparison.
-func (c *core) compare(ctx context.Context, hostPrinted *string) error {
+// compare is one comparison: the store, the container engine, every repo's
+// main at its Git host, in the settings' order, and the core's own screen,
+// each only read. A Git host that does not answer is printed, with the repo's
+// name when the instance has more than one, once per text in hostPrinted, by
+// the repo's name, and does not fail the comparison.
+func (c *core) compare(ctx context.Context, hostPrinted map[string]string) error {
 	if _, err := c.store.Board(); err != nil {
 		return fmt.Errorf("the store: %w", err)
 	}
@@ -80,17 +82,24 @@ func (c *core) compare(ctx context.Context, hostPrinted *string) error {
 			return fmt.Errorf("the container engine, run %s: %w", id, err)
 		}
 	}
-	text := ""
-	if err := readMain(ctx, c.own().Copy); err != nil {
-		text = run.Printable(err.Error())
+	repos := c.repos()
+	for _, r := range repos {
+		text := ""
+		if err := readMain(ctx, r.Copy); err != nil {
+			text = run.Printable(err.Error())
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if text != "" && text != hostPrinted[r.Name] {
+			named := text
+			if len(repos) > 1 {
+				named = "repo " + r.Name + ": " + text
+			}
+			fmt.Fprintf(c.errOut, "kiln core: the comparison before the report: main is not read at the Git host, which does not hold the report: %s\n", named)
+		}
+		hostPrinted[r.Name] = text
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if text != "" && text != *hostPrinted {
-		fmt.Fprintf(c.errOut, "kiln core: the comparison before the report: main is not read at the Git host, which does not hold the report: %s\n", text)
-	}
-	*hostPrinted = text
 	if c.screen != "" {
 		if err := checkScreen(ctx, c.screen); err != nil {
 			return fmt.Errorf("the screen: %w", err)

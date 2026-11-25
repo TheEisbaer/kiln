@@ -166,8 +166,7 @@ func (c Config) repoOf(card store.Card) (settings.Repo, error) {
 
 // checkRepos refuses, with the reason, repos that the core cannot work with:
 // a list together with the flags of one repo, a list that settings.Check
-// refuses, neither a list nor --repo, and, until publishing and the Git
-// host's side work per repo, more than one repo.
+// refuses, and neither a list nor --repo.
 func checkRepos(cfg Config) error {
 	if len(cfg.Repos) == 0 {
 		if cfg.Repo == "" {
@@ -181,10 +180,6 @@ func checkRepos(cfg Config) error {
 	}
 	if err := settings.Check(cfg.Repos); err != nil {
 		return err
-	}
-	if len(cfg.Repos) > 1 {
-		return errors.New("an instance of more than one repo is not built yet: publishing, the check result command, " +
-			"the tests at the Git host and the update still work on Kiln's own repo only")
 	}
 	return nil
 }
@@ -507,11 +502,18 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 		checking: map[int64]*checkState{}, tested: map[int64]hostTest{}, clock: clk, renewNow: make(chan struct{}, 1)}
 	c.update.launched, c.update.built = l != nil, make(chan string, 1)
 	fmt.Fprintf(out, "kiln core: instance %s, data %s, up to %d runs at once\n", instance, cfg.Data, cfg.Runs)
-	if cfg.own().PublishCommand != "" {
-		fmt.Fprintln(out, "kiln core: a card is published with the publish command")
-	}
-	if cfg.own().CheckResultCommand != "" {
-		fmt.Fprintln(out, "kiln core: a card at the Git host is checked with the check result command")
+	// With more than one repo, each line names its repo.
+	for _, r := range cfg.repos() {
+		prefix := "kiln core: "
+		if len(cfg.repos()) > 1 {
+			prefix += "repo " + r.Name + ": "
+		}
+		if r.PublishCommand != "" {
+			fmt.Fprintln(out, prefix+"a card is published with the publish command")
+		}
+		if r.CheckResultCommand != "" {
+			fmt.Fprintln(out, prefix+"a card at the Git host is checked with the check result command")
+		}
 	}
 	// The screen, which refuses moves until the report.
 	var stopScreen func()
@@ -626,11 +628,11 @@ type core struct {
 	checking map[int64]*checkState
 
 	// fetchMu guards mains, the fetching of each repo's main, by the repo's
-	// name; checked is the rounds of Kiln's own repo's after which the tick
-	// last looked for merged cards, read by the tick only.
+	// name; checked is the rounds of each repo, by its name, after which the
+	// tick last tested its cards at the Git host, read by the tick only.
 	fetchMu sync.Mutex
 	mains   map[string]*mainState
-	checked int
+	checked map[string]int
 	// tested is what each card at the Git host was last tested with, read
 	// and written by the tick only, like checked (publish.go).
 	tested map[int64]hostTest
@@ -749,13 +751,15 @@ func (c *core) serve() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("the screen: %w", err)
 	}
-	var names []string
-	for _, r := range c.Repos {
-		names = append(names, r.Name)
+	var repos []web.Repo
+	publishing := map[string]bool{}
+	for _, r := range c.repos() {
+		repos = append(repos, web.Repo{Name: r.Name, Copy: r.Copy})
+		publishing[r.Name] = r.PublishCommand != ""
 	}
-	info := web.Info{Instance: c.instance, Repo: c.own().Copy, Repos: names, Model: c.model(store.Spec),
+	info := web.Info{Instance: c.instance, Repo: c.own().Copy, Repos: repos, Model: c.model(store.Spec),
 		ImplementModel: c.model(store.Implement), ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change,
-		Page: c.Page, Publishing: c.own().PublishCommand != "", Version: versionOf(c.Version), Accepting: c.acting.Load}
+		Page: c.Page, Publishing: publishing, Version: versionOf(c.Version), Accepting: c.acting.Load}
 	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()
@@ -1311,9 +1315,15 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 	}
 
 	var rule *store.Rule
-	if f.card.Stage == store.Review && d.to == reviewPassed && c.own().PublishCommand != "" {
-		if rule, err = c.passedRule(ctx, id); err != nil {
-			return fmt.Errorf("the branch of run %s: %w; it is read again on the next tick", row.ID, err)
+	if f.card.Stage == store.Review && d.to == reviewPassed {
+		repo, err := c.repoOf(f.card)
+		if err != nil {
+			return fmt.Errorf("the end of run %s: %w; it is read again on the next tick", row.ID, err)
+		}
+		if repo.PublishCommand != "" {
+			if rule, err = c.passedRule(ctx, repo, id); err != nil {
+				return fmt.Errorf("the branch of run %s: %w; it is read again on the next tick", row.ID, err)
+			}
 		}
 	}
 	if f.card.Stage == store.Review && d.ending == store.Finished && d.doc != nil && verdictLine(d.doc.Text) == goesBack {
@@ -1353,13 +1363,14 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 	return c.engine.Remove(ctx, in)
 }
 
-// passedRule is the rule's step for a card whose review passed, with a publish
-// command: the card goes to the Git host to be published, unless the change on
-// its branch touches the workflow files, which wait for the developer's yes
-// (ADR 0060), or the branch is gone, or automatic merging is off after a
-// failed update (ADR 0019, rule 3). It reads the store and the branch and
-// changes nothing.
-func (c *core) passedRule(ctx context.Context, id int64) (*store.Rule, error) {
+// passedRule is the rule's step for a card of a repo with a publish command
+// whose review passed: the card goes to the Git host to be published, unless
+// the change on its branch touches the workflow files, which wait for the
+// developer's yes (ADR 0060), or the branch is gone, or automatic merging is
+// off after a failed update (ADR 0019, rule 3), which holds back the cards of
+// every repo. It reads the store and the branch in the repo's copy and changes
+// nothing.
+func (c *core) passedRule(ctx context.Context, repo settings.Repo, id int64) (*store.Rule, error) {
 	merging, err := c.store.Merging()
 	if err != nil {
 		return nil, err
@@ -1369,8 +1380,7 @@ func (c *core) passedRule(ctx context.Context, id int64) (*store.Rule, error) {
 			"so the rule does not publish it, and it waits for you"}, nil
 	}
 	branch := branchOf(id)
-	own := c.own().Copy
-	tip, err := branchTip(ctx, own, branch)
+	tip, err := branchTip(ctx, repo.Copy, branch)
 	if err != nil {
 		return nil, err
 	}
@@ -1378,7 +1388,7 @@ func (c *core) passedRule(ctx context.Context, id int64) (*store.Rule, error) {
 		return &store.Rule{To: reviewPassed, Reason: run.Printable(
 			"the review passed; the card's branch " + branch + " does not exist, so the rule does not publish it")}, nil
 	}
-	files, err := workflowFiles(ctx, own, tip)
+	files, err := workflowFiles(ctx, repo.Copy, tip)
 	if err != nil {
 		return nil, err
 	}

@@ -121,17 +121,17 @@ func (s *Store) PublishBranch(card int64, name string) (string, error) {
 	return p.Branch, tx.Commit()
 }
 
-// Publishing lists the cards that wait for the Git host and have no pull
-// request's address yet, which the core publishes, by ID.
-func (s *Store) Publishing() ([]int64, error) {
-	return s.atHost(`address IS NULL`)
+// Publishing lists the cards of the named repo that wait for the Git host and
+// have no pull request's address yet, which the core publishes, by ID.
+func (s *Store) Publishing(repo string) ([]int64, error) {
+	return s.atHost(repo, `address IS NULL`)
 }
 
-// AtHost lists the cards that wait for the Git host with a pull request's
-// address, by ID, with the commits they published.
-func (s *Store) AtHost() (map[int64]string, error) {
+// AtHost lists the cards of the named repo that wait for the Git host with a
+// pull request's address, by ID, with the commits they published.
+func (s *Store) AtHost(repo string) (map[int64]string, error) {
 	rows, err := s.db.Query(`SELECT cards.id, publishes.commit_id FROM cards JOIN publishes ON publishes.card = cards.id
-		WHERE cards.stage = ? AND cards.waits_for = ? AND publishes.address IS NOT NULL`, Review, Host)
+		WHERE cards.stage = ? AND cards.waits_for = ? AND publishes.address IS NOT NULL AND cards.repo = ?`, Review, Host, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -148,12 +148,12 @@ func (s *Store) AtHost() (map[int64]string, error) {
 	return out, rows.Err()
 }
 
-// atHost lists the cards that wait for the Git host whose publication fits
-// the condition, a card without a publication counting as one without an
-// address.
-func (s *Store) atHost(cond string) ([]int64, error) {
+// atHost lists the cards of the named repo that wait for the Git host whose
+// publication fits the condition, a card without a publication counting as
+// one without an address.
+func (s *Store) atHost(repo, cond string) ([]int64, error) {
 	rows, err := s.db.Query(`SELECT cards.id FROM cards LEFT JOIN publishes ON publishes.card = cards.id
-		WHERE cards.stage = ? AND cards.waits_for = ? AND (`+cond+`) ORDER BY cards.id`, Review, Host)
+		WHERE cards.stage = ? AND cards.waits_for = ? AND (`+cond+`) AND cards.repo = ? ORDER BY cards.id`, Review, Host, repo)
 	if err != nil {
 		return nil, err
 	}

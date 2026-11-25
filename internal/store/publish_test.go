@@ -65,7 +65,7 @@ func TestPublishMoves(t *testing.T) {
 	if p, err := s.Publication(card.ID); err != nil || p != (Publication{WorkflowYes: "c0ffee"}) {
 		t.Errorf("the publication after publish: %+v, %v", p, err)
 	}
-	if ids, err := s.Publishing(); err != nil || !reflect.DeepEqual(ids, []int64{card.ID}) {
+	if ids, err := s.Publishing(KilnRepo); err != nil || !reflect.DeepEqual(ids, []int64{card.ID}) {
 		t.Errorf("the cards the core publishes: %v, %v", ids, err)
 	}
 
@@ -98,10 +98,10 @@ func TestPublishMoves(t *testing.T) {
 	if _, err := s.KeepPullRequest(card.ID, "beef", "https://git.example/pull/8"); !errors.Is(err, ErrRefused) {
 		t.Errorf("a second address: %v", err)
 	}
-	if at, err := s.AtHost(); err != nil || !reflect.DeepEqual(at, map[int64]string{card.ID: "beef"}) {
+	if at, err := s.AtHost(KilnRepo); err != nil || !reflect.DeepEqual(at, map[int64]string{card.ID: "beef"}) {
 		t.Errorf("AtHost: %v, %v", at, err)
 	}
-	if ids, _ := s.Publishing(); len(ids) != 0 {
+	if ids, _ := s.Publishing(KilnRepo); len(ids) != 0 {
 		t.Errorf("the cards the core publishes: %v", ids)
 	}
 	if want := []Allowed{{MarkDone, NoNote}, {SendBack, RequiredNote}, {Drop, OptionalNote}}; !reflect.DeepEqual(moves(true), want) {
@@ -484,10 +484,53 @@ func TestPublishAgainOnce(t *testing.T) {
 	if pub, err := s.Publication(b); err != nil || pub != (Publication{WorkflowYes: "c0ffee", Branch: "card/1-kept"}) {
 		t.Errorf("the publication is %+v (%v)", pub, err)
 	}
-	if ids, err := s.Publishing(); err != nil || len(ids) != 1 || ids[0] != b {
+	if ids, err := s.Publishing(KilnRepo); err != nil || len(ids) != 1 || ids[0] != b {
 		t.Errorf("Publishing lists %v (%v), want %d", ids, err, b)
 	}
-	if at, err := s.AtHost(); err != nil || len(at) != 0 {
+	if at, err := s.AtHost(KilnRepo); err != nil || len(at) != 0 {
 		t.Errorf("AtHost lists %v (%v)", at, err)
+	}
+}
+
+// TestAtHostPerRepo lists the cards at the Git host of each of two repos under
+// its own repo's name only, those to publish and those with an address alike.
+func TestAtHostPerRepo(t *testing.T) {
+	s := open(t)
+	with := Options{Publishing: true}
+	ids := map[string][2]int64{}
+	for _, repo := range []string{KilnRepo, "second"} {
+		var pair [2]int64
+		for i := range pair {
+			card, err := s.CreateIn(repo, "a card of "+repo, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Move(card.ID, passed, CauseRun); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DecideWith(card.ID, Publish, "", with); err != nil {
+				t.Fatal(err)
+			}
+			pair[i] = card.ID
+		}
+		// The second of each repo has its address.
+		if _, err := s.KeepPullRequest(pair[1], "beef-"+repo, "https://git.example/pull/"+repo); err != nil {
+			t.Fatal(err)
+		}
+		ids[repo] = pair
+	}
+	for _, repo := range []string{KilnRepo, "second"} {
+		if got, err := s.Publishing(repo); err != nil || !reflect.DeepEqual(got, []int64{ids[repo][0]}) {
+			t.Errorf("Publishing(%q) lists %v (%v), want %d", repo, got, err, ids[repo][0])
+		}
+		if got, err := s.AtHost(repo); err != nil || !reflect.DeepEqual(got, map[int64]string{ids[repo][1]: "beef-" + repo}) {
+			t.Errorf("AtHost(%q) lists %v (%v), want %d", repo, got, err, ids[repo][1])
+		}
+	}
+	if got, err := s.Publishing("third"); err != nil || len(got) != 0 {
+		t.Errorf("Publishing of a repo without cards lists %v (%v)", got, err)
+	}
+	if got, err := s.AtHost("third"); err != nil || len(got) != 0 {
+		t.Errorf("AtHost of a repo without cards lists %v (%v)", got, err)
 	}
 }
