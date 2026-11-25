@@ -59,6 +59,17 @@ func TestCoreConfig(t *testing.T) {
 	if code, _, errs, _, _ := core("--settings", settingsFile(t, `{"repos":[{"nme":"x"}]}`)); code != 1 || !strings.Contains(errs, "the settings file") {
 		t.Errorf("a broken file: %d %q, want 1", code, errs)
 	}
+	t.Run("a relative --settings", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(oneRepo), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		code, _, errs, repos, _ := core("--settings", "settings.json")
+		if code != 2 || !strings.Contains(errs, "is not an absolute path") || repos != 0 {
+			t.Errorf("a relative --settings: %d %q, %d repos, want 2, the reason and none", code, errs, repos)
+		}
+	})
 	var o, e bytes.Buffer
 	cfg, code := coreConfig([]string{"--data", "/d", "--model", "m", "--repo", "/r.git", "--spec-hosts", "a.org,b.org"}, env, &o, &e)
 	if code != 0 || len(cfg.Repos) != 0 || cfg.Repo != "/r.git" || len(cfg.Hosts) != 2 || o.Len() != 0 {
