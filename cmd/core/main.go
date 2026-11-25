@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -70,7 +71,7 @@ const usage = `usage:
             [--runs 3, the most runs in flight at once, from 1 to 8]
             [--publish-command <command>, run with sh -c to publish a card; empty publishes none]
             [--check-result-command <command>, run with sh -c to read a card's check at the Git host; empty reads none]
-            (--settings <file> holds the repos, with their commands and hosts, and takes none of --repo, --publish-command,
+            (--settings <file>, an absolute path, holds the repos, with their commands and hosts, and takes none of --repo, --publish-command,
              --check-result-command and --spec-hosts)
   kiln card --data <dir> [--settings <file>] [--repo <name>] <text>
   kiln run --repo <bare repo> --commit <commit> --branch <branch> --run <id>
@@ -128,7 +129,7 @@ func coreConfig(args []string, getenv func(string) string, stdout, stderr io.Wri
 	fs.SetOutput(stderr)
 	fs.StringVar(&cfg.Data, "data", "", "the instance's data directory")
 	fs.StringVar(&cfg.Repo, "repo", "", "the instance's copy of the repo, a bare repo")
-	settingsFile := fs.String("settings", "", "the settings file, which holds the repos; it takes none of --repo, --publish-command, --check-result-command and --spec-hosts")
+	settingsFile := fs.String("settings", "", "the settings file, an absolute path, which holds the repos; it takes none of --repo, --publish-command, --check-result-command and --spec-hosts")
 	fs.StringVar(&cfg.Model, "model", "", "the model of the spec runs it starts, an exact identifier; the effort is high")
 	fs.StringVar(&cfg.ImplementModel, "implement-model", "", "the model of the implement runs whose approved spec names none of claude-opus-5-5, claude-sonnet-5-5 and claude-haiku-5-5, --model by default; after a send-back an implement run uses claude-opus-5-5; the effort is medium")
 	fs.StringVar(&cfg.ReviewModel, "review-model", "", "the model of the review runs it starts, --model by default; the effort is high")
@@ -159,6 +160,10 @@ func coreConfig(args []string, getenv func(string) string, stdout, stderr io.Wri
 		}
 		if len(both) > 0 {
 			fmt.Fprintf(stderr, "kiln core: --settings and %s are both given; each setting has one place (ADR 0025)\n", strings.Join(both, ", "))
+			return cfg, 2
+		}
+		if !filepath.IsAbs(*settingsFile) {
+			fmt.Fprintf(stderr, "kiln core: --settings %s is not an absolute path; every core the launcher starts reads it again from the directory it was started in, so give it as an absolute path, as scripts/kiln-up does\n", *settingsFile)
 			return cfg, 2
 		}
 	}

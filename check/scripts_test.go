@@ -66,3 +66,73 @@ func TestKilnUpRefusesInClaudeCode(t *testing.T) {
 		}
 	}
 }
+
+// TestKilnUpMakesSettingsAbsolute runs the start script up to its source
+// check, which fails, and reads the line that names the settings file.
+func TestKilnUpMakesSettingsAbsolute(t *testing.T) {
+	script, err := filepath.Abs("../" + scriptsDir + "/kiln-up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(t *testing.T, dir string, extra ...string) string {
+		t.Helper()
+		cmd := exec.Command("sh", script)
+		cmd.Dir = dir
+		cmd.Env = append([]string{
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + t.TempDir(),
+			"KILN_SOURCE=" + filepath.Join(t.TempDir(), "missing"),
+		}, extra...)
+		out, err := cmd.CombinedOutput()
+		if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 2 {
+			t.Errorf("exit: %v, want status 2; output %q", err, out)
+		}
+		if !strings.Contains(string(out), "is not Kiln's source") {
+			t.Errorf("output %q does not stop at the source check", out)
+		}
+		return string(out)
+	}
+	lines := func(out string) (n int, got string) {
+		for _, l := range strings.Split(out, "\n") {
+			if strings.HasPrefix(l, "kiln-up: the settings file is ") || !strings.HasPrefix(l, "kiln-up: ") && l != "" {
+				n++
+				got = l
+			}
+		}
+		return
+	}
+
+	t.Run("a relative path", func(t *testing.T) {
+		w := t.TempDir()
+		write(filepath.Join(w, "sub", "settings.json"))
+		other := t.TempDir()
+		write(filepath.Join(other, "sub", "settings.json"))
+		real, err := filepath.EvalSymlinks(w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := run(t, w, "KILN_SETTINGS=sub/settings.json", "CDPATH="+other)
+		want := "kiln-up: the settings file is " + real + "/sub/settings.json"
+		if n, got := lines(out); n != 1 || got != want {
+			t.Errorf("output %q, want exactly the line %q", out, want)
+		}
+	})
+	t.Run("an absolute path", func(t *testing.T) {
+		abs := filepath.Join(t.TempDir(), "settings.json")
+		write(abs)
+		out := run(t, t.TempDir(), "KILN_SETTINGS="+abs)
+		want := "kiln-up: the settings file is " + abs
+		if n, got := lines(out); n != 1 || got != want {
+			t.Errorf("output %q, want exactly the line %q", out, want)
+		}
+	})
+}

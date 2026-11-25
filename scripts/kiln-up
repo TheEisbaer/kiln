@@ -18,7 +18,9 @@
 #                      ~/.claude/settings.json; neither value is ever printed
 #   KILN_PUBLISH_COMMAND, KILN_CHECK_RESULT_COMMAND
 #                      none: no card is published and no check is read
-#   KILN_SETTINGS      none: the settings file of the instance's repos. When
+#   KILN_SETTINGS      none: the settings file of the instance's repos. A
+#                      relative path is made absolute from the directory the
+#                      script is run in. When
 #                      it is set the core is started with --settings and none
 #                      of --repo, --spec-hosts, --publish-command and
 #                      --check-result-command, KILN_REPO, KILN_ORIGIN and the
@@ -52,6 +54,23 @@ kiln_settings=${KILN_SETTINGS-}
 
 if [ -n "$kiln_settings" ] && [ ! -f "$kiln_settings" ]; then
     die "KILN_SETTINGS names $kiln_settings, which is not a file"
+fi
+if [ -n "$kiln_settings" ]; then
+    # The launcher gives its arguments unchanged to every core it starts, after
+    # a crash and at an update, and each core reads the file again from the
+    # directory the launcher started in, which may be gone by then: so the path
+    # is made absolute once, here. CDPATH= keeps cd from printing a directory;
+    # dir= is on its own line so that || sees the status of cd; -P names the
+    # same file that -f checked above.
+    case $kiln_settings in
+        /*) ;;
+        *)
+            dir=$(CDPATH= cd -P -- "$(dirname -- "$kiln_settings")" && pwd -P) ||
+                die "cannot make KILN_SETTINGS absolute: $kiln_settings"
+            kiln_settings=$dir/$(basename -- "$kiln_settings")
+            ;;
+    esac
+    echo "kiln-up: the settings file is $kiln_settings"
 fi
 
 [ -f "$src/go.mod" ] && [ -d "$src/cmd/core" ] ||
