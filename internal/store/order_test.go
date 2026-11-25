@@ -44,7 +44,7 @@ func merged(t *testing.T, s *Store, id int64) {
 // moved, with the number of entries it wrote.
 func release(t *testing.T, s *Store) (moved []string, wrote int) {
 	t.Helper()
-	return releaseWith(t, s, nil)
+	return releaseWith(t, s, Limits{})
 }
 
 // releaseWith is release under the limits.

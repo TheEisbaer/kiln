@@ -594,6 +594,12 @@ type edit struct {
 	// more; approved sets the number to 0 (ADR 0054).
 	sendBack bool
 	approved bool
+	// keepSince, when it is set and true for the state the card goes to and
+	// the facts, leaves the card's since as it is. Only the rule's entry that
+	// renames the limit a card waits for room under sets it, so that the card
+	// keeps its place in the queue (ADR 0014); since stays when the card got
+	// the state it has, since the card stays in the backlog, waiting for room.
+	keepSince func(to State, f Facts) bool
 }
 
 // change is the one place every change to a card goes through (ADR 0042). In
@@ -670,7 +676,7 @@ func (s *Store) change(e edit) (Card, error) {
 	}
 
 	// The card's row and its entries carry the same time: since is when the
-	// card got the state it has.
+	// card got the state it has. An entry of keepSince leaves since as it was.
 	final := to
 	if e.rule != nil {
 		final = e.rule.To
@@ -694,7 +700,12 @@ func (s *Store) change(e edit) (Card, error) {
 		if card.State == to && e.end == nil && !e.always {
 			return card, nil
 		}
-		if _, err := tx.Exec(`UPDATE cards SET stage = ?, waits_for = ?, since = ? WHERE id = ?`,
+		if e.keepSince != nil && card.State == final && e.keepSince(final, f) {
+			if _, err := tx.Exec(`UPDATE cards SET stage = ?, waits_for = ? WHERE id = ?`,
+				final.Stage, final.WaitsFor, id); err != nil {
+				return Card{}, err
+			}
+		} else if _, err := tx.Exec(`UPDATE cards SET stage = ?, waits_for = ?, since = ? WHERE id = ?`,
 			final.Stage, final.WaitsFor, at, id); err != nil {
 			return Card{}, err
 		}

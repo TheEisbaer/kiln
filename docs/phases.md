@@ -15,6 +15,8 @@ The rules for this list are in [ADR 0004](adr/0004-kiln-first-then-the-work-repo
 7. **Kiln reports its own measures.** From its own records it shows interventions per merged card, the cards that needed a follow-up fix, and the cards dropped.
 8. **Proposals reach the developer.** A problem review noticed outside a card's change appears on the first screen, and one action turns it into a backlog card.
 
+Every POC item was seen working on 2026-11-25; the MVP list is next (ADR 0004).
+
 ## MVP: it works on the work repo, for the developer and at least one colleague
 
 1. **A card for the work repo is published and tracked.** The developer approves the spec and gives the card a work item number. Kiln opens the pull request on Azure DevOps with the work item linked, and the card is done once colleagues have approved and it has merged.

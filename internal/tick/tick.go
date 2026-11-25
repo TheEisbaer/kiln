@@ -57,6 +57,10 @@ type Config struct {
 	// CheckResultCommand and Hosts (repos). Every reader takes its repo from
 	// repos(), not from those fields.
 	Repos []settings.Repo
+	// Limit is the instance's limit of cards in progress that are not ready
+	// to merge (ADR 0014), from the settings file; 0 is the default,
+	// store.DefaultLimit.
+	Limit int
 	Repo  string // --repo: the instance's copy of the target repo, a bare repo
 	Model string // the model of a spec run that starts, an exact identifier
 	// The models of an implement run and of a review run that start; Model
@@ -142,12 +146,12 @@ func (c Config) repos() []settings.Repo {
 		CheckResultCommand: c.CheckResultCommand, SpecHosts: c.Hosts, Own: true}}
 }
 
-// limits are the repos' limits of cards in progress, by name (ADR 0014); a
-// repo whose Limit is 0 has the default.
+// limits are the limits of cards in progress (ADR 0014): the repos', by
+// name, and the instance's; a Limit of 0 is the default.
 func (c Config) limits() store.Limits {
-	l := store.Limits{}
+	l := store.Limits{Repos: map[string]int{}, Instance: c.Limit}
 	for _, r := range c.repos() {
-		l[r.Name] = r.Limit
+		l.Repos[r.Name] = r.Limit
 	}
 	return l
 }
@@ -334,12 +338,12 @@ func openStore(dir string) (*store.Store, *os.File, error) {
 
 // AddCard is `kiln card`: under the lock, it writes a card of the repo, named
 // by the caller, with the text and starts it as the developer's start does,
-// under the repo's limit of cards in progress, 0 for the default (ADR 0014):
-// to spec, waiting for a run, or queued while the repo has no room. It
-// returns the card's ID. It stands in for
+// under the limits of cards in progress, the zero Limits for the defaults
+// (ADR 0014): to spec, waiting for a run, or queued while the repo or the
+// instance has no room. It returns the card's ID. It stands in for
 // the API, which is the only way to change the store (ADR 0044), and never
 // writes beside a running core.
-func AddCard(dir, repo, text string, limit int) (int64, error) {
+func AddCard(dir, repo, text string, l store.Limits) (int64, error) {
 	s, lock, err := openStore(dir)
 	if err != nil {
 		return 0, err
@@ -350,7 +354,7 @@ func AddCard(dir, repo, text string, limit int) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if _, err := s.StartWith(c.ID, store.Limits{repo: limit}); err != nil {
+	if _, err := s.StartWith(c.ID, l); err != nil {
 		return 0, err
 	}
 	return c.ID, nil
@@ -898,9 +902,11 @@ func (c *core) fetchFor(cards []int64, inFlight map[int64]string, paused string)
 }
 
 // release ends the wait of the queued cards whose predecessors are no longer
-// open and whose repo has room under its limit (store.Release), also while
-// the instance is paused: a released card only waits for a run. Each entry the
-// rule writes is said in one line; an error is printed, and the tick goes on.
+// open and whose repo and instance have room under their limits
+// (store.Release), also while the instance is paused: a released card only
+// waits for a run. Each entry the rule writes is said in one line, also one
+// that only names another limit a card waits for; an error is printed, and
+// the tick goes on.
 func (c *core) release() {
 	moved, err := c.store.Release(c.limits())
 	for _, r := range moved {

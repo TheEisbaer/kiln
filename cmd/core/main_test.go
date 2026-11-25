@@ -60,6 +60,18 @@ func TestCoreConfig(t *testing.T) {
 	if code, _, errs, _, _ := core("--settings", settingsFile(t, `{"repos":[{"nme":"x"}]}`)); code != 1 || !strings.Contains(errs, "the settings file") {
 		t.Errorf("a broken file: %d %q, want 1", code, errs)
 	}
+	t.Run("the instance's limit", func(t *testing.T) {
+		var o, e bytes.Buffer
+		file := settingsFile(t, `{"limit":2,"repos":[{"name":"kiln","copy":"/a/kiln.git","own":true}]}`)
+		if cfg, code := coreConfig([]string{"--data", "/d", "--model", "m", "--settings", file}, env, &o, &e); code != 0 || cfg.Limit != 2 {
+			t.Errorf("the limit 2: %d, the limit %d, %q; want 0 and 2", code, cfg.Limit, e.String())
+		}
+		e.Reset()
+		file = settingsFile(t, `{"limit":0,"repos":[{"name":"kiln","copy":"/a/kiln.git","own":true}]}`)
+		if _, code := coreConfig([]string{"--data", "/d", "--model", "m", "--settings", file}, env, &o, &e); code != 1 || !strings.Contains(e.String(), "the instance's limit is 0; it is at least 1") {
+			t.Errorf("the limit 0: %d %q, want 1 and the reason", code, e.String())
+		}
+	})
 	t.Run("a relative --settings", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(oneRepo), 0o600); err != nil {
@@ -172,5 +184,38 @@ func TestCardLimit(t *testing.T) {
 	want := store.State{Stage: store.Backlog, WaitsFor: store.Room}
 	if c, err := s.Card(busy.ID + 1); err != nil || c.State != want || o.String() != fmt.Sprintf("%d\n", c.ID) {
 		t.Errorf("kiln card wrote %+v, %v and printed %q, want a queued card and its ID", c, err, o.String())
+	}
+}
+
+// TestCardInstanceLimit writes a card with `kiln card` into kiln while the
+// instance's limit of 1 is taken by a card of work: the card is queued for
+// the instance.
+func TestCardInstanceLimit(t *testing.T) {
+	data := t.TempDir()
+	s, err := store.Open(filepath.Join(data, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy, err := s.CreateIn("work", "In progress.", 0)
+	if err == nil {
+		_, err = s.Move(busy.ID, store.State{Stage: store.Review, WaitsFor: store.Approval}, store.CauseRule)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	file := settingsFile(t, `{"limit":1,"repos":[{"name":"kiln","copy":"/a/kiln.git","own":true},{"name":"work","copy":"/a/work.git"}]}`)
+	var o, e bytes.Buffer
+	if code := cardCommand([]string{"--data", data, "--settings", file, "--repo", "kiln", "A card."}, &o, &e); code != 0 {
+		t.Fatalf("kiln card: %d %q", code, e.String())
+	}
+	if s, err = store.Open(filepath.Join(data, "store.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := s.History(busy.ID + 1)
+	want := "waits for room in the instance, whose limit is 1 cards in progress that are not ready to merge"
+	if err != nil || len(h) == 0 || h[len(h)-1].Reason != want {
+		t.Errorf("kiln card wrote %+v, %v; want the last reason %q", h, err, want)
 	}
 }

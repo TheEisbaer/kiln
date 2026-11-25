@@ -488,3 +488,103 @@ func (s *syncBuilder) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// TestLimitPerInstanceTick has kiln at its limit of 2, second at 3 and the
+// instance at 2, with a kiln card A at the Git host. K1 of kiln starts, K2 of
+// kiln is queued for its repo, S1 of second starts, since neither K2 nor A
+// holds it, and S2 of second is queued for the instance. A tick starts the
+// runs of K1 and S1 and prints no line for the queued cards. Once A is
+// merged, the next tick says that K2 waits for the instance; once K1 is
+// dropped, the next one starts K2 for the instance's room, and S2 stays
+// queued.
+func TestLimitPerInstanceTick(t *testing.T) {
+	r := newTwoRepos(t)
+	r.kiln.Limit, r.second.Limit = 2, 3
+	r.c.Repos = []settings.Repo{r.kiln, r.second}
+	r.c.Limit = 2
+	c := r.c
+	var out syncBuilder
+	c.out = &out
+	c.activity = web.NewActivity()
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(func() { cancel(); c.followers.Wait() })
+
+	a, err := c.store.CreateIn(store.KilnRepo, "A card at the Git host.", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	atHost := store.State{Stage: store.Review, WaitsFor: store.Host}
+	if _, err := c.store.Move(a.ID, atHost, store.CauseRule); err != nil {
+		t.Fatal(err)
+	}
+	start := func(repo string) store.Card {
+		t.Helper()
+		cd, err := c.store.CreateIn(repo, "A card of "+repo+".", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cd, err = c.store.StartWith(cd.ID, c.limits()); err != nil {
+			t.Fatal(err)
+		}
+		return cd
+	}
+	k1, k2, s1, s2 := start(store.KilnRepo), start(store.KilnRepo), start("second"), start("second")
+	for _, w := range []struct {
+		name string
+		card store.Card
+		want store.State
+	}{{"K1", k1, waiting}, {"K2", k2, queued}, {"S1", s1, waiting}, {"S2", s2, queued}} {
+		if w.card.State != w.want {
+			t.Fatalf("%s is in %v, want %v", w.name, w.card.State, w.want)
+		}
+	}
+	silent := func(cards ...store.Card) {
+		t.Helper()
+		for _, cd := range cards {
+			if strings.Contains(out.String(), fmt.Sprintf("card %d:", cd.ID)) {
+				t.Errorf("the core printed a line for the queued card %d:\n%s", cd.ID, out.String())
+			}
+		}
+	}
+
+	e := c.engine.(*fakeEngine)
+	if err := c.tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e.waitStarted(t, group(k1.ID, s1.ID))
+	silent(k2, s2)
+
+	if _, err := c.store.MoveWithReason(a.ID, atHost, store.State{Stage: store.Done, WaitsFor: store.Nothing}, store.CauseHost, store.MergedReason); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("kiln core: card %d: waits for room in the instance, whose limit is 2 cards in progress that are not ready to merge\n", k2.ID)
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("the core printed\n%s\nwant the line %q", out.String(), want)
+	}
+	silent(s2)
+
+	e.open(k1.ID, "exit")
+	e.waitGone(t, k1.ID)
+	waitUntil(t, "K1 waits for approval", func() bool {
+		cd, err := c.store.Card(k1.ID)
+		return err == nil && cd.State == store.State{Stage: store.Spec, WaitsFor: store.Approval}
+	})
+	if _, err := c.store.Decide(k1.ID, store.Drop, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want = fmt.Sprintf("kiln core: card %d: the instance has room under its limit of 2; its spec run starts by the rule\n", k2.ID)
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("the core printed\n%s\nwant the line %q", out.String(), want)
+	}
+	silent(s2)
+	if cd, err := c.store.Card(s2.ID); err != nil || cd.State != queued {
+		t.Errorf("S2 is %+v, %v; want queued", cd, err)
+	}
+	e.waitStarted(t, group(k1.ID, s1.ID), group(k2.ID))
+}

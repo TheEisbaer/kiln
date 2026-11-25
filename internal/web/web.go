@@ -154,9 +154,9 @@ type Info struct {
 	// Version is the commit the core's program was built from, or empty for
 	// a program built by hand; the board's header shows it.
 	Version string
-	// Limits are the repos' limits of cards in progress (ADR 0014), by
-	// which a new card and the developer's start are queued; nil, or a repo
-	// left out, has store.DefaultLimit.
+	// Limits are the limits of cards in progress (ADR 0014), each repo's and
+	// the instance's, by which a new card and the developer's start are
+	// queued; the zero Limits, or a repo left out, has store.DefaultLimit.
 	Limits store.Limits
 	// Accepting says whether the core accepts moves: until its report, every
 	// POST is refused (ADR 0036, rule 3). Nil accepts.
@@ -310,11 +310,14 @@ type (
 		// Repo is the copy of Kiln's own repo; Repos are every repo's name
 		// and copy, in the settings' order, which the header shows when
 		// there is more than one.
-		Repo   string     `json:"repo"`
-		Repos  []repoJSON `json:"repos"`
-		Models modelsJSON `json:"models"`
-		Runs   int        `json:"runs"`
-		Now    time.Time  `json:"now"`
+		Repo  string     `json:"repo"`
+		Repos []repoJSON `json:"repos"`
+		// InstanceLimit is the instance's limit and its cards that count
+		// against it, those in progress not ready to merge (ADR 0014).
+		InstanceLimit instanceLimitJSON `json:"instance_limit"`
+		Models        modelsJSON        `json:"models"`
+		Runs          int               `json:"runs"`
+		Now           time.Time         `json:"now"`
 		// Paused is why the instance is paused, empty when it is not: then
 		// no run starts (ADR 0016, ADR 0055).
 		Paused string `json:"paused"`
@@ -335,6 +338,10 @@ type (
 		Copy       string `json:"copy"`
 		Limit      int    `json:"limit"`
 		InProgress int    `json:"in_progress"`
+	}
+	instanceLimitJSON struct {
+		Limit      int `json:"limit"`
+		InProgress int `json:"in_progress"`
 	}
 	// measuresJSON: PerMerged is null with no merged card.
 	measuresJSON struct {
@@ -710,9 +717,13 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Version: h.info.Version, Repo: h.info.Repo, Models: h.models(), Runs: h.info.Runs, Now: time.Now().UTC(),
 		Repos: []repoJSON{}, Paused: paused, MergingOff: merging, Cards: []tileJSON{}, Proposals: []proposalJSON{}}
 	busy := map[string]int{}
+	b.InstanceLimit.Limit = h.info.Limits.OfInstance()
 	for _, c := range cards {
 		if c.Stage == store.Spec || c.Stage == store.Implement || c.Stage == store.Review {
 			busy[c.Repo]++
+		}
+		if store.CountsForInstance(c.State) {
+			b.InstanceLimit.InProgress++
 		}
 	}
 	for _, r := range h.info.Repos {
@@ -899,9 +910,10 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 
 // create writes a new card of its repo, with its predecessors and the card it
 // fixes, if any, and starts it: to spec, waiting for a run, or queued while a
-// predecessor is not done or its repo has no room under its limit. A repo the instance does not have, none with more
-// than one, and a predecessor the store refuses are said with the reason, and
-// no card is written.
+// predecessor is not done or its repo or the instance has no room under its
+// limit. A repo the instance does not have, none with more than one, and a
+// predecessor the store refuses are said with the reason, and no card is
+// written.
 func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Text         *string `json:"text"`

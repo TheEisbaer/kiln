@@ -60,33 +60,42 @@ func TestLoad(t *testing.T) {
 		{"name": "work", "copy": "/a/work.git"}]}`
 	t.Run("good", func(t *testing.T) {
 		got, err := Load(write(t, good))
-		want := []Repo{{Name: "kiln", Copy: "/a/kiln.git", Own: true, PublishCommand: "pub", CheckResultCommand: "chk", SpecHosts: []string{"*"}},
-			{Name: "work", Copy: "/a/work.git"}}
+		want := Settings{Repos: []Repo{{Name: "kiln", Copy: "/a/kiln.git", Own: true, PublishCommand: "pub", CheckResultCommand: "chk", SpecHosts: []string{"*"}},
+			{Name: "work", Copy: "/a/work.git"}}}
 		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("Load = %+v, %v, want %+v", got, err, want)
 		}
 	})
 	t.Run("one repo without the optional members", func(t *testing.T) {
-		got, err := Load(write(t, `{"repos":[{"name":"kiln","copy":"/a/k.git","own":true}]}`))
-		if err != nil || len(got) != 1 || got[0].PublishCommand != "" || got[0].CheckResultCommand != "" || got[0].SpecHosts != nil {
-			t.Fatalf("Load = %+v, %v", got, err)
+		s, err := Load(write(t, `{"repos":[{"name":"kiln","copy":"/a/k.git","own":true}]}`))
+		got := s.Repos
+		if err != nil || len(got) != 1 || got[0].PublishCommand != "" || got[0].CheckResultCommand != "" || got[0].SpecHosts != nil || s.Limit != 0 {
+			t.Fatalf("Load = %+v, %v", s, err)
 		}
 	})
 	one := func(member string) string {
 		return `{"repos":[{"name":"kiln","copy":"/a/k.git","own":true` + member + `}]}`
 	}
 	t.Run("limit", func(t *testing.T) {
-		got, err := Load(write(t, `{"repos":[{"name":"kiln","copy":"/a/k.git","own":true},{"name":"work","copy":"/a/w.git","limit":2}]}`))
+		s, err := Load(write(t, `{"repos":[{"name":"kiln","copy":"/a/k.git","own":true},{"name":"work","copy":"/a/w.git","limit":2}]}`))
+		got := s.Repos
 		if err != nil || len(got) != 2 || got[0].Limit != 0 || got[1].Limit != 2 {
 			t.Fatalf("Load = %+v, %v, want the limits 0 and 2", got, err)
 		}
-		if l := (store.Limits{got[0].Name: got[0].Limit}); l.Of("kiln") != 3 {
-			t.Errorf("a repo without a limit has the limit %d, want 3", l.Of("kiln"))
+		if l := (store.Limits{Repos: map[string]int{got[0].Name: got[0].Limit}, Instance: s.Limit}); l.Of("kiln") != 3 || l.OfInstance() != 3 {
+			t.Errorf("a repo without a limit has the limit %d, and an instance without one %d; want 3 and 3", l.Of("kiln"), l.OfInstance())
+		}
+	})
+	t.Run("the instance's limit", func(t *testing.T) {
+		s, err := Load(write(t, `{"limit":2,"repos":[{"name":"kiln","copy":"/a/k.git","own":true}]}`))
+		if err != nil || s.Limit != 2 || len(s.Repos) != 1 || s.Repos[0].Limit != 0 {
+			t.Fatalf("Load = %+v, %v, want the instance's limit 2", s, err)
 		}
 	})
 	for _, tc := range []struct{ name, content, want string }{
 		{"unknown member", one(`,"publish_comand":"x"`), `unknown field "publish_comand"`},
-		{"limit", `{"limit":3,"repos":[]}`, `unknown field "limit"`},
+		{"the instance's limit 0", `{"limit":0,"repos":[{"name":"kiln","copy":"/a/k.git","own":true}]}`, `: the instance's limit is 0; it is at least 1`},
+		{"the instance's limit as a string", `{"limit":"2","repos":[{"name":"kiln","copy":"/a/k.git","own":true}]}`, "limit"},
 		{"own as a string", `{"repos":[{"name":"kiln","copy":"/a/k.git","own":"yes"}]}`, "own"},
 		{"a second value", one("") + ` {}`, "more after"},
 		{"stray text", one("") + ` x`, "settings file"},

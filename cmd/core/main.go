@@ -173,13 +173,13 @@ func coreConfig(args []string, getenv func(string) string, stdout, stderr io.Wri
 		return cfg, 2
 	}
 	if given["settings"] {
-		repos, err := settings.Load(*settingsFile)
+		set, err := settings.Load(*settingsFile)
 		if err != nil {
 			fmt.Fprintln(stderr, "kiln core:", err)
 			return cfg, 1
 		}
-		cfg.Repos = repos
-		fmt.Fprintf(stdout, "kiln core: the repos are read from %s: %s\n", *settingsFile, describe(repos))
+		cfg.Repos, cfg.Limit = set.Repos, set.Limit
+		fmt.Fprintf(stdout, "kiln core: the repos are read from %s: %s\n", *settingsFile, describe(set.Repos))
 	}
 	cfg.ProxyImage, cfg.ProxyNetwork = proxyImage, proxyNetwork
 	if *hosts != "" {
@@ -226,18 +226,19 @@ func cardCommand(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	names := []string{store.KilnRepo}
-	limits := store.Limits{}
+	limits := store.Limits{Repos: map[string]int{}}
 	if given {
-		repos, err := settings.Load(*settingsFile)
+		set, err := settings.Load(*settingsFile)
 		if err != nil {
 			fmt.Fprintln(stderr, "kiln card:", err)
 			return 1
 		}
 		names = names[:0]
-		for _, r := range repos {
+		for _, r := range set.Repos {
 			names = append(names, r.Name)
-			limits[r.Name] = r.Limit
+			limits.Repos[r.Name] = r.Limit
 		}
+		limits.Instance = set.Limit
 	}
 	repo := *repoName
 	switch {
@@ -250,7 +251,7 @@ func cardCommand(args []string, stdout, stderr io.Writer) int {
 	case repo == "":
 		repo = names[0]
 	}
-	id, err := tick.AddCard(*data, repo, fs.Arg(0), limits[repo])
+	id, err := tick.AddCard(*data, repo, fs.Arg(0), limits)
 	if err != nil {
 		fmt.Fprintln(stderr, "kiln card:", err)
 		return 1

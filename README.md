@@ -85,6 +85,8 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
    - `publish_command`, `check_result_command` and `spec_hosts` (a list of names, or `["*"]`): what `--publish-command`, `--check-result-command` and `--spec-hosts` give, each optional.
    - `limit`: the most cards of the repo in progress at once, ready to merge included; optional, 3 by default, at least 1.
 
+   Beside `repos`, the optional member `limit` at the top of the file is the instance's limit: the most cards of all repos together that are in progress and not yet ready to merge; 3 by default, at least 1. A core started from its flags has 3.
+
    A member the file does not know is refused, so a misspelt one is not left out silently. This is an example with Kiln's own repo alone, written with `jq` so that no command has to be escaped by hand:
 
    ```sh
@@ -112,7 +114,8 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
          --arg pub "${KILN_PUBLISH_COMMAND-}" --arg check "${KILN_CHECK_RESULT_COMMAND-}" \
          --arg work "$HOME/kiln-live/work.git" \
          --arg workpub "${WORK_PUBLISH_COMMAND-}" --arg workcheck "${WORK_CHECK_RESULT_COMMAND-}" \
-         '{repos: [{name: "kiln", copy: $copy, own: true, spec_hosts: ["*"],
+         '{limit: 3,
+           repos: [{name: "kiln", copy: $copy, own: true, spec_hosts: ["*"],
                     publish_command: $pub, check_result_command: $check},
                    {name: "work", copy: $work, limit: 1,
                     publish_command: $workpub, check_result_command: $workcheck}]}' \
@@ -122,7 +125,7 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
 
    The file is read again at the next start: stop the launcher with Ctrl-C and run `KILN_SETTINGS=~/kiln-live/settings.json scripts/kiln-up`. An update while Kiln runs reads the file too, and a file it refuses then ends the launcher, so change the file with Kiln stopped, or write it beside the old one and rename it over it, as the example does.
 
-5. Open the screen at <http://127.0.0.1:4747/>. The core prints the address when it starts, and `--listen` serves the screen on another loopback address. Cards are written on the screen, or with `./kiln card --data <dir> [--settings <file>] [--repo <name>] <text>`. A card can name earlier cards as predecessors; it is queued until they are done, and then its spec run starts by itself. A card is also queued while its repo has as many cards in progress as its limit, and starts by itself once a place frees. A card can also name one merged card that it fixes; the screen counts the merged cards that needed a follow-up fix. `./kiln run` carries out one run by hand, through the proxy that a core keeps and gives the credential. `--page <file>` reads the page from that file on every request instead of the embedded one, so that a change to it shows after a refresh; it is for work on the screen, and the file is trusted like the program itself. A page left open while the core is restarted with another page reloads itself once; with `--page` it reloads when the file changes.
+5. Open the screen at <http://127.0.0.1:4747/>. The core prints the address when it starts, and `--listen` serves the screen on another loopback address. Cards are written on the screen, or with `./kiln card --data <dir> [--settings <file>] [--repo <name>] <text>`. A card can name earlier cards as predecessors; it is queued until they are done, and then its spec run starts by itself. A card is also queued while its repo has as many cards in progress as its limit, or the instance as many cards in progress that are not yet ready to merge as the instance's limit, and starts by itself once a place frees; its page says which limit it waits for, and the line above the columns shows the counts. A card can also name one merged card that it fixes; the screen counts the merged cards that needed a follow-up fix. `./kiln run` carries out one run by hand, through the proxy that a core keeps and gives the credential. `--page <file>` reads the page from that file on every request instead of the embedded one, so that a change to it shows after a refresh; it is for work on the screen, and the file is trusted like the program itself. A page left open while the core is restarted with another page reloads itself once; with `--page` it reloads when the file changes.
 
 ## Where the decisions are
 

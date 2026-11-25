@@ -15,7 +15,7 @@ import (
 // name, each with a copy /data/<name>.git.
 func newReposFixture(t *testing.T, names ...string) *fixture {
 	t.Helper()
-	return newLimitsFixture(t, nil, names...)
+	return newLimitsFixture(t, store.Limits{}, names...)
 }
 
 // newLimitsFixture is newReposFixture with the repos' limits of cards in
@@ -150,11 +150,13 @@ func TestPublishingPerRepo(t *testing.T) {
 
 // TestBoardRepos answers every repo's name, copy, limit and cards in progress
 // in the board, in order, beside Kiln's own copy, and none for an instance
-// told no repos. A card in the backlog or in done is not in progress.
+// told no repos. A card in the backlog or in done is not in progress. The
+// instance's limit counts the card in spec and not the one at the Git host,
+// and the page has the line of the limits.
 func TestBoardRepos(t *testing.T) {
-	f := newLimitsFixture(t, store.Limits{"kiln": 1}, "kiln", "second")
-	for _, st := range []store.State{{Stage: store.Review, WaitsFor: store.Host}, {Stage: store.Backlog, WaitsFor: store.Developer},
-		{Stage: store.Done, WaitsFor: store.Nothing}} {
+	f := newLimitsFixture(t, store.Limits{Repos: map[string]int{"kiln": 1}, Instance: 4}, "kiln", "second")
+	for _, st := range []store.State{{Stage: store.Review, WaitsFor: store.Host}, {Stage: store.Spec, WaitsFor: store.Approval},
+		{Stage: store.Backlog, WaitsFor: store.Developer}, {Stage: store.Done, WaitsFor: store.Nothing}} {
 		c, err := f.store.CreateIn("kiln", "a card", 0)
 		if err != nil {
 			t.Fatal(err)
@@ -164,9 +166,22 @@ func TestBoardRepos(t *testing.T) {
 		}
 	}
 	b := decode[boardJSON](t, f.do(t, "GET", "/api/board", ""))
-	want := []repoJSON{{Name: "kiln", Copy: "/data/kiln.git", Limit: 1, InProgress: 1}, {Name: "second", Copy: "/data/second.git", Limit: 3}}
+	want := []repoJSON{{Name: "kiln", Copy: "/data/kiln.git", Limit: 1, InProgress: 2}, {Name: "second", Copy: "/data/second.git", Limit: 3}}
 	if !reflect.DeepEqual(b.Repos, want) || b.Repo != "/data/repo.git" {
 		t.Errorf("the board's repos are %+v and its repo %q, want %+v and /data/repo.git", b.Repos, b.Repo, want)
+	}
+	if want := (instanceLimitJSON{Limit: 4, InProgress: 1}); b.InstanceLimit != want {
+		t.Errorf("the board's instance_limit is %+v, want %+v", b.InstanceLimit, want)
+	}
+	raw := decode[map[string]any](t, f.do(t, "GET", "/api/board", ""))
+	if got, want := raw["instance_limit"], map[string]any{"limit": 4.0, "in_progress": 1.0}; !reflect.DeepEqual(got, want) {
+		t.Errorf("the board's JSON has instance_limit %#v, want %#v", got, want)
+	}
+	page := f.do(t, "GET", "/", "").Body.String()
+	for _, part := range []string{`id="limits"`, `"In progress: "`, `" not yet ready to merge"`} {
+		if !strings.Contains(page, part) {
+			t.Errorf("the page lacks %s", part)
+		}
 	}
 	w := newReposFixture(t).do(t, "GET", "/api/board", "")
 	if got := decode[map[string]any](t, w)["repos"]; !reflect.DeepEqual(got, []any{}) {
@@ -179,7 +194,7 @@ func TestBoardRepos(t *testing.T) {
 // second starts; and the developer's start of a kiln card in the backlog
 // queues it too.
 func TestCreateUnderLimit(t *testing.T) {
-	f := newLimitsFixture(t, store.Limits{"kiln": 1}, "kiln", "second")
+	f := newLimitsFixture(t, store.Limits{Repos: map[string]int{"kiln": 1}}, "kiln", "second")
 	if w := f.do(t, "POST", "/api/cards", `{"text":"the first","repo":"kiln"}`); w.Code != 201 || decode[cardJSON](t, w).Stage != store.Spec {
 		t.Fatalf("the first card: %d %s", w.Code, w.Body)
 	}
