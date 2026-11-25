@@ -270,3 +270,85 @@ func (s *Store) Order(card int64) (Order, error) {
 	}
 	return o, tx.Commit()
 }
+
+// ErrFix is the error of a card that a new card cannot name as the card it
+// fixes: one that does not exist, was dropped or is not merged, or the new
+// card itself. The error CreateFixing returns is the reason alone, and
+// errors.Is finds ErrFix in it.
+var ErrFix = errors.New("the card cannot fix that card")
+
+// fixError is a refused fix, with its reason.
+type fixError string
+
+func (e fixError) Error() string        { return string(e) }
+func (e fixError) Is(target error) bool { return target == ErrFix }
+
+// writeFix writes the card a new card fixes, in the transaction that writes
+// the card, after its row. Only a merged card can be named. The fixed card is
+// not changed: its last entry stays the Git host's.
+func writeFix(tx *sql.Tx, card, fixes int64) error {
+	if fixes == card {
+		return fixError(fmt.Sprintf("card %d cannot fix itself", card))
+	}
+	_, err := readCard(tx, fixes)
+	if errors.Is(err, ErrNoCard) {
+		return fixError(fmt.Sprintf("no card %d to fix", fixes))
+	}
+	if err != nil {
+		return err
+	}
+	e, err := lastEntry(tx, fixes)
+	if err != nil {
+		return err
+	}
+	switch {
+	case Dropped(e.State, e.Cause, e.Reason):
+		return fixError(fmt.Sprintf("card %d was dropped; only a merged card can be fixed", fixes))
+	case !Merged(e.State, e.Cause, e.Reason):
+		return fixError(fmt.Sprintf("card %d is not merged; only a merged card can be fixed", fixes))
+	}
+	_, err = tx.Exec(`UPDATE cards SET fixes = ? WHERE id = ?`, fixes, card)
+	return err
+}
+
+// Fix is the card a card fixes, 0 for none, and the cards that name it as the
+// card they fix, in ID order.
+type Fix struct {
+	Fixes   int64
+	FixedBy []int64
+}
+
+// Fix reads a card's Fix, in one transaction.
+func (s *Store) Fix(card int64) (Fix, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Fix{}, err
+	}
+	defer tx.Rollback()
+	var f Fix
+	var fixes sql.NullInt64
+	err = tx.QueryRow(`SELECT fixes FROM cards WHERE id = ?`, card).Scan(&fixes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Fix{}, fmt.Errorf("%w %d: %w", ErrNoCard, card, err)
+	}
+	if err != nil {
+		return Fix{}, err
+	}
+	f.Fixes = fixes.Int64
+	rows, err := tx.Query(`SELECT id FROM cards WHERE fixes = ? ORDER BY id`, card)
+	if err != nil {
+		return Fix{}, err
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return Fix{}, err
+		}
+		f.FixedBy = append(f.FixedBy, id)
+	}
+	if err := errorsOf(rows); err != nil {
+		return Fix{}, err
+	}
+	return f, tx.Commit()
+}

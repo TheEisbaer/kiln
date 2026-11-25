@@ -22,7 +22,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 14
+const version = 15
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -346,6 +346,12 @@ CREATE UNIQUE INDEX proposals_made ON proposals(made) WHERE made IS NOT NULL;
 ALTER TABLE entries ADD COLUMN proposal INTEGER;`)
 		return err
 	},
+	// 14 to 15: the merged card a card fixes, NULL on a card that fixes none
+	// and on the cards that were there.
+	func(tx *sql.Tx) error {
+		_, err := tx.Exec(`ALTER TABLE cards ADD COLUMN fixes INTEGER`)
+		return err
+	},
 }
 
 // afterMigration, set only by the test, is called when the store has been moved
@@ -427,12 +433,27 @@ func (s *Store) CopyAndClose(path string) error {
 // the card itself, that does not exist or that was dropped is refused with
 // ErrPredecessor and its reason, and nothing is written.
 func (s *Store) Create(text string, predecessors ...int64) (Card, error) {
+	return s.CreateFixing(text, 0, predecessors...)
+}
+
+// CreateFixing is Create for a card that fixes a merged card, when fixes is
+// not 0. A card that does not exist, that was dropped or that is not merged is
+// refused with ErrFix and its reason, and nothing is written.
+func (s *Store) CreateFixing(text string, fixes int64, predecessors ...int64) (Card, error) {
 	if text == "" {
 		return Card{}, errors.New("a card needs a text")
 	}
 	e := edit{create: true, text: text, next: fixed(State{Backlog, Developer}), cause: CauseDeveloper}
-	if len(predecessors) > 0 {
-		e.write = func(tx *sql.Tx, card int64) error { return writePredecessors(tx, card, predecessors) }
+	if len(predecessors) > 0 || fixes != 0 {
+		e.write = func(tx *sql.Tx, card int64) error {
+			if err := writePredecessors(tx, card, predecessors); err != nil {
+				return err
+			}
+			if fixes != 0 {
+				return writeFix(tx, card, fixes)
+			}
+			return nil
+		}
 	}
 	return s.change(e)
 }

@@ -87,8 +87,8 @@ func TestMeasures(t *testing.T) {
 		}
 		return s[i:]
 	}
-	if got, want := measures(), `"measures":{"merged":0,"interventions":0,"per_merged":null,"dropped":0,"proposals":{"made":0,"accepted":0,"dismissed":0},`+
-		`"text":"0 merged · interventions per merged card: – · 0 dropped · proposals: 0 made, 0 accepted, 0 dismissed"}`; !strings.HasPrefix(got, want) {
+	if got, want := measures(), `"measures":{"merged":0,"interventions":0,"per_merged":null,"dropped":0,"needed_fix":0,"proposals":{"made":0,"accepted":0,"dismissed":0},`+
+		`"text":"0 merged · interventions per merged card: – · needed a follow-up fix: 0 of 0 · 0 dropped · proposals: 0 made, 0 accepted, 0 dismissed"}`; !strings.HasPrefix(got, want) {
 		t.Errorf("an empty board: %s", got)
 	}
 
@@ -118,7 +118,7 @@ func TestMeasures(t *testing.T) {
 	if m.Interventions != 2 {
 		t.Errorf("merged cards carry %d interventions, want 2 (the dropped and the open card count in none)", m.Interventions)
 	}
-	if want := "3 merged · interventions per merged card: 0.67 · 1 dropped · proposals: 0 made, 0 accepted, 0 dismissed"; m.Text != want {
+	if want := "3 merged · interventions per merged card: 0.67 · needed a follow-up fix: 0 of 3 · 1 dropped · proposals: 0 made, 0 accepted, 0 dismissed"; m.Text != want {
 		t.Errorf("the text %q, want %q", m.Text, want)
 	}
 }

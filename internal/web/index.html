@@ -516,6 +516,7 @@ dialog input[type=text] {
   font: 14px/1.5 var(--sans);
 }
 dialog .after { margin-top: 12px; }
+dialog .after input + label { margin-top: 10px; }
 dialog .act { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 14px; }
 dialog .act .hint { margin-right: auto; font-size: 12px; color: var(--faint); }
 dialog .act .err { margin-right: auto; font-size: 12.5px; color: var(--amber-ink); }
@@ -562,7 +563,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
 <div id="stale" class="offline" hidden>the core serves another version of this page; reload the page to use it</div>
 <section id="strip" class="strip" aria-label="What needs you"></section>
 <section id="proposals" class="proposals" aria-label="Proposals" hidden></section>
-<section id="measures" class="measures" aria-label="Measures" title="Over the whole history. An intervention is a move of yours on a card other than writing it, starting it and the first approval of its spec; sending a spec back belongs to that approval. Not counted yet: your approvals of protected paths on the Git host, which the core does not see, and turning automatic merging on, which belongs to no card. Proposals: made by reviews, accepted as cards, dismissed by you."></section>
+<section id="measures" class="measures" aria-label="Measures" title="Over the whole history. An intervention is a move of yours on a card other than writing it, starting it and the first approval of its spec; sending a spec back belongs to that approval. Not counted yet: your approvals of protected paths on the Git host, which the core does not see, and turning automatic merging on, which belongs to no card. A merged card needed a follow-up fix when a later card that you did not drop names it as the card it fixes; a fix you did not name is not counted. Proposals: made by reviews, accepted as cards, dismissed by you."></section>
 <main id="board" class="board" aria-label="Board"></main>
 <div id="scrim" class="scrim"></div>
 <aside id="panel" class="panel" aria-label="Card" aria-hidden="true">
@@ -594,6 +595,8 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
     <div class="after">
       <label for="d-after">After cards (optional)</label>
       <input type="text" id="d-after" placeholder="3, 5" autocomplete="off" spellcheck="false">
+      <label for="d-fixes">Fixes card (optional)</label>
+      <input type="text" id="d-fixes" placeholder="7" autocomplete="off" spellcheck="false">
     </div>
     <div class="act">
       <span class="hint" id="d-hint"><kbd>&#8984;</kbd> <kbd>Enter</kbd> adds it</span>
@@ -687,6 +690,13 @@ function needsYou(c) { return c.waits_for === "developer" && c.stage !== "backlo
 const PREDECESSOR_DROPPED = "its predecessor";
 function heldByDrop(c) {
   return c.stage === "backlog" && c.waits_for === "developer" && (c.reason || "").startsWith(PREDECESSOR_DROPPED);
+}
+
+// cardLink is a same-page link to a card's page, "#7".
+function cardLink(id) {
+  const a = el("a", null, "#" + id);
+  a.href = "#card-" + id;
+  return a;
 }
 
 // cardList writes card IDs as the store does: "#3, #5".
@@ -1328,10 +1338,22 @@ function renderCard(c) {
     $("p-cost").textContent = c.cost ? c.cost.label : "";
     $("p-interventions").textContent = interventionsText(c.interventions);
   });
-  part("order", [c.predecessors, c.queued_for], () => {
+  part("order", [c.predecessors, c.queued_for, c.fixes, c.fixed_by], () => {
     const o = $("p-order");
-    o.textContent = c.predecessors.length ? "After " + cardList(c.predecessors) + (c.queued_for.length ? " · waits for " + cardList(c.queued_for) : "") : "";
-    o.hidden = !c.predecessors.length;
+    const lines = [];
+    if (c.predecessors.length) lines.push([document.createTextNode("After " + cardList(c.predecessors) + (c.queued_for.length ? " · waits for " + cardList(c.queued_for) : ""))]);
+    if (c.fixes) lines.push([document.createTextNode("Fixes card "), cardLink(c.fixes)]);
+    if (c.fixed_by.length) {
+      const parts = [document.createTextNode(c.fixed_by.length > 1 ? "Fixed by cards " : "Fixed by card ")];
+      c.fixed_by.forEach((id, i) => { if (i) parts.push(document.createTextNode(", ")); parts.push(cardLink(id)); });
+      lines.push(parts);
+    }
+    o.replaceChildren();
+    lines.forEach((nodes, i) => {
+      if (i) o.append(document.createTextNode(" · "));
+      o.append(...nodes);
+    });
+    o.hidden = !lines.length;
   });
   const last = c.history[c.history.length - 1];
   part("reason", [c.stage, c.waits_for, c.reason, !!c.run, c.dropped, c.note, c.publishing, c.pull_request, c.merged], () => {
@@ -1912,6 +1934,15 @@ function afterCards(value) {
   return ids;
 }
 
+// fixesCard reads the field "Fixes card": one number, with a "#" before it or
+// not; 0 when empty, null when it is not a number.
+function fixesCard(value) {
+  const v = value.trim();
+  if (!v) return 0;
+  const m = /^#?(\d+)$/.exec(v);
+  return m ? Number(m[1]) : null;
+}
+
 async function addCard() {
   const text = $("d-text").value;
   if (!text.trim()) { $("d-need").hidden = false; $("d-text").focus(); return; }
@@ -1923,12 +1954,23 @@ async function addCard() {
     $("d-after").focus();
     return;
   }
+  const fixes = fixesCard($("d-fixes").value);
+  if (fixes === null) {
+    const hint = $("d-hint");
+    hint.className = "err";
+    hint.textContent = "Name the merged card it fixes by its number, such as 7.";
+    $("d-fixes").focus();
+    return;
+  }
   $("d-add").disabled = true;
   try {
-    const r = await api("POST", "/api/cards", { text, predecessors });
+    const body = { text, predecessors };
+    if (fixes) body.fixes = fixes;
+    const r = await api("POST", "/api/cards", body);
     if (!r.ok) throw new Error(r.data && r.data.error);
     $("d-text").value = "";
     $("d-after").value = "";
+    $("d-fixes").value = "";
     $("dialog").close();
     setOnline(true);
     await refreshBoard();
@@ -2048,6 +2090,7 @@ $("d-text").addEventListener("input", () => { if ($("d-text").value.trim()) $("d
 $("d-add").addEventListener("click", addCard);
 $("d-text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addCard(); } });
 $("d-after").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addCard(); } });
+$("d-fixes").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addCard(); } });
 $("n-cancel").addEventListener("click", () => $("note").close());
 $("n-go").addEventListener("click", sendNote);
 $("n-text").addEventListener("input", noteReady);

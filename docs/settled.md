@@ -15,6 +15,12 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The board's count of interventions leaves out the developer's approval of a protected path on the Git host until the core sees it, and the strip's title says so (2026-11-24).
 - Kiln's review instructions, with all its stage instructions, are a protected place in Kiln's repo (ADR 0056).
 
+## ADR 0007: Kiln optimises the developer's attention first, quality second
+
+- A card names, when it is written, at most one earlier card that it fixes, as `fixes`, a card ID, in `POST /api/cards`, or in the field "Fixes card" of the screen's new-card dialog. It is kept in `cards.fixes` and not changed afterwards. Only a card the Git host merged can be named: the store refuses, with the reason and with nothing written, a card that does not exist, a dropped card, a card that is not merged, one closed without publishing included, and the card's own ID. The fixed card gets no entry and does not change (2026-11-24).
+- A merged card needed a follow-up fix when a card that was not dropped names it. The board's measures count such cards among the merged cards, each once however many cards name it, as a query over the cards when the board is read (ADR 0042, rule 1). The board's JSON carries the number as `measures.needed_fix`, and the strip's line says `needed a follow-up fix: <n> of <merged>`. A follow-up fix that the developer does not name is not counted, and the strip's title says so (2026-11-24).
+- The card's page shows `Fixes card #<n>` and `Fixed by card #<m>`, each number a link to that card's page. The JSON of the board and of the card carries `fixes`, 0 for none, and the card's JSON carries `fixed_by`, a list (2026-11-24).
+
 ## ADR 0008: One planned intervention per card: approval before any code is written
 
 - The developer approves a spec with a move on the screen: it moves the card from spec, waiting for approval, to implement, waiting for a run. The developer's moves are one table in the store (`Decide` in `internal/store`): approve, again, send back and done (card 13, 2026-11-19). Done is the move from review, waiting for approval, where a review that passed leaves the card; ready to merge comes with publishing (card 14, 2026-11-19).
@@ -185,6 +191,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The schema is version 12. `runs` has `stage`, the stage its card waited in for it, filled for the runs that were there from the history; `cost` and `session`, from its result; and `unread`, 1 for an ended run whose `result.json` no core has read yet. `unread` was set for the runs that had ended before the migration (2026-11-24).
 - The schema is version 13: `predecessors`, one row per card and predecessor, written in the transaction that writes the card (2026-11-24).
 - The schema is version 14: `proposals`, one row per proposal a review run wrote, with the card it was noticed on, the run, its place in the file, its title and text as written, the card made from it and the note it was dismissed with, NULL until then; and `entries.proposal`, the proposal an entry is about, NULL on every other entry (2026-11-24).
+- The schema is version 15: `cards.fixes`, the merged card a card fixes, NULL on every other card and on the cards that were there (2026-11-24).
 
 ## ADR 0033: A problem review notices outside a card's change is proposed to the developer, not acted on
 
@@ -193,6 +200,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - A finished review run's proposals are written in the transaction that ends the run, so a run read again keeps them once. A `proposals.md` that cannot be taken (over 256 KiB, not a file, a damaged archive) is said in the run's reason and keeps nothing, and the run stays finished (2026-11-24).
 - The first screen shows the open proposals in a part of their own under "Needs you", which does not count them: each with its title, the card it was noticed on and its text on demand. "Make a card" writes a backlog card, not started, from the title and the text, and the proposal keeps the card's ID. "Dismiss" takes an optional note. A proposal acted on is no longer open, and a second move on it is refused with 409 (2026-11-24).
 - The board's measures count the proposals made, accepted and dismissed, over the whole history, from the `proposals` rows. The board's JSON carries them as `measures.proposals`, with `made`, `accepted` and `dismissed` (2026-11-24).
+- A card made from a proposal is not a follow-up fix: "Make a card" names no fixed card, and the card the proposal was noticed on is not counted as needing a fix for it (2026-11-24).
 
 ## ADR 0034: Kiln is a core on the developer's machine, a proxy in a container, and one detached container per run
 

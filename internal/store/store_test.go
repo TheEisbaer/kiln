@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 15"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 16"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 15 was opened")
+		t.Fatal("a store of version 16 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 15") || !strings.Contains(msg, "version 14") {
+	if msg := err.Error(); !strings.Contains(msg, "version 16") || !strings.Contains(msg, "version 15") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 15 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 15 and 0", v, tables)
+	if v != 16 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 16 and 0", v, tables)
 	}
 }
 
@@ -735,8 +735,8 @@ func dump(t *testing.T, path string) string {
 }
 
 // withoutSince is a line of a dump without the cards' columns since and
-// send_backs, which versions 6 and 10 added, when the dump is of a store moved
-// forward: a card's row is the only one of six columns there that does not
+// send_backs and fixes, which versions 6, 10 and 15 added, when the dump is of a
+// store moved forward: a card's row is the only one of seven columns there that does not
 // start with a run's ID, and its number of send-backs is 0.
 // runColumns are the columns of a migrated run's row that versions 4 and 12
 // added: started, stage, cost, session and unread.
@@ -764,7 +764,7 @@ func withoutProposal(line string, migrated bool) string {
 }
 
 func withoutSince(line string, migrated bool) string {
-	if parts := strings.Split(line, " | "); migrated && len(parts) == 6 && !strings.HasPrefix(parts[0], "ab12cd34-") && parts[5] == "0" {
+	if parts := strings.Split(line, " | "); migrated && len(parts) == 7 && !strings.HasPrefix(parts[0], "ab12cd34-") && parts[5] == "0" && parts[6] == "<nil>" {
 		return strings.Join(parts[:4], " | ")
 	}
 	return line
@@ -1192,8 +1192,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 14 {
-		t.Fatalf("the store is version %d after Open, want 14", v)
+	if v := userVersion(t, s); v != version || version != 15 {
+		t.Fatalf("the store is version %d after Open, want 15", v)
 	}
 	// What version 1 held is still there, and has no run or reason, and no
 	// send-back.
@@ -1265,6 +1265,7 @@ ALTER TABLE instance_entries DROP COLUMN failed_update;
 DROP TABLE predecessors;
 DROP TABLE proposals;
 ALTER TABLE entries DROP COLUMN proposal;
+ALTER TABLE cards DROP COLUMN fixes;
 PRAGMA user_version = 9`); err != nil {
 		t.Fatal(err)
 	}
@@ -1278,7 +1279,7 @@ PRAGMA user_version = 9`); err != nil {
 	if err != nil || card.State != (State{Review, Developer}) || card.SendBacks != 0 {
 		t.Errorf("the card after the move forward: %+v, %v", card, err)
 	}
-	if b, err := s.Board(); err != nil || len(b) != 1 || b[0].SendBacks != 0 {
+	if b, err := s.Board(); err != nil || len(b) != 1 || b[0].SendBacks != 0 || b[0].Fixes != 0 {
 		t.Errorf("the board after the move forward: %+v, %v", b, err)
 	}
 	// The pause of before version 11 was by the rule, with merging on.

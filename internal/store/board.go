@@ -119,6 +119,8 @@ type Summary struct {
 	QueuedFor    []int64
 	// Interventions is the card's number of interventions (Interventions).
 	Interventions int
+	// Fixes is the merged card this card fixes, 0 for none.
+	Fixes int64
 }
 
 // Part is what some of a card's runs cost.
@@ -230,18 +232,19 @@ func (s *Store) Board() ([]Summary, error) {
 
 	var out []Summary
 	at := map[int64]int{} // a card's index in out
-	rows, err := tx.Query(`SELECT id, text, stage, waits_for, send_backs FROM cards ORDER BY id`)
+	rows, err := tx.Query(`SELECT id, text, stage, waits_for, send_backs, fixes FROM cards ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var c Card
-		if err := rows.Scan(&c.ID, &c.Text, &c.Stage, &c.WaitsFor, &c.SendBacks); err != nil {
+		var fixes sql.NullInt64
+		if err := rows.Scan(&c.ID, &c.Text, &c.Stage, &c.WaitsFor, &c.SendBacks, &fixes); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		at[c.ID] = len(out)
-		out = append(out, Summary{Card: c})
+		out = append(out, Summary{Card: c, Fixes: fixes.Int64})
 	}
 	if err := errorsOf(rows); err != nil {
 		return nil, err
