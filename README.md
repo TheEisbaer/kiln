@@ -72,6 +72,7 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
    - `KILN_TITLE`: the pull request's title.
    - `KILN_TEXT_FILE`: a file with the pull request's text.
    - `KILN_WORKFLOW_YES`: `1` if the change touches a file under `.github/workflows/` and the developer said yes to it on the screen; unset otherwise.
+   - `KILN_WORK_ITEM`: the card's work item number, a whole number from 1; set only when the card has one. A command that links it does so also when the pull request exists already, since the core runs it again after main moved.
 
    Exit status 0 means published, and the last line of standard output that starts with `https://` is the pull request's address. Any other status puts the card under "needs you" with the command's standard error, and the developer can publish again; the command may be run again for the same card and commit, and copes with a branch or a pull request that exists. A change that touches a file under `.github/workflows/` waits on the screen until the developer presses "Publish" and says yes to its workflow files. Once the change is in the card's repo's `main` after a fetch, the card is done as merged.
 
@@ -84,6 +85,7 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
    - `own`: `true` for Kiln's own repo, whose merges update the core; exactly one repo has it.
    - `publish_command`, `check_result_command` and `spec_hosts` (a list of names, or `["*"]`): what `--publish-command`, `--check-result-command` and `--spec-hosts` give, each optional.
    - `limit`: the most cards of the repo in progress at once, ready to merge included; optional, 3 by default, at least 1.
+   - `work_item`: `"required"` when the repo's pull requests cannot merge without a linked work item: a card of it whose review passes waits for you until it has a number; optional, none needed by default.
 
    Beside `repos`, the optional member `limit` at the top of the file is the instance's limit: the most cards of all repos together that are in progress and not yet ready to merge; 3 by default, at least 1. A core started from its flags has 3.
 

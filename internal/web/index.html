@@ -373,6 +373,10 @@ button:disabled { opacity: .55; cursor: default; }
 .moves .approve-note { flex: 0 0 100%; }
 .moves .approve-note label { display: block; font-size: 12.5px; font-weight: 600; margin: 0 0 4px; }
 .moves .approve-note textarea { width: 100%; box-sizing: border-box; }
+.moves .approve-note input, .moves .work-item input { width: 8em; box-sizing: border-box; }
+.moves .work-item { flex: 0 0 100%; }
+.moves .work-item label { display: block; font-size: 12.5px; font-weight: 600; margin: 8px 0 4px; }
+.moves .work-item .hint { font-size: 12px; color: var(--faint); margin: 4px 0 0; }
 .moves .approve-note .hint { font-size: 12px; color: var(--faint); margin: 4px 0 0; }
 .moves .drop {
   margin-left: auto; align-self: center; padding: 4px 10px; font-size: 12.5px;
@@ -609,6 +613,8 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
       <input type="text" id="d-after" placeholder="3, 5" autocomplete="off" spellcheck="false">
       <label for="d-fixes">Fixes card (optional)</label>
       <input type="text" id="d-fixes" placeholder="7" autocomplete="off" spellcheck="false">
+      <label for="d-work-item">Work item (optional)</label>
+      <input type="text" id="d-work-item" placeholder="1234" autocomplete="off" spellcheck="false">
     </div>
     <div class="act">
       <span class="hint" id="d-hint"><kbd>&#8984;</kbd> <kbd>Enter</kbd> adds it</span>
@@ -924,6 +930,7 @@ function tileOf(c) {
     foot.append(cost);
   }
   if (c.interventions > 0) foot.append(el("span", "cost", interventionsText(c.interventions)));
+  if (c.work_item) foot.append(el("span", "cost", "work item #" + c.work_item));
   if (c.documents.length) foot.append(el("span", "docs", c.documents.join(" · ")));
   t.append(foot);
   t.addEventListener("click", () => openCard(c.id));
@@ -1397,12 +1404,13 @@ function renderCard(c) {
     $("p-cost").textContent = c.cost ? c.cost.label : "";
     $("p-interventions").textContent = interventionsText(c.interventions);
   });
-  part("order", [c.repo, manyRepos, c.predecessors, c.queued_for, c.fixes, c.fixed_by], () => {
+  part("order", [c.repo, manyRepos, c.predecessors, c.queued_for, c.fixes, c.fixed_by, c.work_item], () => {
     const o = $("p-order");
     const lines = [];
     if (manyRepos) lines.push([document.createTextNode("In " + c.repo)]);
     if (c.predecessors.length) lines.push([document.createTextNode("After " + cardList(c.predecessors) + (c.queued_for.length ? " · waits for " + cardList(c.queued_for) : ""))]);
     if (c.fixes) lines.push([document.createTextNode("Fixes card "), cardLink(c.fixes)]);
+    if (c.work_item) lines.push([document.createTextNode("Work item #" + c.work_item)]);
     if (c.fixed_by.length) {
       const parts = [document.createTextNode(c.fixed_by.length > 1 ? "Fixed by cards " : "Fixed by card ")];
       c.fixed_by.forEach((id, i) => { if (i) parts.push(document.createTextNode(", ")); parts.push(cardLink(id)); });
@@ -1439,7 +1447,7 @@ function renderCard(c) {
     box.append(r);
   });
   shownCard = c;
-  part("moves", [c.id, c.stage, c.moves, c.waits_for, sentBack(c)], () => renderMoves(c));
+  part("moves", [c.id, c.stage, c.moves, c.waits_for, sentBack(c), c.work_item, c.work_item_needed], () => renderMoves(c));
   part("note", [c.note, c.stage], () => {
     const box = $("p-note");
     box.replaceChildren();
@@ -1531,6 +1539,31 @@ function renderMoves(c) {
     ta.rows = 3;
     ta.spellcheck = true;
     f.append(label, ta, el("div", "hint", "The implement and review runs are told it after the spec; where the two differ, the note counts. The pull request's title and the model come from the spec's own lines."));
+    const wl = el("label", null, "Work item (optional)");
+    wl.htmlFor = "p-approve-work-item";
+    const wi = el("input");
+    wi.type = "text";
+    wi.id = "p-approve-work-item";
+    wi.placeholder = "1234";
+    wi.autocomplete = "off";
+    wi.spellcheck = false;
+    if (c.work_item) wi.value = String(c.work_item);
+    f.append(wl, wi);
+    box.append(f);
+  }
+  // A repo that needs a work item number before publishing: the field stands
+  // before the buttons, and its value goes with publish.
+  if (c.work_item_needed && canPublish(c)) {
+    const f = el("div", "work-item");
+    const label = el("label", null, "Work item");
+    label.htmlFor = "p-work-item";
+    const input = el("input");
+    input.type = "text";
+    input.id = "p-work-item";
+    input.placeholder = "1234";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    f.append(label, input, el("div", "hint", "The repo needs one before the card is published."));
     box.append(f);
   }
   moves.forEach((m, i) => {
@@ -1538,7 +1571,7 @@ function renderMoves(c) {
     b.type = "button";
     if (m.action === "approve" && approves) {
       b.addEventListener("click", async () => {
-        const r = await decide(c.id, "approve", $("p-approve-note").value, box);
+        const r = await decide(c.id, "approve", $("p-approve-note").value, box, workItemMore($("p-approve-work-item").value));
         if (r && r.refused) {
           for (const old of box.querySelectorAll(".err")) old.remove();
           box.append(el("span", "err", r.refused));
@@ -1607,10 +1640,31 @@ async function decide(id, action, note, box, more) {
 let askFor = null; // the card the question is open for
 let askTip = "";    // the tip of the change whose workflow files it shows
 
-function publish(c, box) {
+async function publish(c, box) {
   const files = (c.change && c.change.workflows) || [];
-  if (files.length) askPublish(c.id, files, c.change.tip);
-  else decide(c.id, "publish", "", box);
+  if (files.length) { askPublish(c.id, files, c.change.tip); return; }
+  const field = $("p-work-item");
+  const r = await decide(c.id, "publish", "", box, workItemMore(field ? field.value : ""));
+  if (r && r.refused) {
+    for (const old of box.querySelectorAll(".err")) old.remove();
+    box.append(el("span", "err", r.refused));
+  }
+}
+
+// workItemOf reads a field "Work item": one number, with one "#" before it or
+// not, and spaces taken off. Digits only are a number; anything else is sent
+// as typed, so that the core's refusal says why; undefined when empty.
+function workItemOf(value) {
+  const v = value.trim().replace(/^#\s*/, "").trim();
+  if (!v) return undefined;
+  return /^\d+$/.test(v) && Number.isSafeInteger(Number(v)) ? Number(v) : v;
+}
+
+// workItemMore is the part of a move's body that carries the work item, or
+// nothing when the field is empty.
+function workItemMore(value) {
+  const n = workItemOf(value);
+  return n === undefined ? undefined : { work_item: n };
 }
 
 function askPublish(id, files, tip, said) {
@@ -1630,7 +1684,8 @@ function askPublish(id, files, tip, said) {
 async function sendPublish() {
   if (askFor === null) return;
   $("a-go").disabled = true;
-  const r = await decide(askFor, "publish", "", $("p-moves"), { workflow_yes: true, tip: askTip });
+  const field = $("p-work-item");
+  const r = await decide(askFor, "publish", "", $("p-moves"), Object.assign({ workflow_yes: true, tip: askTip }, workItemMore(field ? field.value : "")));
   if (r.asked) return;
   if (r.refused) {
     $("a-hint").className = "err";
@@ -2026,12 +2081,15 @@ async function addCard() {
   try {
     const body = { text, predecessors };
     if (fixes) body.fixes = fixes;
+    const workItem = workItemOf($("d-work-item").value);
+    if (workItem !== undefined) body.work_item = workItem;
     if (!$("d-repo-row").hidden) body.repo = $("d-repo").value;
     const r = await api("POST", "/api/cards", body);
     if (!r.ok) throw new Error(r.data && r.data.error);
     $("d-text").value = "";
     $("d-after").value = "";
     $("d-fixes").value = "";
+    $("d-work-item").value = "";
     $("d-repo").selectedIndex = 0;
     $("dialog").close();
     setOnline(true);
@@ -2153,6 +2211,7 @@ $("d-add").addEventListener("click", addCard);
 $("d-text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addCard(); } });
 $("d-after").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addCard(); } });
 $("d-fixes").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addCard(); } });
+$("d-work-item").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addCard(); } });
 $("n-cancel").addEventListener("click", () => $("note").close());
 $("n-go").addEventListener("click", sendNote);
 $("n-text").addEventListener("input", noteReady);

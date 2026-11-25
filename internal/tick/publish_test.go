@@ -57,10 +57,12 @@ echo "https://git.example/pull/$KILN_CARD"
 // the publish command's directory.
 type publishing struct {
 	*bench
-	repo   string // the name of the repo its cards are written in, kiln when empty
-	origin string // the origin, a bare repo
-	dir    string // the publish command's directory
-	data   string // the store's file
+	repo string // the name of the repo its cards are written in, kiln when empty
+	// workItem is the work item number its cards are written with, 0 for none.
+	workItem int64
+	origin   string // the origin, a bare repo
+	dir      string // the publish command's directory
+	data     string // the store's file
 }
 
 // newPublishing makes a bench whose copy has a bare origin, with a core that
@@ -114,7 +116,7 @@ func (p *publishing) reviewing(t *testing.T, s *store.Store, files map[string]st
 
 func (p *publishing) stage(t *testing.T, s *store.Store, files map[string]string, passed bool) int64 {
 	t.Helper()
-	c, err := s.CreateIn(cmp.Or(p.repo, store.KilnRepo), "Add a line to the notes.\n\nThe second paragraph.", 0)
+	c, err := s.CreateWithWorkItem(cmp.Or(p.repo, store.KilnRepo), "Add a line to the notes.\n\nThe second paragraph.", 0, p.workItem)
 	if err != nil {
 		t.Fatal(err)
 	}

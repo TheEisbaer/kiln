@@ -36,6 +36,10 @@ type Repo struct {
 	// Limit is the most cards of the repo in progress at once (ADR 0014);
 	// 0 is the default, store.DefaultLimit.
 	Limit int
+	// NeedsWorkItem is true when the repo's pull requests cannot merge
+	// without a linked work item: a card of it is not published without a
+	// work item number.
+	NeedsWorkItem bool
 }
 
 // MaxName is the longest name a repo can have.
@@ -110,6 +114,8 @@ type fileRepo struct {
 	PublishCommand     string   `json:"publish_command"`
 	CheckResultCommand string   `json:"check_result_command"`
 	SpecHosts          []string `json:"spec_hosts"`
+	// WorkItem is "required" or left out.
+	WorkItem string `json:"work_item"`
 	// Limit is read as a pointer, so that a missing member and 0 differ.
 	Limit *int `json:"limit"`
 }
@@ -119,7 +125,7 @@ type fileRepo struct {
 // Check, and the instance's limit. It refuses, with the reason, a file over 1
 // MiB, a member it does not know, a value of the wrong type, anything after
 // the object, a copy that is not an absolute path, and a limit, of a repo or
-// of the instance, below 1. A repo without a limit has Limit 0, the default,
+// of the instance, below 1, and a work item other than "required". A repo without a limit has Limit 0, the default,
 // and so has the instance. It only reads.
 func Load(path string) (Settings, error) {
 	f, err := os.Open(path)
@@ -162,8 +168,12 @@ func Load(path string) (Settings, error) {
 			}
 			limit = *r.Limit
 		}
+		if r.WorkItem != "" && r.WorkItem != "required" {
+			return Settings{}, fmt.Errorf("the settings file %s: the work item of the repo %q is %q; it is \"required\" or left out", path, r.Name, r.WorkItem)
+		}
 		repos = append(repos, Repo{Name: r.Name, Copy: r.Copy, Own: r.Own, PublishCommand: r.PublishCommand,
-			CheckResultCommand: r.CheckResultCommand, SpecHosts: r.SpecHosts, Limit: limit})
+			CheckResultCommand: r.CheckResultCommand, SpecHosts: r.SpecHosts, Limit: limit,
+			NeedsWorkItem: r.WorkItem == "required"})
 	}
 	if err := Check(repos); err != nil {
 		return Settings{}, fmt.Errorf("the settings file %s: %w", path, err)

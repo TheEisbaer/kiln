@@ -67,6 +67,7 @@ const (
 	envTitle       = "KILN_TITLE"
 	envTextFile    = "KILN_TEXT_FILE"
 	envWorkflowYes = "KILN_WORKFLOW_YES"
+	envWorkItem    = "KILN_WORK_ITEM"
 )
 
 // maxReason is the most of the command's standard error that a reason keeps.
@@ -550,6 +551,11 @@ func (c *core) publish(ctx context.Context, repo settings.Repo, id int64) error 
 	if card.State != atHost || pub.Address != "" {
 		return nil
 	}
+	// A repo that needs a work item number publishes no card without one, also
+	// a card that reached the Git host before the repo began to need one.
+	if repo.NeedsWorkItem && card.WorkItem == 0 {
+		return c.publishFailed(card, store.NeedsWorkItemReason(repo.Name))
+	}
 	c.refreshMain(ctx, repo, fetchLimit+10*time.Second)
 	branch := branchOf(id)
 	tip, err := branchTip(ctx, repo.Copy, branch)
@@ -644,6 +650,9 @@ func (c *core) publish(ctx context.Context, repo settings.Repo, id int64) error 
 	}
 	if yes {
 		env = append(env, envWorkflowYes+"=1")
+	}
+	if card.WorkItem != 0 {
+		env = append(env, envWorkItem+"="+strconv.FormatInt(card.WorkItem, 10))
 	}
 	at("publish/before-command")
 	fmt.Fprintf(c.out, "card %d: publishes %s\n", id, commit)
@@ -986,7 +995,7 @@ func (c *core) runPublish(ctx context.Context, command string, env []string) (ad
 	cmd.Dir = c.Data
 	for _, e := range os.Environ() {
 		name, _, _ := strings.Cut(e, "=")
-		if !slices.Contains([]string{envCard, envRepo, envCommit, envBranch, envTitle, envTextFile, envWorkflowYes}, name) {
+		if !slices.Contains([]string{envCard, envRepo, envCommit, envBranch, envTitle, envTextFile, envWorkflowYes, envWorkItem}, name) {
 			cmd.Env = append(cmd.Env, e)
 		}
 	}

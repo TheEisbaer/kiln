@@ -170,6 +170,7 @@ DROP TABLE predecessors;
 DROP TABLE proposals;
 ALTER TABLE entries DROP COLUMN proposal;
 ALTER TABLE cards DROP COLUMN fixes;
+ALTER TABLE cards DROP COLUMN work_item;
 ALTER TABLE cards DROP COLUMN repo;
 PRAGMA user_version = 11`); err != nil {
 		t.Fatal(err)

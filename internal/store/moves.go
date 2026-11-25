@@ -218,11 +218,15 @@ func (e Entry) Note() string {
 // the core has a publish command; for publish, the commit of the card's
 // branch whose workflow files the developer said yes to, if any (ADR 0060);
 // and, for start, the limits of cards in progress (ADR 0014), the zero Limits
-// for the defaults.
+// for the defaults. WorkItem is the work item number given with approve or
+// publish, 0 for none; NeedsWorkItem says that the card's repo publishes only
+// a card with a number, as the core knows it, as it knows Publishing.
 type Options struct {
-	Publishing  bool
-	WorkflowYes string
-	Limits      Limits
+	Publishing    bool
+	WorkflowYes   string
+	Limits        Limits
+	WorkItem      int64
+	NeedsWorkItem bool
 }
 
 // Decide makes one of the developer's moves on a card, by the table of a core
@@ -244,6 +248,14 @@ func (s *Store) Decide(id int64, action Action, note string) (Card, error) {
 // the card's publication anew in the same transaction: the developer's yes,
 // if any, and no commit and no address yet.
 func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Card, error) {
+	if o.WorkItem != 0 {
+		if action != Approve && action != Publish {
+			return s.refusedWorkItem(id, workItemError("only approve and publish take a work item"))
+		}
+		if err := checkWorkItem(o.WorkItem); err != nil {
+			return s.refusedWorkItem(id, err)
+		}
+	}
 	note = strings.TrimSpace(note)
 	if len(note) > MaxNote {
 		c, err := s.Card(id)
@@ -295,8 +307,19 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 	if action == Start {
 		e.because = func(to State, f Facts) string { return queuedReason(to, f, o.Limits) }
 	}
-	if action == Approve && note != "" {
+	if action == Approve || action == Publish {
 		e.write = func(tx *sql.Tx, card int64) error {
+			if action == Publish {
+				if err := writePublication(tx, card, o.WorkflowYes); err != nil {
+					return err
+				}
+			}
+			if err := writeMoveWorkItem(tx, card, action, o); err != nil {
+				return err
+			}
+			if action != Approve || note == "" {
+				return nil
+			}
 			res, err := tx.Exec(`UPDATE specs SET note = ? WHERE rowid = (SELECT rowid FROM specs WHERE card = ? AND kind = ? ORDER BY rowid DESC LIMIT 1)`,
 				note, card, KindSpec)
 			if err != nil {
@@ -310,17 +333,21 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 			return nil
 		}
 	}
-	if action == Publish {
-		e.write = func(tx *sql.Tx, card int64) error {
-			return writePublication(tx, card, o.WorkflowYes)
-		}
-	}
 	c, err := s.change(e)
 	if errors.Is(err, ErrRefused) && c.ID == 0 {
 		// The refusal came from the write, which rolled everything back.
 		if cur, cerr := s.Card(id); cerr == nil {
 			c = cur
 		}
+	}
+	return c, err
+}
+
+// refusedWorkItem returns the card as it is, with the refusal of a work item.
+func (s *Store) refusedWorkItem(id int64, err error) (Card, error) {
+	c, cerr := s.Card(id)
+	if cerr != nil {
+		return Card{}, cerr
 	}
 	return c, err
 }

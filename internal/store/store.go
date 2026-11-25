@@ -22,7 +22,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 16
+const version = 17
 
 // KilnRepo is the name of the one repo of an instance started from its flags,
 // and of every card written before version 16 (ADR 0025).
@@ -95,6 +95,10 @@ type Card struct {
 	Repo string
 	State
 	SendBacks int
+	// WorkItem is the card's work item number, 0 for none. Only the approval
+	// of its spec changes it; a card is written with it, and a publish gives
+	// it to a card that has none.
+	WorkItem int64
 }
 
 // MaxSendBacks is the most send-backs the rule makes on a card; at that
@@ -365,6 +369,12 @@ ALTER TABLE entries ADD COLUMN proposal INTEGER;`)
 		_, err := tx.Exec(`ALTER TABLE cards ADD COLUMN repo TEXT NOT NULL DEFAULT '` + KilnRepo + `'`)
 		return err
 	},
+	// 16 to 17: the card's work item number, NULL on a card without one and
+	// on the cards that were there.
+	func(tx *sql.Tx) error {
+		_, err := tx.Exec(`ALTER TABLE cards ADD COLUMN work_item INTEGER`)
+		return err
+	},
 }
 
 // afterMigration, set only by the test, is called when the store has been moved
@@ -460,6 +470,18 @@ func (s *Store) CreateFixing(text string, fixes int64, predecessors ...int64) (C
 // not know the instance's repos: the name is checked by its caller. An empty
 // name is refused, and nothing is written.
 func (s *Store) CreateIn(repo, text string, fixes int64, predecessors ...int64) (Card, error) {
+	return s.CreateWithWorkItem(repo, text, fixes, 0, predecessors...)
+}
+
+// CreateWithWorkItem is CreateIn for a card with a work item number, when
+// workItem is not 0. A number below 1 or above MaxWorkItem is refused with
+// ErrWorkItem and its reason, and nothing is written.
+func (s *Store) CreateWithWorkItem(repo, text string, fixes, workItem int64, predecessors ...int64) (Card, error) {
+	if workItem != 0 {
+		if err := checkWorkItem(workItem); err != nil {
+			return Card{}, err
+		}
+	}
 	if repo == "" {
 		return Card{}, errors.New("a card needs a repo")
 	}
@@ -467,13 +489,18 @@ func (s *Store) CreateIn(repo, text string, fixes int64, predecessors ...int64) 
 		return Card{}, errors.New("a card needs a text")
 	}
 	e := edit{create: true, repo: repo, text: text, next: fixed(State{Backlog, Developer}), cause: CauseDeveloper}
-	if len(predecessors) > 0 || fixes != 0 {
+	if len(predecessors) > 0 || fixes != 0 || workItem != 0 {
 		e.write = func(tx *sql.Tx, card int64) error {
 			if err := writePredecessors(tx, card, predecessors); err != nil {
 				return err
 			}
 			if fixes != 0 {
-				return writeFix(tx, card, fixes)
+				if err := writeFix(tx, card, fixes); err != nil {
+					return err
+				}
+			}
+			if workItem != 0 {
+				return writeWorkItem(tx, card, workItem)
 			}
 			return nil
 		}
@@ -725,6 +752,9 @@ func (s *Store) change(e edit) (Card, error) {
 	}
 	if e.write != nil {
 		if err := e.write(tx, id); err != nil {
+			return Card{}, err
+		}
+		if card.WorkItem, err = readWorkItem(tx, id); err != nil {
 			return Card{}, err
 		}
 	}
@@ -1175,10 +1205,12 @@ func readRun(q querier, id string) (RunRow, error) {
 
 func readCard(q querier, id int64) (Card, error) {
 	c := Card{ID: id}
-	err := q.QueryRow(`SELECT text, repo, stage, waits_for, send_backs FROM cards WHERE id = ?`, id).
-		Scan(&c.Text, &c.Repo, &c.Stage, &c.WaitsFor, &c.SendBacks)
+	var workItem sql.NullInt64
+	err := q.QueryRow(`SELECT text, repo, stage, waits_for, send_backs, work_item FROM cards WHERE id = ?`, id).
+		Scan(&c.Text, &c.Repo, &c.Stage, &c.WaitsFor, &c.SendBacks, &workItem)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Card{}, fmt.Errorf("%w %d: %w", ErrNoCard, id, err)
 	}
+	c.WorkItem = workItem.Int64
 	return c, err
 }
