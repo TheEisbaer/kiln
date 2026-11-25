@@ -5,8 +5,12 @@ on: pull_request
 permissions:
   contents: read
 
+# The check is several jobs side by side, each on a runner of its own: the
+# unit check, and the engine tests of each engine package. The job check
+# waits for all of them and is the one required status check of main's rule
+# set, so the rule set does not change when the jobs do (ADR 0049).
 jobs:
-  check:
+  unit:
     runs-on: ubuntu-latest
     # A pull request restores the caches and cannot save one: the Git host
     # gives this job a cache token that only reads. Only the workflow cache,
@@ -36,6 +40,88 @@ jobs:
           path: ${{ runner.temp }}/go-build
           key: go-build-${{ hashFiles('images/toolchain/Dockerfile') }}-${{ github.sha }}
           restore-keys: go-build-${{ hashFiles('images/toolchain/Dockerfile') }}-
-      - run: check/in-image
+      - run: check/in-image --check-only
         env:
           KILN_GO_CACHE: ${{ runner.temp }}/go-build
+
+  engine:
+    runs-on: ubuntu-latest
+    cache-mode: read # as in unit
+    strategy:
+      # Every package reports on a failure, so a send-back carries them all.
+      fail-fast: false
+      matrix:
+        # The packages with engine tests; the check fails when this line and
+        # check/in-image name others than those it finds.
+        package: [internal/seal, internal/run, internal/tick]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The merge commit and its parents, for the step needed.
+          fetch-depth: 2
+      # A change that touches only docs runs no engine tests (ADR 0031). HEAD
+      # is the pull request's merge commit and HEAD^1 is main as it was
+      # merged against; --no-renames counts a moved file at both names. Any
+      # other path, an empty list or a diff that fails runs them. The rule
+      # lives here and nowhere else: a pull request runs its own copy of this
+      # file, so a change to the rule touches .github/ and runs everything,
+      # and it needs the developer's yes and the code owner's approval. grep
+      # reads the whole list, without -q: under pipefail a printf cut off by
+      # an early exit would count as "only docs".
+      - id: needed
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          if files=$(git diff --no-renames --name-only HEAD^1 HEAD) && [ -n "$files" ] &&
+              ! printf '%s\n' "$files" | grep -Ev '^(docs/.+|README\.md|CONTEXT\.md|CLAUDE\.md)$' >/dev/null; then
+              echo "run=false" >>"$GITHUB_OUTPUT"
+              echo "::notice::engine tests of $PACKAGE not run: the change touches only docs/, README.md, CONTEXT.md and CLAUDE.md"
+              printf '%s\n' "$files"
+          else
+              echo "run=true" >>"$GITHUB_OUTPUT"
+          fi
+      # The caches as in unit.
+      - id: toolchain
+        if: steps.needed.outputs.run == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/toolchain.tar
+          key: toolchain-${{ hashFiles('go.mod', 'go.sum', 'images/toolchain/Dockerfile') }}
+      - if: steps.needed.outputs.run == 'true' && steps.toolchain.outputs.cache-hit == 'true'
+        run: |
+          docker load --quiet --input "$RUNNER_TEMP/toolchain.tar" ||
+              echo "::warning::the cached toolchain image did not load; check/in-image builds it"
+          rm -f "$RUNNER_TEMP/toolchain.tar"
+      - if: steps.needed.outputs.run == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: go-build-${{ hashFiles('images/toolchain/Dockerfile') }}-${{ github.sha }}
+          restore-keys: go-build-${{ hashFiles('images/toolchain/Dockerfile') }}-
+      - if: steps.needed.outputs.run == 'true'
+        run: check/in-image --engine-only "$PACKAGE"
+        env:
+          PACKAGE: ${{ matrix.package }}
+          KILN_GO_CACHE: ${{ runner.temp }}/go-build
+
+  # The required check. always() makes it run when a job it needs failed or
+  # was cancelled: without it, it would be skipped, and the Git host counts a
+  # skipped job as passed. It passes only when every job it needs succeeded.
+  check:
+    needs: [unit, engine]
+    if: always()
+    runs-on: ubuntu-latest
+    cache-mode: read # as in unit
+    steps:
+      - env:
+          UNIT: ${{ needs.unit.result }}
+          ENGINE: ${{ needs.engine.result }}
+          ALL: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "unit: $UNIT"
+          echo "engine: $ENGINE"
+          [ -n "$ALL" ] || exit 1
+          for result in $ALL; do
+              [ "$result" = success ] || exit 1
+          done

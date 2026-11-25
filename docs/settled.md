@@ -207,6 +207,8 @@ A line says what was settled and ends with the date in brackets, for example (20
 
 - The checks are one command in the repo, and these rules live in it (ADR 0045).
 - The checks now run on the Git host's own runners and not on the developer's machine (ADR 0049). The rules stand, since those machines vary in speed as well.
+- On the Git host, a pull request whose merge commit changes, against its first parent and with renames counted at both names, only files under `docs/` or the files `README.md`, `CONTEXT.md` and `CLAUDE.md` runs no engine tests. Any other path, an empty diff or a diff that fails runs them all. The rule lives only in `.github/workflows/check.yml`, so a change to it needs the developer's yes before the push (ADR 0060) and the code owner's approval at the merge. The engine jobs that skip still report, and the required check still waits for them (2026-11-25).
+- Each test runs once per check. The engine part runs only the tests that read `KILN_ENGINE_TESTS`, as the check program finds them, and the unit tests run only in the check, in the toolchain image (2026-11-25).
 
 ## ADR 0032: Kiln keeps its data in one embedded database file
 
@@ -380,6 +382,10 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The toolchain image carries the label `kiln.context`, the SHA-256 of its context's three files, and an image of that name with the same label is not built again (2026-11-20).
 - The README builds the toolchain image from the same context as `check/in-image`: a tar of `go.mod`, `go.sum` and `images/toolchain/Dockerfile` on standard input, so that the image built by hand is the check's. A change to that list changes both (2026-11-20).
 - A step of the check command runs `sh -n` on every file under `scripts/`, and fails on one that does not parse or is not executable (2026-11-24).
+- `check/in-image --check-only` runs the check without the engine part, also on the Git host's runner. `check/in-image --engine-only <package>` runs only that package's engine tests, and on the developer's machine is a yes, as `--engine` is. A step of the check fails:
+  - when the string literal `KILN_ENGINE_TESTS` appears anywhere but in the body of a `Test` function of `internal/seal`, `internal/run` or `internal/tick`;
+  - when one of those has no engine test;
+  - when the engine packages named in `check/in-image` or in the workflow's matrix differ from them (2026-11-25).
 
 ## ADR 0047: One repo with one Go module, divided by Kiln's parts, with guardrail files in a few named places
 
@@ -403,6 +409,13 @@ A line says what was settled and ends with the date in brackets, for example (20
 
 - The engine tests are started by `check/in-image`: always on the Git host's runner, and on the developer's machine only with `--engine`, so that a test built from a card's branch does not run there unasked (ADR 0048). They are compiled in the toolchain image with the network off and run on the machine that runs the check, since the image has no engine.
 - Besides the check on pull requests, a second workflow, `cache`, runs on every push to `main` and only fills the caches. It runs no check and no test (2026-11-20).
+- The check on pull requests is several jobs side by side, each on its own runner:
+  - `unit` (`--check-only`);
+  - one `engine` job per engine package (`--engine-only`, `fail-fast: false`);
+  - `check`, which waits for all of them with `if: always()` and passes only when every one succeeded.
+
+  `check` stays the one required status check of `main`'s rule set (2026-11-25).
+- The line above, "The engine tests are started by `check/in-image`: always on the Git host's runner…", holds except for a change that touches only docs (ADR 0031) (2026-11-25).
 
 ## ADR 0052: Until Kiln builds its own cards, its flow is run by hand
 

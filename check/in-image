@@ -9,6 +9,18 @@
 # run there with the home directory in reach, on the engine that hosts other
 # work (ADR 0048).
 #
+# The engine part runs only the engine tests, the tests that read
+# KILN_ENGINE_TESTS, as "go run ./check engine-tests" finds them. The other
+# tests of those packages are unit tests and run in the check, in the image
+# (ADR 0045), so that every test runs once per check: run beside the engine
+# tests they took a second time what the check already took.
+#
+# With --check-only it runs the check and no engine part, also on the host's
+# runner. With --engine-only <package> it runs only that package's engine
+# tests and no check; on the developer's machine that counts as a yes, as
+# --engine does. The workflow runs the two in jobs side by side, one engine
+# job per package, each on a runner of its own.
+#
 # With --compile-only, on the Git host's runner, it compiles what the check
 # and the engine part compile, runs none of it, and so fills Go's build cache
 # in KILN_GO_CACHE. The workflow cache, on a push to main, saves that cache;
@@ -16,14 +28,29 @@
 # toolchain image's Dockerfile.
 set -eu
 
+usage() {
+    echo "usage: check/in-image [--engine | --compile-only | --check-only | --engine-only <package>]" >&2
+    exit 2
+}
+
 engine=
 compile=
+check=1
+check_only=
+only=
 case "${1-}" in
     --engine) engine=1 ;;
     --compile-only) compile=1 ;;
+    --check-only) check_only=1 ;;
+    --engine-only)
+        [ -n "${2-}" ] || usage
+        engine=1 check= only=$2
+        shift
+        ;;
     "") ;;
-    *) echo "usage: check/in-image [--engine | --compile-only]" >&2; exit 2 ;;
+    *) usage ;;
 esac
+[ "$#" -le 1 ] || usage
 
 # Go's build cache, on the Git host's runner only: there the directory comes
 # from a cache that only a push to main saves, and is thrown away with the
@@ -46,10 +73,41 @@ if [ -n "$compile" ] && [ -z "$gocache" ]; then
     exit 2
 fi
 [ -n "$gocache" ] && mkdir -p "$gocache"
-[ "${GITHUB_ACTIONS-}" = true ] && [ -z "$compile" ] && engine=1
+[ "${GITHUB_ACTIONS-}" = true ] && [ -z "$compile" ] && [ -z "$check_only" ] && engine=1
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 image=kiln-toolchain
+
+# engine_target sets goos and goarch, the machine the engine tests run on,
+# and packages, the packages with engine tests: with --engine-only, the one
+# it names, which must be one of them.
+engine_target() {
+    # The test program is built for the machine it runs on, not for the image.
+    case "$(uname -s)" in
+        Darwin) goos=darwin ;;
+        Linux) goos=linux ;;
+        *) echo "engine tests: unsupported system $(uname -s)" >&2; exit 2 ;;
+    esac
+    case "$(uname -m)" in
+        arm64 | aarch64) goarch=arm64 ;;
+        x86_64) goarch=amd64 ;;
+        *) echo "engine tests: unsupported machine $(uname -m)" >&2; exit 2 ;;
+    esac
+
+    packages=
+    for pkg in internal/seal internal/run internal/tick; do
+        if [ -n "$only" ]; then
+            [ "$pkg" = "$only" ] && packages=./$pkg
+        elif [ -d "$root/$pkg" ]; then
+            packages="$packages ./$pkg"
+        fi
+    done
+    [ -n "$only" ] && [ -z "$packages" ] && usage
+    return 0
+}
+
+# A package that --engine-only does not know ends here, before any build.
+[ -n "$only" ] && engine_target
 
 # The context is exactly go.mod, go.sum and the Dockerfile: the image downloads
 # the modules of the first two, and nothing else of the repo is sent to the engine.
@@ -72,27 +130,6 @@ else
     tar -C "$root" -cf - go.mod go.sum images/toolchain/Dockerfile |
         docker build --quiet --label "kiln.context=$digest" --tag "$image" --file images/toolchain/Dockerfile - >/dev/null
 fi
-
-# engine_target sets goos and goarch, the machine the engine tests run on,
-# and packages, the packages with engine tests.
-engine_target() {
-    # The test program is built for the machine it runs on, not for the image.
-    case "$(uname -s)" in
-        Darwin) goos=darwin ;;
-        Linux) goos=linux ;;
-        *) echo "engine tests: unsupported system $(uname -s)" >&2; exit 2 ;;
-    esac
-    case "$(uname -m)" in
-        arm64 | aarch64) goarch=arm64 ;;
-        x86_64) goarch=amd64 ;;
-        *) echo "engine tests: unsupported machine $(uname -m)" >&2; exit 2 ;;
-    esac
-
-    packages=
-    for pkg in internal/seal internal/run internal/tick; do
-        if [ -d "$root/$pkg" ]; then packages="$packages ./$pkg"; fi
-    done
-}
 
 # --compile-only: one container compiles everything the check and the engine
 # part compile. A command that fails prints its output and the next one runs:
@@ -120,15 +157,16 @@ if [ -n "$compile" ]; then
     exit 0
 fi
 
-# The engine tests run in the background beside the check: see engine below.
+# The engine tests run in the background beside the check, if there is one:
+# see engine below.
 status=0
 if [ -n "$engine" ]; then
     engine_target
 
     out=$(mktemp -d)
-    # Output is printed by whoever holds $out/print: the check, then each
-    # package as it ends, so that nothing mixes.
-    mkdir "$out/print"
+    # Output is printed by whoever holds $out/print: the check, if there is
+    # one, then each package as it ends, so that nothing mixes.
+    [ -z "$check" ] || mkdir "$out/print"
 fi
 
 # One check on this machine at a time runs its engine tests. Every run takes a
@@ -184,12 +222,23 @@ engine() {
     # The programs come out on standard output, as a tar: a directory of the
     # host's, such as the one mktemp makes on macOS, is not always visible to
     # the engine. One container builds them all, so the standard library is
-    # compiled once.
+    # compiled once. Beside each program <name>.test it writes <name>.run, the
+    # -test.run pattern of the package's engine tests. Only go test -c gets
+    # the host's GOOS and GOARCH: the check program runs in the container.
     if ! started build docker run --rm --network none \
         --volume "$root:/src:ro" --workdir /src \
         ${gocache:+--volume "$gocache:/gocache" --env GOCACHE=/gocache} \
-        --env GOOS="$goos" --env GOARCH="$goarch" --env CGO_ENABLED=0 \
-        "$image" sh -c 'mkdir /tmp/tests && go test -c -o /tmp/tests/ "$@" && tar -C /tmp/tests -cf - .' sh $packages \
+        "$image" sh -c '
+            set -e
+            goos=$1 goarch=$2
+            shift 2
+            mkdir /tmp/tests
+            env GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go test -c -o /tmp/tests/ "$@"
+            go run ./check engine-tests "$@" >/tmp/engine-tests
+            while read -r pkg pattern; do
+                printf "%s\n" "$pattern" >"/tmp/tests/${pkg##*/}.run"
+            done </tmp/engine-tests
+            tar -C /tmp/tests -cf - .' sh "$goos" "$goarch" $packages \
         >"$out/tests.tar" 2>"$out/build.log" || ! tar -xf "$out/tests.tar" -C "$out" 2>>"$out/build.log"; then
         take
         echo "== engine tests: building them failed"
@@ -206,10 +255,22 @@ engine() {
         parallel=6
         [ "$name" = seal ] && parallel=3
         (
+            # Only the package's engine tests, and never none: a pattern
+            # that is missing or empty would run every test or none.
+            pattern=
+            [ -e "$out/$name.run" ] && pattern=$(cat "$out/$name.run")
+            if [ -z "$pattern" ]; then
+                echo 1 >"$out/$name.status"
+                take
+                echo "== engine tests of ${pkg#./}: no engine test found"
+                give
+                exit 0
+            fi
             # From the package's directory, as go test would.
             code=0
             started "$name" sh -c 'cd "$1" && shift && exec "$@"' sh "$root/$pkg" \
-                env KILN_ENGINE_TESTS=1 "$out/$name.test" -test.v -test.parallel=$parallel -test.timeout=10m \
+                env KILN_ENGINE_TESTS=1 "$out/$name.test" -test.v -test.run "$pattern" \
+                -test.parallel=$parallel -test.timeout=10m \
                 >"$out/$name.log" 2>&1 || code=$?
             echo "$code" >"$out/$name.status"
             take
@@ -253,14 +314,20 @@ trap 'stop 129' HUP
 
 # In the background, so that a signal is handled at once, not once the check
 # has ended.
-docker run --rm --network none \
-    --volume "$root:/src:ro" --workdir /src \
-    ${gocache:+--volume "$gocache:/gocache" --env GOCACHE=/gocache} \
-    "$image" go run ./check &
-check_pid=$!
-wait "$check_pid" || status=$?
-check_pid=
+if [ -n "$check" ]; then
+    docker run --rm --network none \
+        --volume "$root:/src:ro" --workdir /src \
+        ${gocache:+--volume "$gocache:/gocache" --env GOCACHE=/gocache} \
+        "$image" go run ./check &
+    check_pid=$!
+    wait "$check_pid" || status=$?
+    check_pid=
+fi
 
+if [ -n "$check_only" ]; then
+    echo "engine tests not run here; check/in-image --engine-only <package> runs them"
+    exit "$status"
+fi
 if [ -z "$engine" ]; then
     echo "engine tests not run; check/in-image --engine runs them"
     exit "$status"
