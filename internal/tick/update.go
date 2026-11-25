@@ -162,7 +162,7 @@ func (c *core) checkUpdate(ctx context.Context, moved bool) {
 	if !moved && c.update.launched {
 		return
 	}
-	target, err := head(ctx, c.Repo)
+	target, err := head(ctx, c.own().Copy)
 	if err == nil && !moved && target == c.update.seen {
 		return
 	}
@@ -188,7 +188,7 @@ func (c *core) checkUpdate(ctx context.Context, moved bool) {
 // update while automatic merging is off, which the store keeps across
 // restarts, nor one whose build failed in this core's life.
 func (c *core) updateDue(ctx context.Context, target string) (string, error) {
-	own, err := kilnsOwn(ctx, c.Repo, target)
+	own, err := kilnsOwn(ctx, c.own().Copy, target)
 	if err != nil || !own {
 		return "", err
 	}
@@ -196,7 +196,7 @@ func (c *core) updateDue(ctx context.Context, target string) (string, error) {
 		if target == v {
 			return "", nil
 		}
-		past, err := isAncestor(ctx, c.Repo, v, target)
+		past, err := isAncestor(ctx, c.own().Copy, v, target)
 		if err != nil {
 			return "", err
 		}
@@ -383,7 +383,7 @@ func (c *core) imagesDue(ctx context.Context, target string) (bool, string) {
 		fmt.Fprintln(c.out, "kiln core: this core was built by hand, so it cannot tell whether the images' files changed; "+as)
 		return true, ""
 	}
-	files, err := gitLine(ctx, c.Repo, append([]string{"diff", "--name-only", "--no-renames", v, target, "--"}, imageFiles...)...)
+	files, err := gitLine(ctx, c.own().Copy, append([]string{"diff", "--name-only", "--no-renames", v, target, "--"}, imageFiles...)...)
 	if err != nil {
 		if ctx.Err() == nil {
 			fmt.Fprintf(c.errOut, "kiln core: the images' files: %s; %s\n", run.Printable(err.Error()), as)
@@ -466,7 +466,7 @@ func (c *core) build(ctx context.Context, target, toolchain string) (string, err
 func (c *core) fromArchive(ctx context.Context, args []string, consume func(context.Context, io.Reader) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	archive := gitCommand(ctx, c.Repo, args...)
+	archive := gitCommand(ctx, c.own().Copy, args...)
 	var stderr strings.Builder
 	archive.Stderr = &stderr
 	src, err := archive.StdoutPipe()
@@ -487,7 +487,7 @@ func (c *core) fromArchive(ctx context.Context, args []string, consume func(cont
 		return consumeErr
 	}
 	if err := archive.Wait(); err != nil {
-		return fmt.Errorf("git archive on %s: %w: %s", c.Repo, err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("git archive on %s: %w: %s", c.own().Copy, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }

@@ -43,14 +43,20 @@ import (
 	"github.com/TheEisbaer/kiln/internal/launcher"
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/seal"
+	"github.com/TheEisbaer/kiln/internal/settings"
 	"github.com/TheEisbaer/kiln/internal/store"
 	"github.com/TheEisbaer/kiln/internal/web"
 )
 
 // Config is what `kiln core` is started with.
 type Config struct {
-	Data  string // the data directory
-	Repo  string // the instance's copy of the target repo, a bare repo
+	Data string // the data directory
+	// Repos are the instance's repos, in order (ADR 0025). Empty, the
+	// instance has the one repo of the flags: Repo, PublishCommand,
+	// CheckResultCommand and Hosts (repos). Every reader takes its repo from
+	// repos(), not from those fields.
+	Repos []settings.Repo
+	Repo  string // --repo: the instance's copy of the target repo, a bare repo
 	Model string // the model of a spec run that starts, an exact identifier
 	// The models of an implement run and of a review run that start; Model
 	// when empty (ADR 0030).
@@ -123,6 +129,63 @@ var stages = map[store.Stage]stage{
 	store.Spec:      {"high", instructions.Spec, store.KindSpec, false},
 	store.Implement: {"medium", instructions.Implement, store.KindReport, true},
 	store.Review:    {"high", instructions.Review, store.KindReview, false},
+}
+
+// repos are the instance's repos, in order: Repos when it is set, and else
+// one repo, store.KilnRepo, Kiln's own, made from the flags.
+func (c Config) repos() []settings.Repo {
+	if len(c.Repos) > 0 {
+		return c.Repos
+	}
+	return []settings.Repo{{Name: store.KilnRepo, Copy: c.Repo, PublishCommand: c.PublishCommand,
+		CheckResultCommand: c.CheckResultCommand, SpecHosts: c.Hosts, Own: true}}
+}
+
+// own is Kiln's own repo, the one marked Own (ADR 0019, ADR 0037).
+func (c Config) own() settings.Repo {
+	repos := c.repos()
+	for _, r := range repos {
+		if r.Own {
+			return r
+		}
+	}
+	return repos[0] // settings.Check, at the start, refuses a list without one
+}
+
+// repoOf is the repo of a card, by its name, or an error for a name the
+// instance does not have.
+func (c Config) repoOf(card store.Card) (settings.Repo, error) {
+	for _, r := range c.repos() {
+		if r.Name == card.Repo {
+			return r, nil
+		}
+	}
+	return settings.Repo{}, fmt.Errorf("card %d is of the repo %q, which this instance does not have", card.ID, card.Repo)
+}
+
+// checkRepos refuses, with the reason, repos that the core cannot work with:
+// a list together with the flags of one repo, a list that settings.Check
+// refuses, neither a list nor --repo, and, until publishing and the Git
+// host's side work per repo, more than one repo.
+func checkRepos(cfg Config) error {
+	if len(cfg.Repos) == 0 {
+		if cfg.Repo == "" {
+			return errors.New("no repo is given")
+		}
+		return nil
+	}
+	if cfg.Repo != "" || cfg.PublishCommand != "" || cfg.CheckResultCommand != "" || len(cfg.Hosts) > 0 {
+		return errors.New("the repos are given as a list and as --repo, --publish-command, --check-result-command or --spec-hosts; " +
+			"each setting has one place (ADR 0025)")
+	}
+	if err := settings.Check(cfg.Repos); err != nil {
+		return err
+	}
+	if len(cfg.Repos) > 1 {
+		return errors.New("an instance of more than one repo is not built yet: publishing, the check result command, " +
+			"the tests at the Git host and the update still work on Kiln's own repo only")
+	}
+	return nil
 }
 
 // model is the model of a run of the stage.
@@ -310,7 +373,12 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 	// may be removed while it runs: its paths are made absolute while that
 	// directory is there, and every command it runs, through the seal, runs in
 	// the data directory, and git in the instance's copy of the repo (card 16).
-	for _, p := range []*string{&cfg.Data, &cfg.Repo, &cfg.Page} {
+	cfg.Repos = slices.Clone(cfg.Repos) // the caller's list is not changed
+	paths := []*string{&cfg.Data, &cfg.Repo, &cfg.Page}
+	for i := range cfg.Repos {
+		paths = append(paths, &cfg.Repos[i].Copy)
+	}
+	for _, p := range paths {
 		if *p == "" {
 			continue
 		}
@@ -337,6 +405,9 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 	}
 	if cfg.Runs < 1 || cfg.Runs > MaxRuns {
 		return fmt.Errorf("--runs is %d; it is from 1 to %d", cfg.Runs, MaxRuns)
+	}
+	if err := checkRepos(cfg); err != nil {
+		return err
 	}
 	if err := checkCredential(cfg); err != nil {
 		return err
@@ -397,10 +468,10 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 		checking: map[int64]*checkState{}, tested: map[int64]hostTest{}, clock: clk, renewNow: make(chan struct{}, 1)}
 	c.update.launched, c.update.built = l != nil, make(chan string, 1)
 	fmt.Fprintf(out, "kiln core: instance %s, data %s, up to %d runs at once\n", instance, cfg.Data, cfg.Runs)
-	if cfg.PublishCommand != "" {
+	if cfg.own().PublishCommand != "" {
 		fmt.Fprintln(out, "kiln core: a card is published with the publish command")
 	}
-	if cfg.CheckResultCommand != "" {
+	if cfg.own().CheckResultCommand != "" {
 		fmt.Fprintln(out, "kiln core: a card at the Git host is checked with the check result command")
 	}
 	// The screen, which refuses moves until the report.
@@ -515,10 +586,11 @@ type core struct {
 	// Git host, guarded by mu like publishing (checkresult.go).
 	checking map[int64]*checkState
 
-	// fetchMu guards main, the fetching of main; checked is the rounds of it
-	// after which the tick last looked for merged cards, read by the tick only.
+	// fetchMu guards mains, the fetching of each repo's main, by the repo's
+	// name; checked is the rounds of Kiln's own repo's after which the tick
+	// last looked for merged cards, read by the tick only.
 	fetchMu sync.Mutex
-	main    mainState
+	mains   map[string]*mainState
 	checked int
 	// tested is what each card at the Git host was last tested with, read
 	// and written by the tick only, like checked (publish.go).
@@ -638,9 +710,13 @@ func (c *core) serve() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("the screen: %w", err)
 	}
-	info := web.Info{Instance: c.instance, Repo: c.Repo, Model: c.model(store.Spec), ImplementModel: c.model(store.Implement),
-		ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change, Page: c.Page, Publishing: c.PublishCommand != "",
-		Version: versionOf(c.Version), Accepting: c.acting.Load}
+	var names []string
+	for _, r := range c.Repos {
+		names = append(names, r.Name)
+	}
+	info := web.Info{Instance: c.instance, Repo: c.own().Copy, Repos: names, Model: c.model(store.Spec),
+		ImplementModel: c.model(store.Implement), ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change,
+		Page: c.Page, Publishing: c.own().PublishCommand != "", Version: versionOf(c.Version), Accepting: c.acting.Load}
 	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()
@@ -696,13 +772,8 @@ func (c *core) tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Runs start from main as origin has it (card 19).
-	starts := false
-	for _, id := range cards {
-		_, ok := inFlight[id]
-		starts = starts || (!ok && paused == "")
-	}
-	if err := c.atHostRound(ctx, starts); err != nil {
+	// Runs start from main as their repo's origin has it (card 19).
+	if err := c.atHostRound(ctx, c.fetchFor(cards, inFlight, paused)); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -748,6 +819,27 @@ func (c *core) tick(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// fetchFor are the names of the repos whose main is fetched before runs
+// start: those of the cards that wait for a run and have none in flight,
+// while the instance is not paused. A card that cannot be read, or whose repo
+// the instance does not have, adds none; the tick says why when it takes the
+// card.
+func (c *core) fetchFor(cards []int64, inFlight map[int64]string, paused string) map[string]bool {
+	fetch := map[string]bool{}
+	if paused != "" {
+		return fetch
+	}
+	for _, id := range cards {
+		if _, ok := inFlight[id]; ok {
+			continue
+		}
+		if card, err := c.store.Card(id); err == nil {
+			fetch[card.Repo] = true
+		}
+	}
+	return fetch
 }
 
 // release ends the wait of the queued cards whose predecessors are no longer
@@ -984,6 +1076,11 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 	if !ok {
 		return nil, fmt.Errorf("it waits for a run in %s, which has none", card.Stage)
 	}
+	// A card of a repo the instance does not have starts no run, and its run
+	// in flight is not carried on.
+	if _, err := c.repoOf(card); err != nil {
+		return nil, err
+	}
 	// The points of the run, by their names and by the stage's.
 	mark := func(point string) {
 		at(point)
@@ -1175,7 +1272,7 @@ func (c *core) carry(ctx context.Context, f *follower) error {
 	}
 
 	var rule *store.Rule
-	if f.card.Stage == store.Review && d.to == reviewPassed && c.PublishCommand != "" {
+	if f.card.Stage == store.Review && d.to == reviewPassed && c.own().PublishCommand != "" {
 		if rule, err = c.passedRule(ctx, id); err != nil {
 			return fmt.Errorf("the branch of run %s: %w; it is read again on the next tick", row.ID, err)
 		}
@@ -1233,7 +1330,8 @@ func (c *core) passedRule(ctx context.Context, id int64) (*store.Rule, error) {
 			"so the rule does not publish it, and it waits for you"}, nil
 	}
 	branch := branchOf(id)
-	tip, err := branchTip(ctx, c.Repo, branch)
+	own := c.own().Copy
+	tip, err := branchTip(ctx, own, branch)
 	if err != nil {
 		return nil, err
 	}
@@ -1241,7 +1339,7 @@ func (c *core) passedRule(ctx context.Context, id int64) (*store.Rule, error) {
 		return &store.Rule{To: reviewPassed, Reason: run.Printable(
 			"the review passed; the card's branch " + branch + " does not exist, so the rule does not publish it")}, nil
 	}
-	files, err := workflowFiles(ctx, c.Repo, tip)
+	files, err := workflowFiles(ctx, own, tip)
 	if err != nil {
 		return nil, err
 	}
@@ -1305,11 +1403,16 @@ func (c *core) hold(card store.Card, reason string) error {
 // startsFrom is the commit a card's next run starts from: the head of main for
 // a spec run; the tip of the card's branch for a review run, and for an
 // implement run when the branch exists, so that a second implement run builds
-// on the first (ADR 0013); and the head of main otherwise. A review run of a
-// card without a branch is held, with the reason.
+// on the first (ADR 0013); and the head of main otherwise, each in the copy
+// of the card's repo. A review run of a card without a branch is held, with
+// the reason.
 func (c *core) startsFrom(ctx context.Context, card store.Card) (commit, held string, err error) {
+	repo, err := c.repoOf(card)
+	if err != nil {
+		return "", "", err
+	}
 	if card.Stage != store.Spec {
-		tip, err := branchTip(ctx, c.Repo, branchOf(card.ID))
+		tip, err := branchTip(ctx, repo.Copy, branchOf(card.ID))
 		if err != nil || tip != "" {
 			return tip, "", err
 		}
@@ -1317,7 +1420,7 @@ func (c *core) startsFrom(ctx context.Context, card store.Card) (commit, held st
 			return "", "the card's branch " + branchOf(card.ID) + " does not exist; no change to review", nil
 		}
 	}
-	commit, err = head(ctx, c.Repo)
+	commit, err = head(ctx, repo.Copy)
 	return commit, "", err
 }
 
@@ -1482,6 +1585,10 @@ func laterDestination(s store.Stage, v run.Verdict, doc run.Document) end {
 // instruction cannot be written again for that reason, the error is
 // errNotWrittenAgain, with held saying why.
 func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, inFlight bool) (in run.Inputs, held string, err error) {
+	repo, err := c.repoOf(card)
+	if err != nil {
+		return run.Inputs{}, "", err
+	}
 	st := stages[card.Stage]
 	instruction := filepath.Join(c.Data, "instructions", row.ID+".md")
 	write := !inFlight
@@ -1493,7 +1600,7 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 		write = !there
 	}
 	if write {
-		text, held, err := c.told(ctx, row, card)
+		text, held, err := c.told(ctx, repo, row, card)
 		if err != nil {
 			return run.Inputs{}, "", err
 		}
@@ -1508,7 +1615,7 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 		}
 	}
 	in = run.Inputs{
-		Repo:        c.Repo,
+		Repo:        repo.Copy,
 		Commit:      row.Commit,
 		Branch:      branchOf(row.Card),
 		ID:          row.ID,
@@ -1522,7 +1629,7 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 		SkipSave:    !st.save,
 	}
 	if card.Stage == store.Spec {
-		in.Hosts, in.WayOutImage, in.WayOutNetwork = c.Hosts, c.WayOutImage, c.WayOutNetwork
+		in.Hosts, in.WayOutImage, in.WayOutNetwork = repo.SpecHosts, c.WayOutImage, c.WayOutNetwork
 	}
 	// An implement run's save is named after the approved spec's title, read
 	// again whenever the inputs are built, also for a run in flight: the
@@ -1572,7 +1679,7 @@ const (
 // a heading or open a block that runs past it, so only the tick's own
 // headings are headings. The card and the developer's note are the
 // developer's text and are told as they are.
-func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (text, held string, err error) {
+func (c *core) told(ctx context.Context, repo settings.Repo, row store.RunRow, card store.Card) (text, held string, err error) {
 	note, err := c.store.Note(card.ID)
 	if err != nil {
 		return "", "", err
@@ -1623,7 +1730,7 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 		// A run that starts from a commit that still holds Kiln's conflict
 		// markers, from its merge of main into the card's branch, is told
 		// which files they are in (card 19).
-		collide, err := markedFiles(ctx, c.Repo, row.Commit, card.ID)
+		collide, err := markedFiles(ctx, repo.Copy, row.Commit, card.ID)
 		if err != nil {
 			return "", "", err
 		}
@@ -1649,7 +1756,7 @@ func (c *core) told(ctx context.Context, row store.RunRow, card store.Card) (tex
 		}
 		return told(withNote(parts, note)), "", nil
 	}
-	diff, size, err := changeOf(ctx, c.Repo, row.Commit)
+	diff, size, err := changeOf(ctx, repo.Copy, row.Commit)
 	if err != nil {
 		return "", "", err
 	}
@@ -1842,14 +1949,28 @@ func branchTip(ctx context.Context, repo, branch string) (string, error) {
 
 // change is the change on a card's branch for the screen: where it is, its
 // commits since it left main, and the diff that a review run is told
-// (changeOf), or nil when the card has no branch.
+// (changeOf), or nil when the card has no branch, all in the copy of the
+// card's repo. A card the store does not have has no change either, so that
+// a publish of it is answered as every other move on it is.
 func (c *core) change(ctx context.Context, card int64) (*web.Change, error) {
+	cd, err := c.store.Card(card)
+	if errors.Is(err, store.ErrNoCard) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r, err := c.repoOf(cd)
+	if err != nil {
+		return nil, err
+	}
+	repo := r.Copy
 	branch := branchOf(card)
-	tip, err := branchTip(ctx, c.Repo, branch)
+	tip, err := branchTip(ctx, repo, branch)
 	if err != nil || tip == "" {
 		return nil, err
 	}
-	base, err := gitLine(ctx, c.Repo, "merge-base", "HEAD", tip)
+	base, err := gitLine(ctx, repo, "merge-base", "HEAD", tip)
 	if err != nil {
 		return nil, err
 	}
@@ -1860,13 +1981,13 @@ func (c *core) change(ctx context.Context, card int64) (*web.Change, error) {
 		ch := kept.change
 		return &ch, nil
 	}
-	commits, err := gitLine(ctx, c.Repo, "log", "--no-color", "--format=%h%x00%s", base+".."+tip)
+	commits, err := gitLine(ctx, repo, "log", "--no-color", "--format=%h%x00%s", base+".."+tip)
 	if err != nil {
 		return nil, err
 	}
-	ch := web.Change{Branch: branch, Repo: c.Repo, Tip: tip, Commits: []web.Commit{},
-		Command: "git --git-dir=" + shellWord(c.Repo) + " diff HEAD..." + branch}
-	if ch.Workflows, err = workflowFiles(ctx, c.Repo, tip); err != nil {
+	ch := web.Change{Branch: branch, Repo: repo, Tip: tip, Commits: []web.Commit{},
+		Command: "git --git-dir=" + shellWord(repo) + " diff HEAD..." + branch}
+	if ch.Workflows, err = workflowFiles(ctx, repo, tip); err != nil {
 		return nil, err
 	}
 	for _, line := range strings.Split(commits, "\n") {
@@ -1874,7 +1995,7 @@ func (c *core) change(ctx context.Context, card int64) (*web.Change, error) {
 			ch.Commits = append(ch.Commits, web.Commit{Hash: hash, Title: title})
 		}
 	}
-	ch.Diff, ch.Size, err = changeOf(ctx, c.Repo, tip)
+	ch.Diff, ch.Size, err = changeOf(ctx, repo, tip)
 	if err != nil {
 		return nil, err
 	}

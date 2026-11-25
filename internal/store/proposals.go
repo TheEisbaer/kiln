@@ -125,7 +125,14 @@ func (s *Store) MakeCard(id int64) (Card, Proposal, error) {
 	if text == "" {
 		return Card{}, p, errors.New("a card needs a text, and the proposal has neither a title nor a text")
 	}
-	c, err := s.change(edit{create: true, text: text, next: fixed(State{Backlog, Developer}), cause: CauseDeveloper,
+	// The new card is in the repo of the card the proposal was noticed on. A
+	// card's repo never changes, so reading it here gives the name the
+	// transaction would read.
+	on, err := readCard(s.db, p.Card)
+	if err != nil {
+		return Card{}, p, err
+	}
+	c, err := s.change(edit{create: true, repo: on.Repo, text: text, next: fixed(State{Backlog, Developer}), cause: CauseDeveloper,
 		write: func(tx *sql.Tx, card int64) error {
 			p, err := openProposal(tx, id)
 			if err != nil {

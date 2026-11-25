@@ -817,7 +817,7 @@ func TestFetchCannotAsk(t *testing.T) {
 	t.Cleanup(func() { fetchLimit = was })
 
 	start := time.Now()
-	if rounds := c.refreshMain(t.Context(), time.Minute); rounds != 1 {
+	if rounds := c.refreshMain(t.Context(), c.own(), time.Minute); rounds != 1 {
 		t.Errorf("%d rounds of fetching ended, want 1", rounds)
 	}
 	if took := time.Since(start); took > 4*time.Second {
