@@ -44,6 +44,9 @@ type Measures struct {
 	Merged        int // the cards the Git host merged
 	Interventions int // their interventions, in all
 	Dropped       int // the cards the developer dropped
+	// NeededFix is the merged cards that a card which was not dropped names as
+	// the card it fixes, each counted once.
+	NeededFix int
 }
 
 // MeasuresOf counts the merged and the dropped cards among the summaries, and
@@ -51,11 +54,20 @@ type Measures struct {
 // done, count in none of the three.
 func MeasuresOf(sums []Summary) Measures {
 	var m Measures
+	fixed := map[int64]bool{}
+	for _, s := range sums {
+		if s.Fixes != 0 && !s.Dropped {
+			fixed[s.Fixes] = true
+		}
+	}
 	for _, s := range sums {
 		switch {
 		case s.Merged:
 			m.Merged++
 			m.Interventions += s.Interventions
+			if fixed[s.ID] {
+				m.NeededFix++
+			}
 		case s.Dropped:
 			m.Dropped++
 		}

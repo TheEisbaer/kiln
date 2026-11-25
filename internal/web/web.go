@@ -317,6 +317,7 @@ type (
 		Interventions int                `json:"interventions"`
 		PerMerged     *float64           `json:"per_merged"`
 		Dropped       int                `json:"dropped"`
+		NeededFix     int                `json:"needed_fix"`
 		Proposals     proposalCountsJSON `json:"proposals"`
 		Text          string             `json:"text"`
 	}
@@ -389,6 +390,8 @@ type (
 		QueuedFor    []int64 `json:"queued_for"`
 		// Interventions is the card's number of interventions, 0 included.
 		Interventions int `json:"interventions"`
+		// Fixes is the merged card it fixes, 0 for none.
+		Fixes int64 `json:"fixes"`
 	}
 	partJSON struct {
 		USD     float64 `json:"usd"`
@@ -421,6 +424,8 @@ type (
 		// NamedBy are the cards that name it as a predecessor and are not
 		// in done (ADR 0011).
 		NamedBy []namedJSON `json:"named_by"`
+		// FixedBy are the cards that name it as the card they fix.
+		FixedBy []int64 `json:"fixed_by"`
 		// The card's pull request, once it has an address, and whether the
 		// core is publishing it, from when the developer publishes until it
 		// has one (card 19).
@@ -608,7 +613,7 @@ func costOf(c *store.CardCost) *costJSON {
 
 func tile(s store.Summary) tileJSON {
 	t := tileJSON{ID: s.ID, Title: title(s.Text), Headline: headline(title(s.Text)), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
-		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds, SendBacks: s.SendBacks, Cost: costOf(s.Cost), Interventions: s.Interventions}
+		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds, SendBacks: s.SendBacks, Cost: costOf(s.Cost), Interventions: s.Interventions, Fixes: s.Fixes}
 	if t.Documents == nil {
 		t.Documents = []string{}
 	}
@@ -622,7 +627,7 @@ func tile(s store.Summary) tileJSON {
 
 // measures is the board's strip: the figures and the line that tells them.
 func measures(m store.Measures, p store.ProposalCounts) measuresJSON {
-	out := measuresJSON{Merged: m.Merged, Interventions: m.Interventions, Dropped: m.Dropped,
+	out := measuresJSON{Merged: m.Merged, Interventions: m.Interventions, Dropped: m.Dropped, NeededFix: m.NeededFix,
 		Proposals: proposalCountsJSON{Made: p.Made, Accepted: p.Accepted, Dismissed: p.Dismissed}}
 	per := "–"
 	if m.Merged > 0 {
@@ -630,8 +635,8 @@ func measures(m store.Measures, p store.ProposalCounts) measuresJSON {
 		out.PerMerged = &v
 		per = figure(v)
 	}
-	out.Text = fmt.Sprintf("%d merged · interventions per merged card: %s · %d dropped · proposals: %d made, %d accepted, %d dismissed",
-		m.Merged, per, m.Dropped, p.Made, p.Accepted, p.Dismissed)
+	out.Text = fmt.Sprintf("%d merged · interventions per merged card: %s · needed a follow-up fix: %d of %d · %d dropped · proposals: %d made, %d accepted, %d dismissed",
+		m.Merged, per, m.NeededFix, m.Merged, m.Dropped, p.Made, p.Accepted, p.Dismissed)
 	return out
 }
 
@@ -778,9 +783,14 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	if err != nil {
 		return cardJSON{}, err
 	}
-	sum := store.Summary{Card: c, Predecessors: order.Predecessors, QueuedFor: order.QueuedFor}
+	fix, err := h.store.Fix(c.ID)
+	if err != nil {
+		return cardJSON{}, err
+	}
+	sum := store.Summary{Card: c, Predecessors: order.Predecessors, QueuedFor: order.QueuedFor, Fixes: fix.Fixes}
 	out := cardJSON{Text: c.Text, History: []entryJSON{}, Runs: []runJSON{},
-		Documents: []documentJSON{}, Activity: []activityJSON{}, Now: time.Now().UTC(), Moves: movesJSON(moves), NamedBy: []namedJSON{}}
+		Documents: []documentJSON{}, Activity: []activityJSON{}, Now: time.Now().UTC(), Moves: movesJSON(moves), NamedBy: []namedJSON{},
+		FixedBy: append([]int64{}, fix.FixedBy...)}
 	for _, n := range order.NamedBy {
 		out.NamedBy = append(out.NamedBy, namedJSON{ID: n.ID, Title: title(n.Text)})
 	}
@@ -851,7 +861,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	return out, nil
 }
 
-// create writes a new card with its predecessors, if any, and starts it: to
+// create writes a new card with its predecessors and the card it fixes, if any, and starts it: to
 // spec, waiting for a run, or queued while a predecessor is not done. A
 // predecessor the store refuses is said with its reason, and no card is
 // written.
@@ -859,17 +869,18 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Text         *string `json:"text"`
 		Predecessors []int64 `json:"predecessors"`
+		Fixes        int64   `json:"fixes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Text == nil {
-		fail(w, http.StatusBadRequest, `the body must be {"text": …, "predecessors": [card, …]}, the predecessors optional`)
+		fail(w, http.StatusBadRequest, `the body must be {"text": …, "predecessors": [card, …], "fixes": card}, the predecessors and fixes optional`)
 		return
 	}
 	if strings.TrimSpace(*body.Text) == "" {
 		fail(w, http.StatusBadRequest, "a card needs a text")
 		return
 	}
-	c, err := h.store.Create(*body.Text, body.Predecessors...)
-	if errors.Is(err, store.ErrPredecessor) {
+	c, err := h.store.CreateFixing(*body.Text, body.Fixes, body.Predecessors...)
+	if errors.Is(err, store.ErrPredecessor) || errors.Is(err, store.ErrFix) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}

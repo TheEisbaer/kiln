@@ -86,7 +86,7 @@ func TestCreatePredecessors(t *testing.T) {
 		{fmt.Sprintf(`{"text":"x","predecessors":[%d]}`, next), "a card cannot be its own predecessor"},
 		{`{"text":"x","predecessors":[99]}`, "no card 99 to wait for"},
 		{fmt.Sprintf(`{"text":"x","predecessors":[%d]}`, dropped), fmt.Sprintf("card %d was dropped, so no card can wait for it", dropped)},
-		{`{"text":"x","predecessors":"3"}`, `the body must be {"text": …, "predecessors": [card, …]}, the predecessors optional`},
+		{`{"text":"x","predecessors":"3"}`, `the body must be {"text": …, "predecessors": [card, …], "fixes": card}, the predecessors and fixes optional`},
 	} {
 		w := f.do(t, "POST", "/api/cards", tc.body)
 		if got := decode[map[string]string](t, w)["error"]; w.Code != 400 || got != tc.want {
