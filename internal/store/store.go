@@ -22,7 +22,11 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 15
+const version = 16
+
+// KilnRepo is the name of the one repo of an instance started from its flags,
+// and of every card written before version 16 (ADR 0025).
+const KilnRepo = "kiln"
 
 // Stage is one of the five stages of a card (ADR 0009).
 type Stage string
@@ -86,6 +90,9 @@ var causes = map[Cause]bool{CauseDeveloper: true, CauseRun: true, CauseHost: tru
 type Card struct {
 	ID   int64
 	Text string
+	// Repo is the name of the card's repo, one of the instance's repos,
+	// given when the card is written and never changed afterwards.
+	Repo string
 	State
 	SendBacks int
 }
@@ -352,6 +359,12 @@ ALTER TABLE entries ADD COLUMN proposal INTEGER;`)
 		_, err := tx.Exec(`ALTER TABLE cards ADD COLUMN fixes INTEGER`)
 		return err
 	},
+	// 15 to 16: the name of the card's repo; every card that was there is in
+	// the one repo of an instance started from its flags.
+	func(tx *sql.Tx) error {
+		_, err := tx.Exec(`ALTER TABLE cards ADD COLUMN repo TEXT NOT NULL DEFAULT '` + KilnRepo + `'`)
+		return err
+	},
 }
 
 // afterMigration, set only by the test, is called when the store has been moved
@@ -440,10 +453,20 @@ func (s *Store) Create(text string, predecessors ...int64) (Card, error) {
 // not 0. A card that does not exist, that was dropped or that is not merged is
 // refused with ErrFix and its reason, and nothing is written.
 func (s *Store) CreateFixing(text string, fixes int64, predecessors ...int64) (Card, error) {
+	return s.CreateIn(KilnRepo, text, fixes, predecessors...)
+}
+
+// CreateIn is CreateFixing for a card of the repo named repo. The store does
+// not know the instance's repos: the name is checked by its caller. An empty
+// name is refused, and nothing is written.
+func (s *Store) CreateIn(repo, text string, fixes int64, predecessors ...int64) (Card, error) {
+	if repo == "" {
+		return Card{}, errors.New("a card needs a repo")
+	}
 	if text == "" {
 		return Card{}, errors.New("a card needs a text")
 	}
-	e := edit{create: true, text: text, next: fixed(State{Backlog, Developer}), cause: CauseDeveloper}
+	e := edit{create: true, repo: repo, text: text, next: fixed(State{Backlog, Developer}), cause: CauseDeveloper}
 	if len(predecessors) > 0 || fixes != 0 {
 		e.write = func(tx *sql.Tx, card int64) error {
 			if err := writePredecessors(tx, card, predecessors); err != nil {
@@ -552,6 +575,7 @@ type runEnd struct {
 type edit struct {
 	create bool
 	id     int64
+	repo   string
 	text   string
 	next   func(from State, f Facts) (State, error)
 	cause  Cause
@@ -605,7 +629,7 @@ func (s *Store) change(e edit) (Card, error) {
 	var card Card
 	var f Facts
 	if e.create {
-		card = Card{Text: e.text}
+		card = Card{Text: e.text, Repo: e.repo}
 	} else if card, err = readCard(tx, id); err != nil {
 		return Card{}, err
 	} else if f, err = readFacts(tx, id); err != nil {
@@ -657,8 +681,8 @@ func (s *Store) change(e edit) (Card, error) {
 	}
 	at := time.Now().UTC().Format(time.RFC3339Nano)
 	if e.create {
-		res, err := tx.Exec(`INSERT INTO cards (text, stage, waits_for, since) VALUES (?, ?, ?, ?)`,
-			e.text, to.Stage, to.WaitsFor, at)
+		res, err := tx.Exec(`INSERT INTO cards (text, repo, stage, waits_for, since) VALUES (?, ?, ?, ?, ?)`,
+			e.text, e.repo, to.Stage, to.WaitsFor, at)
 		if err != nil {
 			return Card{}, err
 		}
@@ -1140,8 +1164,8 @@ func readRun(q querier, id string) (RunRow, error) {
 
 func readCard(q querier, id int64) (Card, error) {
 	c := Card{ID: id}
-	err := q.QueryRow(`SELECT text, stage, waits_for, send_backs FROM cards WHERE id = ?`, id).
-		Scan(&c.Text, &c.Stage, &c.WaitsFor, &c.SendBacks)
+	err := q.QueryRow(`SELECT text, repo, stage, waits_for, send_backs FROM cards WHERE id = ?`, id).
+		Scan(&c.Text, &c.Repo, &c.Stage, &c.WaitsFor, &c.SendBacks)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Card{}, fmt.Errorf("%w %d: %w", ErrNoCard, id, err)
 	}

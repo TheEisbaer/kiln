@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -128,7 +129,10 @@ const maxBody = 1 << 20
 // a card's change from.
 type Info struct {
 	Instance string
-	Repo     string
+	Repo     string // the copy of Kiln's own repo, shown in the board's header
+	// Repos are the names of the instance's repos, in order; empty, the
+	// instance has one, store.KilnRepo. A new card names one of them.
+	Repos []string
 	// The models of the spec runs, the implement runs and the review runs the
 	// core starts.
 	Model, ImplementModel, ReviewModel string
@@ -369,8 +373,10 @@ type (
 		SentBack string `json:"sent_back"`
 	}
 	tileJSON struct {
-		ID        int64          `json:"id"`
-		Title     string         `json:"title"`
+		ID    int64  `json:"id"`
+		Title string `json:"title"`
+		// Repo is the name of the card's repo.
+		Repo      string         `json:"repo"`
 		Headline  string         `json:"headline"`
 		Stage     store.Stage    `json:"stage"`
 		WaitsFor  store.WaitsFor `json:"waits_for"`
@@ -612,7 +618,7 @@ func costOf(c *store.CardCost) *costJSON {
 }
 
 func tile(s store.Summary) tileJSON {
-	t := tileJSON{ID: s.ID, Title: title(s.Text), Headline: headline(title(s.Text)), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
+	t := tileJSON{ID: s.ID, Title: title(s.Text), Repo: s.Repo, Headline: headline(title(s.Text)), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
 		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds, SendBacks: s.SendBacks, Cost: costOf(s.Cost), Interventions: s.Interventions, Fixes: s.Fixes}
 	if t.Documents == nil {
 		t.Documents = []string{}
@@ -861,13 +867,15 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	return out, nil
 }
 
-// create writes a new card with its predecessors and the card it fixes, if any, and starts it: to
-// spec, waiting for a run, or queued while a predecessor is not done. A
-// predecessor the store refuses is said with its reason, and no card is
-// written.
+// create writes a new card of its repo, with its predecessors and the card it
+// fixes, if any, and starts it: to spec, waiting for a run, or queued while a
+// predecessor is not done. A repo the instance does not have, none with more
+// than one, and a predecessor the store refuses are said with the reason, and
+// no card is written.
 func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Text         *string `json:"text"`
+		Repo         string  `json:"repo"`
 		Predecessors []int64 `json:"predecessors"`
 		Fixes        int64   `json:"fixes"`
 	}
@@ -879,7 +887,12 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "a card needs a text")
 		return
 	}
-	c, err := h.store.CreateFixing(*body.Text, body.Fixes, body.Predecessors...)
+	repo, err := h.repoOf(body.Repo)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	c, err := h.store.CreateIn(repo, *body.Text, body.Fixes, body.Predecessors...)
 	if errors.Is(err, store.ErrPredecessor) || errors.Is(err, store.ErrFix) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
@@ -897,6 +910,26 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply(w, http.StatusCreated, out)
+}
+
+// repoOf is the repo a new card names, by its name: one of the instance's
+// repos, or, left out or empty, the instance's one repo. A name the instance
+// does not have, and none with more than one, are refused with the reason.
+func (h *handler) repoOf(name string) (string, error) {
+	repos := h.info.Repos
+	if len(repos) == 0 {
+		repos = []string{store.KilnRepo}
+	}
+	if name == "" {
+		if len(repos) == 1 {
+			return repos[0], nil
+		}
+		return "", fmt.Errorf(`the instance has more than one repo; name one in "repo": %s`, strings.Join(repos, ", "))
+	}
+	if !slices.Contains(repos, name) {
+		return "", fmt.Errorf("the instance has no repo %q; its repos: %s", name, strings.Join(repos, ", "))
+	}
+	return name, nil
 }
 
 func (h *handler) decide(w http.ResponseWriter, r *http.Request) {

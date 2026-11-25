@@ -81,7 +81,7 @@ func (c *core) compare(ctx context.Context, hostPrinted *string) error {
 		}
 	}
 	text := ""
-	if err := readMain(ctx, c.Repo); err != nil {
+	if err := readMain(ctx, c.own().Copy); err != nil {
 		text = run.Printable(err.Error())
 	}
 	if ctx.Err() != nil {

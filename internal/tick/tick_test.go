@@ -539,7 +539,7 @@ func TestInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	row := store.RunRow{ID: "ab12cd34-1-1", Card: 1, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}
-	card := store.Card{ID: 1, Text: "The card's text.", State: waiting}
+	card := store.Card{ID: 1, Text: "The card's text.", Repo: store.KilnRepo, State: waiting}
 
 	// A run that starts: the instruction, a line ## The card, an empty line and
 	// the card's text, the save skipped and the list of hosts given.

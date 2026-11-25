@@ -77,7 +77,7 @@ type checkState struct {
 // ago. The state of a card that is no longer at the Git host, or whose commit
 // changed, is dropped once no checker runs for it.
 func (c *core) startCheckers(ctx context.Context, published map[int64]string) {
-	if c.CheckResultCommand == "" {
+	if c.own().CheckResultCommand == "" {
 		return
 	}
 	c.mu.Lock()
@@ -162,7 +162,7 @@ func (c *core) check(ctx context.Context, id int64, st *checkState) {
 // was sent back twice already. A card that is no longer at the Git host with
 // this commit is left as it is.
 func (c *core) checkFailed(ctx context.Context, id int64, commit, output string) error {
-	c.refreshMain(ctx, fetchLimit+10*time.Second)
+	c.refreshMain(ctx, c.own(), fetchLimit+10*time.Second)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -204,7 +204,7 @@ func (c *core) checkFailed(ctx context.Context, id int64, commit, output string)
 func (c *core) runCheckResult(ctx context.Context, commit string) (result, output, failure string) {
 	cctx, cancel := context.WithTimeout(ctx, checkLimit)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "sh", "-c", c.CheckResultCommand)
+	cmd := exec.CommandContext(cctx, "sh", "-c", c.own().CheckResultCommand)
 	cmd.Dir = c.Data
 	for _, e := range os.Environ() {
 		if !strings.HasPrefix(e, "KILN_") {

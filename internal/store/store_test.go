@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 16"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 17"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 16 was opened")
+		t.Fatal("a store of version 17 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 16") || !strings.Contains(msg, "version 15") {
+	if msg := err.Error(); !strings.Contains(msg, "version 17") || !strings.Contains(msg, "version 16") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 16 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 16 and 0", v, tables)
+	if v != 17 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 17 and 0", v, tables)
 	}
 }
 
@@ -764,7 +764,7 @@ func withoutProposal(line string, migrated bool) string {
 }
 
 func withoutSince(line string, migrated bool) string {
-	if parts := strings.Split(line, " | "); migrated && len(parts) == 7 && !strings.HasPrefix(parts[0], "ab12cd34-") && parts[5] == "0" && parts[6] == "<nil>" {
+	if parts := strings.Split(line, " | "); migrated && len(parts) == 8 && !strings.HasPrefix(parts[0], "ab12cd34-") && parts[5] == "0" && parts[6] == "<nil>" && parts[7] == KilnRepo {
 		return strings.Join(parts[:4], " | ")
 	}
 	return line
@@ -1192,8 +1192,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 15 {
-		t.Fatalf("the store is version %d after Open, want 15", v)
+	if v := userVersion(t, s); v != version || version != 16 {
+		t.Fatalf("the store is version %d after Open, want 16", v)
 	}
 	// What version 1 held is still there, and has no run or reason, and no
 	// send-back.
@@ -1266,6 +1266,7 @@ DROP TABLE predecessors;
 DROP TABLE proposals;
 ALTER TABLE entries DROP COLUMN proposal;
 ALTER TABLE cards DROP COLUMN fixes;
+ALTER TABLE cards DROP COLUMN repo;
 PRAGMA user_version = 9`); err != nil {
 		t.Fatal(err)
 	}
