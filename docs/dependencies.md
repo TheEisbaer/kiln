@@ -15,7 +15,7 @@ not read by the check command.
 
 - **For:** The store of cards and their history (`internal/store`, ADR 0032): SQLite through `database/sql`.
 - **Looked at:** `modernc.org/sqlite`, SQLite transpiled from C, which is the more proven of the two but brings ten modules, one that must be pinned exactly, and about twice the compile time; `go.etcd.io/bbolt`, a key-value store with no SQL, whose readable export would be our own code; one JSON file rewritten atomically, with no dependency but a rewrite of the whole history at every change.
-- **Why this one:** It is SQLite, so the measures of ADR 0007 are queries and macOS's own `sqlite3` reads the file (`.dump`). It is SQLite 3.54.1 translated to Go, so the core has no C code (ADR 0037), and it brings three modules: `github.com/ncruces/go-sqlite3-wasm/v6` v6.5.35401, `github.com/ncruces/julianday` v1.0.0 and `golang.org/x/sys` v0.49.0. ADR 0057 records the choice.
+- **Why this one:** It is SQLite, so the measures of ADR 0007 are queries and macOS's own `sqlite3` reads the file (`.dump`). It is SQLite 3.54.1 translated to Go, so the core has no C code (ADR 0037), and it brings three modules: `github.com/ncruces/go-sqlite3-wasm/v6` v6.7.35401, `github.com/ncruces/julianday` v1.0.0 and `golang.org/x/sys` v0.50.0. ADR 0057 records the choice.
 - **Licence:** MIT. Of its modules, `go-sqlite3-wasm` (the translation) is MIT-0, `julianday` is MIT and `golang.org/x/sys` is BSD-3-Clause. SQLite itself is in the public domain.
 
 ## Other

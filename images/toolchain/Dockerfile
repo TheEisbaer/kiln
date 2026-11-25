@@ -1,7 +1,7 @@
 # The toolchain image of Kiln's own repo (ADR 0039): the official Go image,
 # pinned by digest. Change the pin by a card and record it in
 # docs/dependencies.md.
-FROM golang:1.27.4@sha256:fe517acaa580cc7915457080f850c37e618b3c1e750f98b58fc6429b605147a1
+FROM golang:1.27.4@sha256:5f1b98fa02fe396ebce2a0227a0e08309e11792915b9dd2e1f71053d7e7e6666
 
 # Never download another toolchain, and never stamp a build from Git: the check
 # runs with the network off and on a mounted copy that Git may not trust.

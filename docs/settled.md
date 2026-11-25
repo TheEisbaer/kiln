@@ -302,6 +302,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 ## ADR 0039: A run image is a target repo's toolchain image with Kiln's layer on top
 
 - Kiln's layer is `images/run/`. Claude Code is downloaded from the release bucket and checked against a SHA-256 per platform, and a run is user `kiln`, uid 1000, because Claude Code refuses `bypassPermissions` as root.
+- A card that changes the pinned Claude Code takes the version that the release bucket's `stable` channel names on the day of its spec (`https://downloads.claude.ai/claude-code-releases/stable`), with the SHA-256s of that version's `manifest.json`, reads the changelog between the two versions, and runs both versions headless against the scripted upstream of `internal/run/testdata/claude` to compare the events and fields that `internal/run` reads. The pin was 2.1.326, which `stable` named that day (2026-11-25).
 
 ## ADR 0040: The core pushes the Claude credential to the proxy; the renewable secret never enters a container
 
@@ -428,6 +429,10 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The developer's note on the spec is told unfenced, like the card and the developer's note, between the approved spec and the parts after it (2026-11-23).
 - A run in flight whose `instructions/<run>.md` is missing has it written again. If the text differs from the one its container or record was started with, or it cannot be written again, the run is ended as failed at once, with the reason naming the file (2026-11-24).
 - The stage instructions were rewritten for agents, by the lens of the public writing-for-agents skill (github.com/mattpocock/skills, `skills/productivity/writing-for-agents`, read at commit 3216582): rules phrased by what to do, a sentence per stage that says when the run is done, each rule in one place, and negation kept for the hard guardrails, each paired with what to do. Every rule and fact they held stays, with the same force; the lines the core and the tests read stay byte for byte, and so does the heading "First, the card's size" (2026-11-25).
+
+## ADR 0057: The store is SQLite, through ncruces/go-sqlite3, and the modules come in the toolchain image
+
+- A card that changes the version of a Go module gets `go.mod` and `go.sum` from its spec run, which has the network: the spec gives both files whole, as `go mod tidy` wrote them, and the implement run writes them as given, since it cannot fetch a module. The check on the Git host builds the toolchain image from them, with the network, and is the first to compile against them (2026-11-25).
 
 ## ADR 0060: Kiln may change workflow files, and the developer says yes before such a change is published
 
