@@ -220,9 +220,31 @@ func StartWayOut(ctx context.Context, id string) error {
 	return fmt.Errorf("%s: %w", wayOutName(id), ErrWayOutGone)
 }
 
-// ReadWayOut writes the way out's output, one line of JSON per request, as
-// `docker logs` gives it, without what it wrote to standard error. It returns
-// ErrNoWayOut when the run has none.
+// wayOutStopTimeout is docker stop's bound before it kills a way out, in
+// seconds. It exceeds the way out's own wait for its connections' lines
+// (cmd/wayout's stopWait).
+const wayOutStopTimeout = "5"
+
+// StopWayOut stops a run's way out with SIGTERM, so that it writes the line of
+// every connection still open (cmd/wayout), and kills it after
+// wayOutStopTimeout seconds. One that is missing has nothing to stop, one that
+// has stopped is left as it is, and one without the label kiln.run=<id> is
+// refused. It can be repeated.
+func StopWayOut(ctx context.Context, id string) error {
+	w, err := findWayOut(ctx, id)
+	if err != nil || w == nil {
+		return err
+	}
+	if w.state != "running" {
+		return nil
+	}
+	_, err = docker(ctx, nil, "stop", "--timeout", wayOutStopTimeout, w.id)
+	return err
+}
+
+// ReadWayOut writes the way out's output, one line of JSON per request and one
+// more per connection at its end, as `docker logs` gives it, without what it
+// wrote to standard error. It returns ErrNoWayOut when the run has none.
 func ReadWayOut(ctx context.Context, id string, w io.Writer) error {
 	c, err := findWayOut(ctx, id)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -119,12 +120,20 @@ func (w *web) connectWayOut(t *testing.T, id string) {
 
 func (w *web) testRead(t *testing.T) {
 	c := w.newWebCase(t, "web")
-	cmd, done := w.start(t, c, "", false)
+	// Stopped after collect, which stops the way out first, then started
+	// again to the end, which collects again from the stopped way out.
+	cmd, done := w.start(t, c, "collect:exit", false)
 	w.waitAtGate(t, c)
 	w.connectWayOut(t, c.id)
 	must(t, "exec", "kiln-run-"+c.id, "touch", "/tmp/gate")
-	if code := <-done; code != 0 {
-		t.Fatalf("exit status %d\n%s\n%s", code, cmd.Stdout, cmd.Stderr)
+	if code := <-done; code != exitAfterStep {
+		t.Fatalf("exit status %d, want %d\n%s\n%s", code, exitAfterStep, cmd.Stdout, cmd.Stderr)
+	}
+	if got := must(t, "inspect", "--format", "{{.State.Status}}", "kiln-wayout-"+c.id); got != "exited" {
+		t.Errorf("the way out is %s after collect, want exited", got)
+	}
+	if code, out, errOut := w.kiln(t, c, "", false); code != 0 {
+		t.Fatalf("started again: exit status %d\n%s\n%s", code, out, errOut)
 	}
 	dir := filepath.Join(w.runs, c.id)
 
@@ -143,18 +152,51 @@ func (w *web) testRead(t *testing.T) {
 	// target; the model traffic did not take the web's path.
 	lines := wayOutLines(t, filepath.Join(dir, "wayout.jsonl"))
 	refused := false
+	connects := 0
+	opened, ended := map[string]int{}, map[string]int{}
 	for _, e := range lines {
-		t.Logf("wayout.jsonl: %s %s %d %s", e.Target, e.Decision, e.Status, e.Reason)
+		t.Logf("wayout.jsonl: %s %s %d %s, end %q %s, sent %d, received %d, %d ms",
+			e.Target, e.Decision, e.Status, e.Reason, e.End, e.Error, e.Sent, e.Received, e.DurationMS)
+		if e.Decision == "allowed" && e.Status == 200 {
+			opened[e.Target]++
+		}
 		switch {
+		case e.End != "":
+			// A connection's end.
+			ended[e.Target]++
+			if e.Sent <= 0 || e.Received <= 0 || !slices.Contains([]string{"run closed", "host closed", "error", "stopped"}, e.End) {
+				t.Errorf("wayout.jsonl has the end %+v", e)
+			}
+			continue
 		case e.Target == publicHost+":443" && e.Decision == "allowed":
 		case e.Target == privateHost+":443" && e.Status == 403:
 			refused = true
 		default:
 			t.Errorf("wayout.jsonl has %+v", e)
 		}
+		connects++
 	}
-	if len(lines) < 3 || !refused {
-		t.Errorf("wayout.jsonl holds %d lines, the redirect's target refused: %v; want curl's two, WebFetch's and the refusal", len(lines), refused)
+	if connects < 3 || !refused {
+		t.Errorf("wayout.jsonl holds %d requests, the redirect's target refused: %v; want curl's two, WebFetch's and the refusal", connects, refused)
+	}
+	// Each connection let through has its end, written before the record.
+	for target, n := range opened {
+		if ended[target] != n {
+			t.Errorf("wayout.jsonl has %d connections to %s and %d ends", n, target, ended[target])
+		}
+	}
+	for target := range ended {
+		if opened[target] == 0 {
+			t.Errorf("wayout.jsonl has an end for %s and no connection", target)
+		}
+	}
+	reached, err := ReadReached(w.runs, c.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("reached: %+v", reached)
+	if len(reached) != 1 || reached[0].Host != publicHost || reached[0].Connections < 2 || reached[0].Connections != reached[0].Ended {
+		t.Errorf("ReadReached: %+v, want %s alone, with an end for each of at least 2 connections", reached, publicHost)
 	}
 
 	var rec record
@@ -320,8 +362,10 @@ func (w *web) testInStore(t *testing.T) {
 		if got := ids(t, c.id); got != before {
 			t.Errorf("the IDs are %s, were %s", got, before)
 		}
-		if got := must(t, "inspect", "--format", "{{.State.Status}}", "kiln-wayout-"+c.id); got != "running" {
-			t.Errorf("the way out is %s, want running", got)
+		// Started again for the run, which reached the host, then stopped by
+		// collect.
+		if got := must(t, "inspect", "--format", "{{.State.Status}}", "kiln-wayout-"+c.id); got != "exited" {
+			t.Errorf("the way out is %s, want exited", got)
 		}
 		reached(t, c)
 	})
@@ -402,10 +446,14 @@ func toolResultsIn(t *testing.T, output string) map[string]string {
 	return results
 }
 
-// wayOutEntry is a line of wayout.jsonl.
+// wayOutEntry is a line of wayout.jsonl: a request's, or with End a
+// connection's end.
 type wayOutEntry struct {
 	Target, Decision, Reason string
 	Status                   int
+	End, Error               string
+	Sent, Received           int64
+	DurationMS               int64 `json:"duration_ms"`
 }
 
 func wayOutLines(t *testing.T, name string) []wayOutEntry {

@@ -496,6 +496,9 @@ pre.output {
   background: var(--surface); border: 1px solid var(--line-soft); border-radius: 8px;
 }
 .timeline .run { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+.timeline .reached { margin-top: 2px; }
+.timeline .reached .facts { display: flex; gap: 0 6px; }
+.timeline .reached .fact + .fact::before { content: "· "; color: var(--faint); }
 .timeline .words { font-size: 12.5px; color: var(--text-2); margin-top: 4px; padding-left: 10px; border-left: 2px solid color-mix(in srgb, var(--accent) 45%, var(--line)); }
 
 /* The dialog */
@@ -1478,7 +1481,7 @@ function renderCard(c) {
   if (c.run) renderActivity(c.activity);
   part("docs", [c.documents, c.change], () => renderDocuments(c.documents, c.change));
   part("text", c.text, () => { $("p-text").textContent = c.text; });
-  part("history", c.history, () => renderHistory(c.history));
+  part("history", [c.history, c.runs], () => renderHistory(c.history, c.runs));
   tickClocks();
 }
 
@@ -1993,7 +1996,40 @@ function diffView(diff, workflows) {
   return all;
 }
 
-function renderHistory(history) {
+// SENT_MARK is web.go's sentMark: a host to which a run sent more in all is
+// marked.
+const SENT_MARK = "64 KiB";
+
+// bytesText says a number of bytes in B, KiB or MiB.
+function bytesText(n) {
+  if (n < 1024) return n + " B";
+  const [v, unit] = n < 1 << 20 ? [n / 1024, " KiB"] : [n / (1 << 20), " MiB"];
+  return (v < 10 ? v.toFixed(1) : Math.round(v)) + unit;
+}
+
+// reachedInto lists the hosts a run reached through its way out, one row of
+// facts each, or why they cannot be read.
+function reachedInto(li, r) {
+  if (!r) return;
+  if (r.reached_error) { li.append(el("div", "why", "The hosts it reached cannot be read: " + r.reached_error)); return; }
+  if (!r.reached || !r.reached.length) return;
+  const box = el("div", "reached");
+  for (const h of r.reached) {
+    const cls = h.marked ? "failed" : "";
+    const facts = [[(cls ? cls + " " : "") + "mono", h.host],
+      [cls, h.connections === 1 ? "1 connection" : h.connections + " connections"],
+      [cls, bytesText(h.sent) + " sent"],
+      [cls, bytesText(h.received) + " received"]];
+    if (h.not_counted > 0) facts.push([cls, h.not_counted + " not counted", "connections whose end the way out did not write: their bytes are not in the totals"]);
+    if (h.marked) facts.push(["failed", "sent over " + SENT_MARK]);
+    box.append(factsOf(facts));
+  }
+  li.append(box);
+}
+
+function renderHistory(history, runs) {
+  const byRun = {};
+  for (const r of runs || []) byRun[r.id] = r;
   const ol = $("p-history");
   ol.replaceChildren();
   for (const e of history.slice().reverse()) {
@@ -2018,6 +2054,7 @@ function renderHistory(history) {
     if (e.cause === "developer") { if (e.note) li.append(el("div", "words", e.note)); }
     else if (e.reason) { const w = el("div", "why"); reasonInto(w, e.reason, "", true); li.append(w); }
     if (e.run) li.append(el("div", "run", e.run));
+    if (e.cause === "run" && e.run) reachedInto(li, byRun[e.run]);
     ol.append(li);
   }
 }

@@ -780,9 +780,11 @@ func (c *core) serve() (func(), error) {
 		publishing[r.Name] = r.PublishCommand != ""
 		needsWorkItem[r.Name] = r.NeedsWorkItem
 	}
+	runs := filepath.Join(c.Data, "runs")
 	info := web.Info{Instance: c.instance, Repo: c.own().Copy, Repos: repos, Model: c.model(store.Spec),
 		ImplementModel: c.model(store.Implement), ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change,
-		Page: c.Page, Publishing: publishing, NeedsWorkItem: needsWorkItem, Limits: c.limits(), Version: versionOf(c.Version), Accepting: c.acting.Load}
+		Page: c.Page, Publishing: publishing, NeedsWorkItem: needsWorkItem, Limits: c.limits(), Version: versionOf(c.Version), Accepting: c.acting.Load,
+		Reached: func(id string) ([]run.Reached, error) { return run.ReadReached(runs, id) }}
 	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()

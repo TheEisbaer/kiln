@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestNotPublic judges one address of every row of the table, and addresses
@@ -137,7 +138,42 @@ type fake struct {
 	mu       sync.Mutex
 	resolved []string
 	dialled  []string
-	out      bytes.Buffer
+	out      lockedBuffer
+}
+
+// lockedBuffer is a buffer that is safe for concurrent use: a connection's
+// end line is written after the test has its answer.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// lines returns the lines of output once there are n of them, for up to 5
+// seconds, or what there is then.
+func (b *lockedBuffer) lines(n int) []string {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		lines := strings.Split(strings.TrimSpace(b.String()), "\n")
+		if lines[0] == "" {
+			lines = nil
+		}
+		if len(lines) >= n || time.Now().After(deadline) {
+			return lines
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func (f *fake) server(listSpec string) *httptest.Server {
@@ -291,15 +327,26 @@ func TestWayOut(t *testing.T) {
 				t.Errorf("resolved %q", f.resolved)
 			}
 
-			// One line of JSON per request.
+			// One line of JSON per request, and one more at the end of a
+			// connection.
+			want := 1
+			if c.status == 200 {
+				want = 2
+			}
+			lines := f.out.lines(want)
 			var e entry
-			lines := strings.Split(strings.TrimSpace(f.out.String()), "\n")
-			if len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &e) != nil {
+			if len(lines) != want || json.Unmarshal([]byte(lines[0]), &e) != nil {
 				t.Fatalf("the output is %q", f.out.String())
 			}
-			want := map[int]string{200: "allowed", 403: "refused"}[c.status]
-			if e.Decision != want || e.Status != c.status || e.Method != method || e.Time == "" {
+			decision := map[int]string{200: "allowed", 403: "refused"}[c.status]
+			if e.Decision != decision || e.Status != c.status || e.Method != method || e.Time == "" {
 				t.Errorf("the line is %+v", e)
+			}
+			if want == 2 {
+				var end ending
+				if json.Unmarshal([]byte(lines[1]), &end) != nil || end.End == "" || end.Target != e.Target {
+					t.Errorf("the end line is %q", lines[1])
+				}
 			}
 		})
 	}

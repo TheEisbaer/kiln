@@ -425,6 +425,71 @@ func TestChange(t *testing.T) {
 	}
 }
 
+// TestReached checks the hosts on each run of a card's answer: the totals,
+// the connections not counted, the mark over sentMark, an empty array with no
+// reader, and a reader that fails.
+func TestReached(t *testing.T) {
+	f := newFixture(t)
+	id := f.card(t, "The card", store.State{Stage: store.Spec, WaitsFor: store.Run})
+	for _, r := range []string{"r1", "r2"} {
+		if err := f.store.AddRun(store.RunRow{ID: r, Card: id, Commit: "c0ffee", Model: "m", Effort: "high"}, 8); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.store.EndRun(r, store.Finished, "exit 0", store.State{Stage: store.Spec, WaitsFor: store.Run}, store.Cost{}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func() []runJSON {
+		t.Helper()
+		w := f.do(t, "GET", fmt.Sprintf("/api/cards/%d", id), "")
+		if w.Code != 200 {
+			t.Fatalf("GET the card: %d %s", w.Code, w.Body)
+		}
+		return decode[cardJSON](t, w).Runs
+	}
+
+	// No reader: an empty array on every run.
+	for _, r := range get() {
+		if r.Reached == nil || len(r.Reached) != 0 || r.ReachedError != "" {
+			t.Errorf("run %s without a reader: %+v, %q", r.ID, r.Reached, r.ReachedError)
+		}
+	}
+
+	h, err := Handler(f.store, Info{Reached: func(id string) ([]run.Reached, error) {
+		switch id {
+		case "r1":
+			return []run.Reached{
+				{Host: "upload.example", Connections: 1, Ended: 1, Sent: sentMark + 1, Received: 10},
+				{Host: "go.dev", Connections: 3, Ended: 1, Sent: sentMark, Received: 432 << 10},
+				{Host: "odd.example", Connections: 0, Ended: 1, Sent: 5, Received: 5},
+			}, nil
+		default:
+			return nil, errors.New("read wayout.jsonl: \x1b[2Jbroken")
+		}
+	}}, f.act, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h = h
+	runs := get()
+	if len(runs) != 2 {
+		t.Fatalf("the runs: %+v", runs)
+	}
+	byID := map[string]runJSON{runs[0].ID: runs[0], runs[1].ID: runs[1]}
+	want := []reachedJSON{
+		{Host: "upload.example", Connections: 1, NotCounted: 0, Sent: sentMark + 1, Received: 10, Marked: true},
+		{Host: "go.dev", Connections: 3, NotCounted: 2, Sent: sentMark, Received: 432 << 10, Marked: false},
+		{Host: "odd.example", Connections: 0, NotCounted: 0, Sent: 5, Received: 5},
+	}
+	if got := byID["r1"]; !reflect.DeepEqual(got.Reached, want) || got.ReachedError != "" {
+		t.Errorf("run r1: %+v, %q; want %+v", got.Reached, got.ReachedError, want)
+	}
+	if got := byID["r2"]; got.Reached == nil || len(got.Reached) != 0 || !strings.Contains(got.ReachedError, "broken") ||
+		strings.Contains(got.ReachedError, "\x1b") {
+		t.Errorf("run r2, whose record cannot be read: %+v, %q", got.Reached, got.ReachedError)
+	}
+}
+
 func TestCreate(t *testing.T) {
 	f := newFixture(t)
 	w := f.do(t, "POST", "/api/cards", `{"text":"Add a screen\n\nwith a board"}`)
