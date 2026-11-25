@@ -7,7 +7,7 @@ import (
 )
 
 // limits are the limits of the tests of this file.
-var limits = Limits{"kiln": 1, "second": 2}
+var limits = Limits{Repos: map[string]int{"kiln": 1, "second": 2}}
 
 // createIn writes a card of the repo, with its predecessors.
 func createIn(t *testing.T, s *Store, repo, text string, predecessors ...int64) Card {
@@ -233,15 +233,192 @@ func TestLimitDroppedPredecessor(t *testing.T) {
 func TestLimitDefault(t *testing.T) {
 	s := open(t)
 	for i := 0; i < 3; i++ {
-		if c := startIn(t, s, nil, "kiln", "c"); c.State != (State{Spec, Run}) {
+		if c := startIn(t, s, Limits{}, "kiln", "c"); c.State != (State{Spec, Run}) {
 			t.Fatalf("card %d is in %v, want spec waiting for a run", i+1, c.State)
 		}
 	}
-	c := startIn(t, s, nil, "kiln", "fourth")
+	c := startIn(t, s, Limits{}, "kiln", "fourth")
 	if e := lastOf(t, s, c.ID); c.State != queued || e.Reason != "waits for room in its repo kiln, whose limit is 3 cards in progress" {
 		t.Errorf("the fourth card is in %v with %q, want queued under the limit of 3", c.State, e.Reason)
 	}
-	if got := (Limits(nil)).Of("kiln"); got != DefaultLimit {
-		t.Errorf("Of a nil Limits is %d, want %d", got, DefaultLimit)
+	if got := (Limits{}).Of("kiln"); got != DefaultLimit {
+		t.Errorf("Of the zero Limits is %d, want %d", got, DefaultLimit)
+	}
+}
+
+// instanceWords is the reason of a card queued for the instance's limit of 2.
+const instanceWords = "waits for room in the instance, whose limit is 2 cards in progress that are not ready to merge"
+
+// wantQueued fails the test unless the card is queued with the reason.
+func wantQueued(t *testing.T, s *Store, c Card, reason string) {
+	t.Helper()
+	if e := lastOf(t, s, c.ID); c.State != queued || e.Reason != reason || e.Note() != "" {
+		t.Errorf("card %d is in %v with %q, note %q; want queued with %q", c.ID, c.State, e.Reason, e.Note(), reason)
+	}
+}
+
+// TestLimitInstance has the instance at its limit of 2, with a card of each
+// repo in progress and room in both repos: a start of either repo is queued
+// for the instance, and once one of the two is merged the rule starts the
+// first queued card, which says the instance has room.
+func TestLimitInstance(t *testing.T) {
+	s := open(t)
+	l := Limits{Repos: map[string]int{"kiln": 3, "second": 3}, Instance: 2}
+	full := busy(t, s, "kiln", State{Spec, Approval})
+	busy(t, s, "second", State{Implement, Run})
+	k := startIn(t, s, l, "kiln", "k")
+	wantQueued(t, s, k, instanceWords)
+	sc := startIn(t, s, l, "second", "s")
+	wantQueued(t, s, sc, instanceWords)
+	if moved, wrote := releaseWith(t, s, l); moved != nil || wrote != 0 {
+		t.Errorf("with the instance full, Release moved %q and wrote %d entries", moved, wrote)
+	}
+	merged(t, s, full)
+	want := fmt.Sprintf("%d spec/run: the instance has room under its limit of 2", k.ID)
+	if moved, wrote := releaseWith(t, s, l); !reflect.DeepEqual(moved, []string{want}) || wrote != 1 {
+		t.Errorf("Release moved %q and wrote %d entries, want %q", moved, wrote, want)
+	}
+	wantState(t, s, sc.ID, queued)
+}
+
+// TestLimitInstanceReadyToMerge has a kiln card at the Git host, with kiln
+// and the instance at a limit of 1: it holds its repo, so a kiln card is
+// queued for the repo, but not the instance, so a card of the second repo
+// starts.
+func TestLimitInstanceReadyToMerge(t *testing.T) {
+	s := open(t)
+	l := Limits{Repos: map[string]int{"kiln": 1}, Instance: 1}
+	busy(t, s, "kiln", atHost)
+	k := startIn(t, s, l, "kiln", "k")
+	wantQueued(t, s, k, "waits for room in its repo kiln, whose limit is 1 cards in progress")
+	if c := startIn(t, s, l, "second", "s"); c.State != (State{Spec, Run}) {
+		t.Errorf("the second repo's card is in %v, want spec waiting for a run", c.State)
+	}
+}
+
+// TestLimitInstanceFullRepo has kiln at its limit, K queued for it: K takes
+// no place in the instance, so S of the second repo, started after K, goes
+// to spec, by the developer's start and, once it was queued for the
+// instance, by the rule.
+func TestLimitInstanceFullRepo(t *testing.T) {
+	s := open(t)
+	l := Limits{Repos: map[string]int{"kiln": 1, "second": 3}, Instance: 2}
+	busy(t, s, "kiln", State{Spec, Approval})
+	k := startIn(t, s, l, "kiln", "k")
+	wantQueued(t, s, k, "waits for room in its repo kiln, whose limit is 1 cards in progress")
+	sc := startIn(t, s, l, "second", "s")
+	if sc.State != (State{Spec, Run}) {
+		t.Fatalf("S is in %v, want spec waiting for a run", sc.State)
+	}
+	s2 := startIn(t, s, l, "second", "s2")
+	wantQueued(t, s, s2, instanceWords)
+	if _, err := s.Decide(sc.ID, Drop, ""); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%d spec/run: the instance has room under its limit of 2", s2.ID)
+	if moved, wrote := releaseWith(t, s, l); !reflect.DeepEqual(moved, []string{want}) || wrote != 1 {
+		t.Errorf("Release moved %q and wrote %d entries, want %q", moved, wrote, want)
+	}
+	wantState(t, s, k.ID, queued)
+}
+
+// TestLimitInstanceStartBehindQueue has a place in the instance free while S
+// of the second repo waits for room: a kiln card the developer starts before
+// the rule runs is queued behind S, which the rule then starts.
+func TestLimitInstanceStartBehindQueue(t *testing.T) {
+	s := open(t)
+	l := Limits{Repos: map[string]int{"kiln": 3, "second": 3}, Instance: 1}
+	full := busy(t, s, "kiln", State{Spec, Approval})
+	sc := startIn(t, s, l, "second", "s")
+	merged(t, s, full)
+	k := startIn(t, s, l, "kiln", "k")
+	wantQueued(t, s, k, "waits for room in the instance, whose limit is 1 cards in progress that are not ready to merge")
+	want := fmt.Sprintf("%d spec/run: the instance has room under its limit of 1", sc.ID)
+	if moved, _ := releaseWith(t, s, l); !reflect.DeepEqual(moved, []string{want}) {
+		t.Errorf("Release moved %q, want %q", moved, want)
+	}
+	wantState(t, s, k.ID, queued)
+}
+
+// TestLimitInstanceRenamed has K queued for its repo, and S of the second
+// repo queued for the instance after it. Once K's repo has room while the
+// instance has none, the rule writes one entry on K that names the instance,
+// with K's since as it was, and repeats write nothing. The next place starts
+// K, not S.
+func TestLimitInstanceRenamed(t *testing.T) {
+	s := open(t)
+	l := Limits{Repos: map[string]int{"kiln": 1, "second": 3}, Instance: 2}
+	free := busy(t, s, "second", State{Spec, Approval})
+	busy(t, s, "second", State{Spec, Approval})
+	host := busy(t, s, "kiln", atHost)
+	k := startIn(t, s, l, "kiln", "k")
+	wantQueued(t, s, k, "waits for room in its repo kiln, whose limit is 1 cards in progress")
+	sc := startIn(t, s, l, "second", "s")
+	wantQueued(t, s, sc, instanceWords)
+	since := func() string {
+		var at string
+		if err := s.db.QueryRow(`SELECT since FROM cards WHERE id = ?`, k.ID).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	before := since()
+
+	merged(t, s, host)
+	want := fmt.Sprintf("%d backlog/room: %s", k.ID, instanceWords)
+	if moved, wrote := releaseWith(t, s, l); !reflect.DeepEqual(moved, []string{want}) || wrote != 1 {
+		t.Errorf("Release moved %q and wrote %d entries, want %q", moved, wrote, want)
+	}
+	if e := lastOf(t, s, k.ID); e.Cause != CauseRule || e.State != queued || e.Note() != "" {
+		t.Errorf("K's last entry is %+v, want the rule's, queued", e)
+	}
+	if after := since(); after != before {
+		t.Errorf("K's since is %s, want it kept at %s", after, before)
+	}
+	for i := 0; i < 2; i++ {
+		if moved, wrote := releaseWith(t, s, l); moved != nil || wrote != 0 {
+			t.Errorf("repeat %d moved %q and wrote %d entries", i+1, moved, wrote)
+		}
+	}
+
+	merged(t, s, free)
+	want = fmt.Sprintf("%d spec/run: the instance has room under its limit of 2", k.ID)
+	if moved, wrote := releaseWith(t, s, l); !reflect.DeepEqual(moved, []string{want}) || wrote != 1 {
+		t.Errorf("Release moved %q and wrote %d entries, want %q", moved, wrote, want)
+	}
+	wantState(t, s, sc.ID, queued)
+}
+
+// TestLimitInstanceDefault has the zero Limits and two repos: two cards of
+// each are started, and the fourth is queued for the instance's limit of 3.
+func TestLimitInstanceDefault(t *testing.T) {
+	s := open(t)
+	var last Card
+	for _, repo := range []string{"kiln", "kiln", "second", "second"} {
+		last = startIn(t, s, Limits{}, repo, "c")
+	}
+	wantQueued(t, s, last, "waits for room in the instance, whose limit is 3 cards in progress that are not ready to merge")
+	if got := (Limits{}).OfInstance(); got != DefaultLimit {
+		t.Errorf("OfInstance of the zero Limits is %d, want %d", got, DefaultLimit)
+	}
+}
+
+// TestCountsForInstance counts every state in spec, implement and review
+// against the instance but ready to merge, as the SQL condition does.
+func TestCountsForInstance(t *testing.T) {
+	s := open(t)
+	for st := range valid {
+		id := createIn(t, s, "kiln", "c").ID
+		if _, err := s.db.Exec(`UPDATE cards SET stage = ?, waits_for = ? WHERE id = ?`, st.Stage, st.WaitsFor, id); err != nil {
+			t.Fatal(err)
+		}
+		var sql bool
+		if err := s.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM cards WHERE id = ? AND `+forInstance+`)`, id).Scan(&sql); err != nil {
+			t.Fatal(err)
+		}
+		want := st.Stage != Backlog && st.Stage != Done && st != atHost
+		if got := CountsForInstance(st); got != want || sql != want {
+			t.Errorf("%v counts: Go %v, SQL %v; want %v", st, got, sql, want)
+		}
 	}
 }

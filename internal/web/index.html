@@ -571,6 +571,7 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
 <section id="strip" class="strip" aria-label="What needs you"></section>
 <section id="proposals" class="proposals" aria-label="Proposals" hidden></section>
 <section id="measures" class="measures" aria-label="Measures" title="Over the whole history. An intervention is a move of yours on a card other than writing it, starting it and the first approval of its spec; sending a spec back belongs to that approval. Not counted yet: your approvals of protected paths on the Git host, which the core does not see, and turning automatic merging on, which belongs to no card. A merged card needed a follow-up fix when a later card that you did not drop names it as the card it fixes; a fix you did not name is not counted. Proposals: made by reviews, accepted as cards, dismissed by you."></section>
+<section id="limits" class="measures" aria-label="Limits" title="A repo counts each of its cards in spec, implement or review, ready to merge included. The instance counts the cards of every repo that are not yet ready to merge. A card started beyond a limit is queued, and starts by itself once there is room." hidden></section>
 <main id="board" class="board" aria-label="Board"></main>
 <div id="scrim" class="scrim"></div>
 <aside id="panel" class="panel" aria-label="Card" aria-hidden="true">
@@ -885,6 +886,24 @@ function renderMeasures(m) {
   $("measures").textContent = m.text;
 }
 
+// renderLimits fills the line of the limits above the columns: each repo's
+// cards in progress of its limit and the instance's of its limit, or, with one
+// repo, that repo's alone (ADR 0014).
+let limitsText = null;
+function renderLimits(repos, instance) {
+  let text = "";
+  if (repos.length === 1) {
+    text = "In progress: " + repos[0].in_progress + " of " + repos[0].limit;
+  } else if (repos.length > 1 && instance) {
+    text = "In progress: " + repos.map((r) => r.name + " " + r.in_progress + " of " + r.limit).join(" · ") +
+      " · the instance " + instance.in_progress + " of " + instance.limit + " not yet ready to merge";
+  }
+  if (text === limitsText) return;
+  limitsText = text;
+  $("limits").textContent = text;
+  $("limits").hidden = !text;
+}
+
 function tileOf(c) {
   const t = el("article", "tile" + (needsYou(c) ? " needs" : "") + (c.dropped ? " dropped" : ""));
   t.tabIndex = 0;
@@ -980,6 +999,7 @@ function renderBoard(b) {
   renderStrip(b.cards);
   renderProposals(b.proposals);
   renderMeasures(b.measures);
+  renderLimits(repos, b.instance_limit);
   tickClocks();
   boardSeen = true;
 }

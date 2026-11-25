@@ -42,10 +42,12 @@ const MaxNote = 16 << 10
 // whether the card has a pull request's address, kept by its publishing; and
 // its predecessors that are not done, Open, and those that were dropped,
 // Dropped, each in ID order (ADR 0010); and, for a card in the backlog, what
-// its repo's room depends on (ADR 0014): the repo's cards in progress,
-// InProgress; whether the card is queued and waits for room, ForRoom; and the
-// repo's other cards that wait for room before it, Ahead (see readRoom). The
-// store reads all but Publishing; the core says that.
+// its room under the limits depends on (ADR 0014): the repo's cards in
+// progress, InProgress; the instance's cards that count against its limit,
+// InInstance; whether the card is queued and waits for room, ForRoom; and the
+// cards of every repo that wait for room before it, with their repos' cards
+// in progress (see readRoom). The store reads all but Publishing; the core
+// says that.
 type Facts struct {
 	InFlight      bool
 	Publishing    bool
@@ -54,10 +56,13 @@ type Facts struct {
 	Open          []int64
 	Dropped       []int64
 	InProgress    int
+	InInstance    int
 	ForRoom       bool
-	Ahead         int
-	all           []int64 // every predecessor, in ID order
-	repo          string  // the card's repo
+	all           []int64        // every predecessor, in ID order
+	repo          string         // the card's repo
+	last          string         // the reason of the card's last entry
+	ahead         []string       // the repos of the cards that wait for room before it, in order
+	counts        map[string]int // the cards in progress of those repos
 }
 
 // move is one row of the table of moves: from a state, to a state, what it
@@ -212,8 +217,8 @@ func (e Entry) Note() string {
 // Options are what a move depends on besides the card and the note: whether
 // the core has a publish command; for publish, the commit of the card's
 // branch whose workflow files the developer said yes to, if any (ADR 0060);
-// and, for start, the repos' limits of cards in progress (ADR 0014), nil for
-// the default.
+// and, for start, the limits of cards in progress (ADR 0014), the zero Limits
+// for the defaults.
 type Options struct {
 	Publishing  bool
 	WorkflowYes string
@@ -233,7 +238,7 @@ func (s *Store) Decide(id int64, action Action, note string) (Card, error) {
 // move is judged against the state it changes. Start queues the card, with
 // QueuedPrefix and the predecessors it waits for as its reason, while one is
 // not done, and, once none is open, with the reason of RoomPrefix while its
-// repo has no room under o.Limits (ADR 0014). A move the table does not have
+// repo or the instance has no room under o.Limits (ADR 0014). A move the table does not have
 // for the card's state is refused with ErrRefused, a note that does not fit
 // the move with ErrNote, and the card is returned as it is. Publish writes
 // the card's publication anew in the same transaction: the developer's yes,

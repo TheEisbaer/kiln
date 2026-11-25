@@ -71,7 +71,7 @@ func TestDecide(t *testing.T) {
 				before := len(mustHistory(t, s, card.ID))
 				// The cards put in progress before are many: the repo's
 				// limit is not this test's subject.
-				got, err := s.DecideWith(card.ID, action, note, Options{Limits: Limits{KilnRepo: 1000}})
+				got, err := s.DecideWith(card.ID, action, note, Options{Limits: Limits{Repos: map[string]int{KilnRepo: 1000}, Instance: 1000}})
 				want, ok := wantMoves[action][from]
 				trimmed := strings.TrimSpace(note)
 				refused := func(sentinel error) {

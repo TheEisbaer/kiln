@@ -24,30 +24,52 @@ const (
 	// was dropped. In the backlog, waiting for the developer, no other
 	// reason begins with it.
 	PredecessorDroppedPrefix = "its predecessor"
-	// RoomPrefix begins the reason of the entry that queues a card for its
-	// repo's limit of cards in progress (ADR 0014), followed by the repo's
-	// name (see roomReason). A queued card waits for room when the reason of
-	// its last entry begins with it, and for its predecessors otherwise.
-	RoomPrefix = "waits for room in its repo "
+	// RoomPrefix begins the reason of the entry that queues a card for room
+	// under a limit of cards in progress (ADR 0014): its repo's, followed by
+	// the repo's name (see roomReason), or the instance's (see
+	// instanceReason). A queued card waits for room when the reason of its
+	// last entry begins with it, and for its predecessors otherwise. The
+	// entries written before the instance's limit, which begin "waits for room
+	// in its repo ", begin with it too.
+	RoomPrefix = "waits for room in "
+	// repoRoomPrefix begins the reason of a card queued for its repo's limit.
+	repoRoomPrefix = RoomPrefix + "its repo "
+	// instanceRoomPrefix begins the reason of a card queued for the
+	// instance's limit.
+	instanceRoomPrefix = RoomPrefix + "the instance"
 )
 
-// queued is where a card waits for its predecessors, or for room in its repo:
-// in the backlog, waiting for room.
+// queued is where a card waits for its predecessors, or for room under a
+// limit: in the backlog, waiting for room.
 var queued = State{Backlog, Room}
 
 // DefaultLimit is a repo's limit of cards in progress when the settings give
-// none (ADR 0014).
+// none, and the instance's when they give none (ADR 0014).
 const DefaultLimit = 3
 
-// Limits are the repos' limits of cards in progress, by the repo's name.
-type Limits map[string]int
+// Limits are the limits of cards in progress (ADR 0014): each repo's, by the
+// repo's name, and the instance's. The zero Limits has the defaults, and is
+// never "no limit".
+type Limits struct {
+	Repos    map[string]int
+	Instance int
+}
 
 // Of is the limit of the repo: its value when that is 1 or more, and
-// DefaultLimit otherwise, for a nil Limits too, so that leaving the limits out
+// DefaultLimit otherwise, for a nil map too, so that leaving the limits out
 // is never "no limit".
 func (l Limits) Of(repo string) int {
-	if n := l[repo]; n >= 1 {
+	if n := l.Repos[repo]; n >= 1 {
 		return n
+	}
+	return DefaultLimit
+}
+
+// OfInstance is the instance's limit: Instance when it is 1 or more, and
+// DefaultLimit otherwise.
+func (l Limits) OfInstance() int {
+	if l.Instance >= 1 {
+		return l.Instance
 	}
 	return DefaultLimit
 }
@@ -55,20 +77,51 @@ func (l Limits) Of(repo string) int {
 // roomReason is the reason of an entry that queues a card for its repo's
 // limit.
 func roomReason(repo string, l Limits) string {
-	return fmt.Sprintf("%s%s, whose limit is %d cards in progress", RoomPrefix, repo, l.Of(repo))
+	return fmt.Sprintf("%s%s, whose limit is %d cards in progress", repoRoomPrefix, repo, l.Of(repo))
+}
+
+// instanceReason is the reason of an entry that queues a card for the
+// instance's limit.
+func instanceReason(l Limits) string {
+	return fmt.Sprintf("%s, whose limit is %d cards in progress that are not ready to merge", instanceRoomPrefix, l.OfInstance())
 }
 
 // roomFreedReason is the reason of the rule's entry that starts a card that
-// waited for room.
-func roomFreedReason(repo string, l Limits) string {
-	return fmt.Sprintf("its repo %s has room under its limit of %d", repo, l.Of(repo))
+// waited for room: the limit it last waited for has room.
+func roomFreedReason(f Facts, l Limits) string {
+	if strings.HasPrefix(f.last, instanceRoomPrefix) {
+		return fmt.Sprintf("the instance has room under its limit of %d", l.OfInstance())
+	}
+	return fmt.Sprintf("its repo %s has room under its limit of %d", f.repo, l.Of(f.repo))
 }
 
-// room reports whether the card's repo has room for it under the limits:
-// fewer cards in progress than its limit, counting also the repo's cards that
-// wait for room before it.
-func (f Facts) room(l Limits) bool {
-	return l.Of(f.repo)-f.InProgress-f.Ahead >= 1
+// hold is the reason of the limit that holds the card, "" when it fits. It
+// goes through the cards that wait for room ahead of it, from every repo, in
+// order: one takes a place in its repo and in the instance only when both
+// have room for it then, so that a card held by its own repo's limit holds
+// back no card of another repo. The card then fits when its repo and the
+// instance both have room. While its repo has none, the repo is named, and
+// the instance otherwise.
+func (f Facts) hold(l Limits) string {
+	counts := make(map[string]int, len(f.counts)+1)
+	for r, n := range f.counts {
+		counts[r] = n
+	}
+	counts[f.repo] = f.InProgress
+	instance := f.InInstance
+	for _, a := range f.ahead {
+		if counts[a] < l.Of(a) && instance < l.OfInstance() {
+			counts[a]++
+			instance++
+		}
+	}
+	switch {
+	case counts[f.repo] >= l.Of(f.repo):
+		return roomReason(f.repo, l)
+	case instance >= l.OfInstance():
+		return instanceReason(l)
+	}
+	return ""
 }
 
 // inProgress is the SQL condition of a card in progress for its repo's limit:
@@ -76,14 +129,33 @@ func (f Facts) room(l Limits) bool {
 // included.
 const inProgress = `stage IN ('spec','implement','review')`
 
+// forInstance is the SQL condition of a card that counts against the
+// instance's limit: in progress and not ready to merge (see
+// CountsForInstance).
+const forInstance = inProgress + ` AND NOT (stage = 'review' AND waits_for = 'host')`
+
+// CountsForInstance reports whether a card in the state counts against the
+// instance's limit (ADR 0014): in spec, implement or review, whatever it
+// waits for, except ready to merge, review waiting for the Git host. It is
+// the Go form of forInstance.
+func CountsForInstance(st State) bool {
+	switch st.Stage {
+	case Spec, Implement, Review:
+		return st != atHost
+	}
+	return false
+}
+
 // readRoom reads, into f, the facts of the room of a card in the backlog,
 // whose last entry, apart from those about proposals, has the reason last:
-// its repo's cards in progress; whether the card is queued and waits for
-// room; and the repo's other queued cards that wait for room before it. For a
-// card that does not wait for room, every such card is before it, since a card
-// joins the queue for room at its end; for one that does, those whose since
-// and ID are earlier. The times are compared parsed, never as strings. A card
-// in another stage gets only its repo.
+// its repo's cards in progress; the instance's cards that count against its
+// limit; whether the card is queued and waits for room; the other queued
+// cards that wait for room before it, from every repo, in the queue's order,
+// each by its repo; and the cards in progress of those repos. For a card that
+// does not wait for room, every such card is before it, since a card joins
+// the queue for room at its end; for one that does, those whose since and ID
+// are earlier. The times are compared parsed, never as strings. A card in
+// another stage gets only its repo.
 func readRoom(q querier, card int64, last string, f *Facts) error {
 	var st State
 	var since string
@@ -96,7 +168,11 @@ func readRoom(q querier, card int64, last string, f *Facts) error {
 	case st.Stage != Backlog:
 		return nil
 	}
+	f.last = last
 	if err := q.QueryRow(`SELECT COUNT(*) FROM cards WHERE repo = ? AND `+inProgress, f.repo).Scan(&f.InProgress); err != nil {
+		return err
+	}
+	if err := q.QueryRow(`SELECT COUNT(*) FROM cards WHERE ` + forInstance).Scan(&f.InInstance); err != nil {
 		return err
 	}
 	f.ForRoom = st == queued && strings.HasPrefix(last, RoomPrefix)
@@ -106,22 +182,36 @@ func readRoom(q querier, card int64, last string, f *Facts) error {
 			return fmt.Errorf("card %d: %w", card, err)
 		}
 	}
-	others, err := waitingForRoom(q, f.repo, card)
+	others, err := waitingForRoom(q, card)
 	if err != nil {
 		return err
 	}
+	slices.SortFunc(others, func(a, b queuedCard) int {
+		return cmp.Or(a.since.Compare(b.since), cmp.Compare(a.id, b.id))
+	})
+	f.counts = map[string]int{}
 	for _, o := range others {
-		if !f.ForRoom || o.before(queuedCard{card, at}) {
-			f.Ahead++
+		if f.ForRoom && !o.before(queuedCard{id: card, since: at}) {
+			continue
 		}
+		f.ahead = append(f.ahead, o.repo)
+		if _, ok := f.counts[o.repo]; ok || o.repo == f.repo {
+			continue
+		}
+		var n int
+		if err := q.QueryRow(`SELECT COUNT(*) FROM cards WHERE repo = ? AND `+inProgress, o.repo).Scan(&n); err != nil {
+			return err
+		}
+		f.counts[o.repo] = n
 	}
 	return nil
 }
 
-// queuedCard is a queued card, with the time it got that state.
+// queuedCard is a queued card, with the time it got that state and its repo.
 type queuedCard struct {
 	id    int64
 	since time.Time
+	repo  string
 }
 
 // before reports whether a is before b in the queue: by since, then by ID.
@@ -129,13 +219,13 @@ func (a queuedCard) before(b queuedCard) bool {
 	return cmp.Or(a.since.Compare(b.since), cmp.Compare(a.id, b.id)) < 0
 }
 
-// waitingForRoom reads the cards of the repo, but the card not, that are
+// waitingForRoom reads the cards of every repo, but the card not, that are
 // queued and wait for room, as their last entries, apart from those about
 // proposals, say.
-func waitingForRoom(q querier, repo string, not int64) ([]queuedCard, error) {
-	rows, err := q.Query(`SELECT c.id, c.since, COALESCE((SELECT e.reason FROM entries e
+func waitingForRoom(q querier, not int64) ([]queuedCard, error) {
+	rows, err := q.Query(`SELECT c.id, c.since, c.repo, COALESCE((SELECT e.reason FROM entries e
 		WHERE e.card = c.id AND e.proposal IS NULL ORDER BY e.number DESC LIMIT 1), '')
-		FROM cards c WHERE c.repo = ? AND c.stage = ? AND c.waits_for = ? AND c.id != ?`, repo, queued.Stage, queued.WaitsFor, not)
+		FROM cards c WHERE c.stage = ? AND c.waits_for = ? AND c.id != ?`, queued.Stage, queued.WaitsFor, not)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +233,7 @@ func waitingForRoom(q querier, repo string, not int64) ([]queuedCard, error) {
 	for rows.Next() {
 		var c queuedCard
 		var since, reason string
-		if err := rows.Scan(&c.id, &since, &reason); err != nil {
+		if err := rows.Scan(&c.id, &since, &c.repo, &reason); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -256,17 +346,18 @@ func readPredecessors(q querier, card int64) (all, open, gone []int64, err error
 }
 
 // queueing is the state a start goes to, from the state the table gives:
-// queued while a predecessor is not done, or while the card's repo has no
-// room under the limits.
+// queued while a predecessor is not done, or while the card's repo or the
+// instance has no room under the limits.
 func queueing(to State, f Facts, l Limits) State {
-	if len(f.Open) > 0 || !f.room(l) {
+	if len(f.Open) > 0 || f.hold(l) != "" {
 		return queued
 	}
 	return to
 }
 
 // queuedReason is the reason of a start's entry: the predecessors it waits
-// for, or its repo's limit, when it is queued, and none when it goes to spec.
+// for, or the limit that holds it, when it is queued, and none when it goes to
+// spec.
 func queuedReason(to State, f Facts, l Limits) string {
 	switch {
 	case to != queued:
@@ -274,19 +365,19 @@ func queuedReason(to State, f Facts, l Limits) string {
 	case len(f.Open) > 0:
 		return QueuedPrefix + cards(f.Open)
 	}
-	return roomReason(f.repo, l)
+	return f.hold(l)
 }
 
 // Start starts a card that waits for the developer in the backlog, as the
 // developer's move start, under the default limits (see StartWith).
 func (s *Store) Start(id int64) (Card, error) {
-	return s.StartWith(id, nil)
+	return s.StartWith(id, Limits{})
 }
 
 // StartWith starts a card that waits for the developer in the backlog, as the
 // developer's move start: to spec, waiting for a run, or queued, in the
 // backlog waiting for room, while a predecessor is not done (ADR 0010) or
-// while its repo has no room under the limits (ADR 0014).
+// while its repo or the instance has no room under the limits (ADR 0014).
 func (s *Store) StartWith(id int64, l Limits) (Card, error) {
 	return s.DecideWith(id, Start, "", Options{Limits: l})
 }
@@ -308,12 +399,15 @@ var errStays = errors.New("the card stays as it is")
 // that state, reads its facts. While a predecessor is not done, the card
 // stays and nothing is written. A card that waits for its predecessors, none
 // open and one dropped, waits for the developer in the backlog, to be started
-// without it or dropped. Otherwise, when its repo has room under the limits,
-// it goes to spec, waiting for a run; when it has none, a card that waited for
-// its predecessors gets one entry that keeps it queued for room, so that it
-// joins the end of the queue for room, and one that already waits for room
-// stays and nothing is written. A card that is no longer queued is passed
-// over. It returns the cards it wrote an entry for.
+// without it or dropped. Otherwise, when its repo and the instance have room
+// under the limits, it goes to spec, waiting for a run, with the reason of the
+// limit it last waited for. When one has none, a card that waited for its
+// predecessors gets one entry that keeps it queued for room, so that it joins
+// the end of the queue for room. A card that already waits for room stays
+// and nothing is written while its last reason begins with the reason of the
+// limit that holds it now; otherwise it gets one entry with that reason, and
+// its since is kept, so that it keeps its place in the queue. A card that is
+// no longer queued is passed over. It returns the cards it wrote an entry for.
 func (s *Store) Release(l Limits) ([]Released, error) {
 	rows, err := s.db.Query(`SELECT id, since FROM cards WHERE stage = ? AND waits_for = ?`, queued.Stage, queued.WaitsFor)
 	if err != nil {
@@ -352,19 +446,27 @@ func (s *Store) Release(l Limits) ([]Released, error) {
 				return State{}, errStays
 			case !f.ForRoom && len(f.Dropped) > 0:
 				return State{Backlog, Developer}, nil
-			case f.room(l):
+			}
+			hold := f.hold(l)
+			switch {
+			case hold == "":
 				return State{Spec, Run}, nil
-			case f.ForRoom:
+			case f.ForRoom && strings.HasPrefix(f.last, hold):
 				return State{}, errStays
 			}
 			return queued, nil
 		}
+		// A card that waits for room and is now held by another limit keeps
+		// its place: only its reason changes.
+		e.keepSince = func(to State, f Facts) bool { return to == queued && f.ForRoom }
 		e.because = func(to State, f Facts) string {
 			switch {
+			case to == queued && f.ForRoom:
+				reason = f.hold(l)
 			case to == queued:
-				reason = roomReason(f.repo, l) + "; " + ReleasedPrefix + cards(f.all)
+				reason = f.hold(l) + "; " + ReleasedPrefix + cards(f.all)
 			case to == (State{Spec, Run}) && f.ForRoom:
-				reason = roomFreedReason(f.repo, l)
+				reason = roomFreedReason(f, l)
 			case len(f.Dropped) == 1:
 				reason = fmt.Sprintf("%s %s was dropped; start it without it, or drop it", PredecessorDroppedPrefix, cards(f.Dropped))
 			case len(f.Dropped) > 1:
