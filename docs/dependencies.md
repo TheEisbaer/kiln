@@ -24,7 +24,7 @@ not read by the check command.
 
 - **For:** The toolchain image of this repo (`images/toolchain/`), in which the check runs on the Git host's runner and on the developer's machine. The image also carries the Go modules of `go.mod` and `go.sum`, downloaded when it is built, and has the module proxy turned off (ADR 0057).
 - **Looked at:** Installing Go from its release archive onto a plain base image, which would make the image ours to maintain for no gain; the Alpine variant of the Go image, which has no advantage for a program without C code.
-- **Why this one:** It is the Go project's own official image, it carries the toolchain that builds the core (ADR 0037), and it is pinned by digest so that a moved tag changes nothing.
+- **Why this one:** It is the official `golang` image of Docker Hub's library, maintained by the Docker library maintainers (`github.com/docker-library/golang`) with the Go project's own toolchain from go.dev inside; that toolchain builds the core (ADR 0037), and the image is pinned by digest so that a moved tag changes nothing.
 - **Licence:** Go is BSD-3-Clause. The Debian packages in the image carry their own licences; none of them becomes part of Kiln's programs.
 
 ### The checkout action
