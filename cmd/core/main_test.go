@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,5 +140,37 @@ func TestCardRepo(t *testing.T) {
 		t.Errorf("--repo work without a file: %d", code)
 	} else {
 		noCard(t, data)
+	}
+}
+
+// TestCardLimit writes a card with `kiln card` into a repo whose limit of 1
+// is taken by a card in progress: the card is queued for room, and its ID
+// is printed alone.
+func TestCardLimit(t *testing.T) {
+	data := t.TempDir()
+	s, err := store.Open(filepath.Join(data, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy, err := s.CreateIn("work", "In progress.", 0)
+	if err == nil {
+		_, err = s.Move(busy.ID, store.State{Stage: store.Review, WaitsFor: store.Approval}, store.CauseRule)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	file := settingsFile(t, `{"repos":[{"name":"kiln","copy":"/a/kiln.git","own":true},{"name":"work","copy":"/a/work.git","limit":1}]}`)
+	var o, e bytes.Buffer
+	if code := cardCommand([]string{"--data", data, "--settings", file, "--repo", "work", "A card."}, &o, &e); code != 0 {
+		t.Fatalf("kiln card: %d %q", code, e.String())
+	}
+	if s, err = store.Open(filepath.Join(data, "store.db")); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	want := store.State{Stage: store.Backlog, WaitsFor: store.Room}
+	if c, err := s.Card(busy.ID + 1); err != nil || c.State != want || o.String() != fmt.Sprintf("%d\n", c.ID) {
+		t.Errorf("kiln card wrote %+v, %v and printed %q, want a queued card and its ID", c, err, o.String())
 	}
 }

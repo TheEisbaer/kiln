@@ -55,7 +55,7 @@ func TestCreatePredecessors(t *testing.T) {
 	if _, err := f.store.Move(b, done, store.CauseHost); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.store.Release(); err != nil {
+	if _, err := f.store.Release(nil); err != nil {
 		t.Fatal(err)
 	}
 	if tl := f.tileOf(t, c.ID); tl.Stage != store.Spec || len(tl.QueuedFor) != 0 || len(tl.Predecessors) != 2 {

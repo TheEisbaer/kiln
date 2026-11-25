@@ -1,10 +1,13 @@
 package store
 
 import (
+	"cmp"
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 )
 
 // The fixed words of the reasons of a card's wait for its predecessors (ADR
@@ -21,11 +24,140 @@ const (
 	// was dropped. In the backlog, waiting for the developer, no other
 	// reason begins with it.
 	PredecessorDroppedPrefix = "its predecessor"
+	// RoomPrefix begins the reason of the entry that queues a card for its
+	// repo's limit of cards in progress (ADR 0014), followed by the repo's
+	// name (see roomReason). A queued card waits for room when the reason of
+	// its last entry begins with it, and for its predecessors otherwise.
+	RoomPrefix = "waits for room in its repo "
 )
 
-// queued is where a card waits for its predecessors: in the backlog, waiting
-// for room.
+// queued is where a card waits for its predecessors, or for room in its repo:
+// in the backlog, waiting for room.
 var queued = State{Backlog, Room}
+
+// DefaultLimit is a repo's limit of cards in progress when the settings give
+// none (ADR 0014).
+const DefaultLimit = 3
+
+// Limits are the repos' limits of cards in progress, by the repo's name.
+type Limits map[string]int
+
+// Of is the limit of the repo: its value when that is 1 or more, and
+// DefaultLimit otherwise, for a nil Limits too, so that leaving the limits out
+// is never "no limit".
+func (l Limits) Of(repo string) int {
+	if n := l[repo]; n >= 1 {
+		return n
+	}
+	return DefaultLimit
+}
+
+// roomReason is the reason of an entry that queues a card for its repo's
+// limit.
+func roomReason(repo string, l Limits) string {
+	return fmt.Sprintf("%s%s, whose limit is %d cards in progress", RoomPrefix, repo, l.Of(repo))
+}
+
+// roomFreedReason is the reason of the rule's entry that starts a card that
+// waited for room.
+func roomFreedReason(repo string, l Limits) string {
+	return fmt.Sprintf("its repo %s has room under its limit of %d", repo, l.Of(repo))
+}
+
+// room reports whether the card's repo has room for it under the limits:
+// fewer cards in progress than its limit, counting also the repo's cards that
+// wait for room before it.
+func (f Facts) room(l Limits) bool {
+	return l.Of(f.repo)-f.InProgress-f.Ahead >= 1
+}
+
+// inProgress is the SQL condition of a card in progress for its repo's limit:
+// in spec, implement or review, whatever it waits for, ready to merge
+// included.
+const inProgress = `stage IN ('spec','implement','review')`
+
+// readRoom reads, into f, the facts of the room of a card in the backlog,
+// whose last entry, apart from those about proposals, has the reason last:
+// its repo's cards in progress; whether the card is queued and waits for
+// room; and the repo's other queued cards that wait for room before it. For a
+// card that does not wait for room, every such card is before it, since a card
+// joins the queue for room at its end; for one that does, those whose since
+// and ID are earlier. The times are compared parsed, never as strings. A card
+// in another stage gets only its repo.
+func readRoom(q querier, card int64, last string, f *Facts) error {
+	var st State
+	var since string
+	err := q.QueryRow(`SELECT repo, stage, waits_for, since FROM cards WHERE id = ?`, card).Scan(&f.repo, &st.Stage, &st.WaitsFor, &since)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return err
+	case st.Stage != Backlog:
+		return nil
+	}
+	if err := q.QueryRow(`SELECT COUNT(*) FROM cards WHERE repo = ? AND `+inProgress, f.repo).Scan(&f.InProgress); err != nil {
+		return err
+	}
+	f.ForRoom = st == queued && strings.HasPrefix(last, RoomPrefix)
+	var at time.Time
+	if f.ForRoom {
+		if at, err = time.Parse(time.RFC3339Nano, since); err != nil {
+			return fmt.Errorf("card %d: %w", card, err)
+		}
+	}
+	others, err := waitingForRoom(q, f.repo, card)
+	if err != nil {
+		return err
+	}
+	for _, o := range others {
+		if !f.ForRoom || o.before(queuedCard{card, at}) {
+			f.Ahead++
+		}
+	}
+	return nil
+}
+
+// queuedCard is a queued card, with the time it got that state.
+type queuedCard struct {
+	id    int64
+	since time.Time
+}
+
+// before reports whether a is before b in the queue: by since, then by ID.
+func (a queuedCard) before(b queuedCard) bool {
+	return cmp.Or(a.since.Compare(b.since), cmp.Compare(a.id, b.id)) < 0
+}
+
+// waitingForRoom reads the cards of the repo, but the card not, that are
+// queued and wait for room, as their last entries, apart from those about
+// proposals, say.
+func waitingForRoom(q querier, repo string, not int64) ([]queuedCard, error) {
+	rows, err := q.Query(`SELECT c.id, c.since, COALESCE((SELECT e.reason FROM entries e
+		WHERE e.card = c.id AND e.proposal IS NULL ORDER BY e.number DESC LIMIT 1), '')
+		FROM cards c WHERE c.repo = ? AND c.stage = ? AND c.waits_for = ? AND c.id != ?`, repo, queued.Stage, queued.WaitsFor, not)
+	if err != nil {
+		return nil, err
+	}
+	var out []queuedCard
+	for rows.Next() {
+		var c queuedCard
+		var since, reason string
+		if err := rows.Scan(&c.id, &since, &reason); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if !strings.HasPrefix(reason, RoomPrefix) {
+			continue
+		}
+		if c.since, err = time.Parse(time.RFC3339Nano, since); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("card %d: %w", c.id, err)
+		}
+		out = append(out, c)
+	}
+	return out, errorsOf(rows)
+}
 
 // ErrPredecessor is the error of a predecessor that a new card cannot name:
 // itself, a card that does not exist, or a card that was dropped. The error
@@ -124,84 +256,115 @@ func readPredecessors(q querier, card int64) (all, open, gone []int64, err error
 }
 
 // queueing is the state a start goes to, from the state the table gives:
-// queued while a predecessor is not done.
-func queueing(to State, f Facts) State {
-	if len(f.Open) > 0 {
+// queued while a predecessor is not done, or while the card's repo has no
+// room under the limits.
+func queueing(to State, f Facts, l Limits) State {
+	if len(f.Open) > 0 || !f.room(l) {
 		return queued
 	}
 	return to
 }
 
 // queuedReason is the reason of a start's entry: the predecessors it waits
-// for, when it is queued, and none when it goes to spec.
-func queuedReason(to State, f Facts) string {
-	if to == queued {
+// for, or its repo's limit, when it is queued, and none when it goes to spec.
+func queuedReason(to State, f Facts, l Limits) string {
+	switch {
+	case to != queued:
+		return ""
+	case len(f.Open) > 0:
 		return QueuedPrefix + cards(f.Open)
 	}
-	return ""
+	return roomReason(f.repo, l)
 }
 
 // Start starts a card that waits for the developer in the backlog, as the
-// developer's move start: to spec, waiting for a run, or queued, in the
-// backlog waiting for room, while a predecessor is not done (ADR 0010).
+// developer's move start, under the default limits (see StartWith).
 func (s *Store) Start(id int64) (Card, error) {
-	return s.Decide(id, Start, "")
+	return s.StartWith(id, nil)
 }
 
-// Released is a card that Release moved, with the reason of its entry.
+// StartWith starts a card that waits for the developer in the backlog, as the
+// developer's move start: to spec, waiting for a run, or queued, in the
+// backlog waiting for room, while a predecessor is not done (ADR 0010) or
+// while its repo has no room under the limits (ADR 0014).
+func (s *Store) StartWith(id int64, l Limits) (Card, error) {
+	return s.DecideWith(id, Start, "", Options{Limits: l})
+}
+
+// Released is a card that Release wrote an entry for, with the reason of its
+// entry.
 type Released struct {
 	Card
 	Reason string
 }
 
-// errStays is the error of a release whose card is no longer queued.
-var errStays = errors.New("the card is no longer queued")
+// errStays is the error of a release that writes nothing: the card is no
+// longer queued, or it waits on.
+var errStays = errors.New("the card stays as it is")
 
-// Release is the rule that ends a queued card's wait (ADR 0010, ADR 0035). It
-// takes each card in the backlog, waiting for room, that has a predecessor,
-// and in a transaction of its own, made only from that state, reads its
-// predecessors. While one is not done, the card stays and nothing is written.
-// When every one is done, the card goes to spec, waiting for a run; when none
-// is open and one was dropped, it waits for the developer in the backlog, to
-// be started without it or dropped. A card that is no longer queued is passed
-// over. It returns the cards it moved.
-func (s *Store) Release() ([]Released, error) {
-	rows, err := s.db.Query(`SELECT id FROM cards WHERE stage = ? AND waits_for = ?
-		AND EXISTS (SELECT 1 FROM predecessors WHERE card = cards.id) ORDER BY id`, queued.Stage, queued.WaitsFor)
+// Release is the rule that ends a queued card's wait (ADR 0010, ADR 0014, ADR
+// 0035). It takes every card in the backlog, waiting for room, in the order of
+// its since and then its ID, and in a transaction of its own, made only from
+// that state, reads its facts. While a predecessor is not done, the card
+// stays and nothing is written. A card that waits for its predecessors, none
+// open and one dropped, waits for the developer in the backlog, to be started
+// without it or dropped. Otherwise, when its repo has room under the limits,
+// it goes to spec, waiting for a run; when it has none, a card that waited for
+// its predecessors gets one entry that keeps it queued for room, so that it
+// joins the end of the queue for room, and one that already waits for room
+// stays and nothing is written. A card that is no longer queued is passed
+// over. It returns the cards it wrote an entry for.
+func (s *Store) Release(l Limits) ([]Released, error) {
+	rows, err := s.db.Query(`SELECT id, since FROM cards WHERE stage = ? AND waits_for = ?`, queued.Stage, queued.WaitsFor)
 	if err != nil {
 		return nil, err
 	}
-	var ids []int64
+	var queue []queuedCard
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var c queuedCard
+		var since string
+		if err := rows.Scan(&c.id, &since); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		ids = append(ids, id)
+		if c.since, err = time.Parse(time.RFC3339Nano, since); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("card %d: %w", c.id, err)
+		}
+		queue = append(queue, c)
 	}
 	if err := errorsOf(rows); err != nil {
 		return nil, err
 	}
+	slices.SortFunc(queue, func(a, b queuedCard) int {
+		return cmp.Or(a.since.Compare(b.since), cmp.Compare(a.id, b.id))
+	})
 	var out []Released
-	for _, id := range ids {
+	for _, q := range queue {
 		var reason string
-		e := edit{id: id, cause: CauseRule}
+		// always: the entry that keeps a card queued for room is written
+		// although the state stays; every case that writes nothing is
+		// errStays.
+		e := edit{id: q.id, cause: CauseRule, always: true}
 		e.next = func(from State, f Facts) (State, error) {
 			switch {
-			case from != queued:
+			case from != queued, len(f.Open) > 0:
 				return State{}, errStays
-			case len(f.Open) > 0:
-				return from, nil // writes nothing
-			case len(f.Dropped) > 0:
+			case !f.ForRoom && len(f.Dropped) > 0:
 				return State{Backlog, Developer}, nil
+			case f.room(l):
+				return State{Spec, Run}, nil
+			case f.ForRoom:
+				return State{}, errStays
 			}
-			return State{Spec, Run}, nil
+			return queued, nil
 		}
 		e.because = func(to State, f Facts) string {
 			switch {
 			case to == queued:
-				return ""
+				reason = roomReason(f.repo, l) + "; " + ReleasedPrefix + cards(f.all)
+			case to == (State{Spec, Run}) && f.ForRoom:
+				reason = roomFreedReason(f.repo, l)
 			case len(f.Dropped) == 1:
 				reason = fmt.Sprintf("%s %s was dropped; start it without it, or drop it", PredecessorDroppedPrefix, cards(f.Dropped))
 			case len(f.Dropped) > 1:
@@ -216,10 +379,9 @@ func (s *Store) Release() ([]Released, error) {
 		case errors.Is(err, errStays):
 			continue
 		case err != nil:
-			return out, fmt.Errorf("card %d: %w", id, err)
-		case c.State != queued:
-			out = append(out, Released{c, reason})
+			return out, fmt.Errorf("card %d: %w", q.id, err)
 		}
+		out = append(out, Released{c, reason})
 	}
 	return out, nil
 }

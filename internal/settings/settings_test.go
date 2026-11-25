@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/TheEisbaer/kiln/internal/store"
 )
 
 func TestCheck(t *testing.T) {
@@ -26,6 +28,7 @@ func TestCheck(t *testing.T) {
 		{"a name of 41 characters", []Repo{kiln, {Name: strings.Repeat("a", 41), Copy: "/c"}}, "longer than 40"},
 		{"a name twice", []Repo{kiln, second, {Name: "second", Copy: "/d"}}, `"second" is given twice`},
 		{"no copy", []Repo{kiln, {Name: "second"}}, `"second" has no copy`},
+		{"a limit below 0", []Repo{kiln, {Name: "second", Copy: "/c", Limit: -1}}, `the limit of the repo "second" is -1; it is at least 1`},
 		{"none own", []Repo{second}, "no repo is marked"},
 		{"two own", []Repo{kiln, {Name: "second", Copy: "/c", Own: true}}, "more than one repo is marked as Kiln's own: kiln, second"},
 	} {
@@ -72,6 +75,15 @@ func TestLoad(t *testing.T) {
 	one := func(member string) string {
 		return `{"repos":[{"name":"kiln","copy":"/a/k.git","own":true` + member + `}]}`
 	}
+	t.Run("limit", func(t *testing.T) {
+		got, err := Load(write(t, `{"repos":[{"name":"kiln","copy":"/a/k.git","own":true},{"name":"work","copy":"/a/w.git","limit":2}]}`))
+		if err != nil || len(got) != 2 || got[0].Limit != 0 || got[1].Limit != 2 {
+			t.Fatalf("Load = %+v, %v, want the limits 0 and 2", got, err)
+		}
+		if l := (store.Limits{got[0].Name: got[0].Limit}); l.Of("kiln") != 3 {
+			t.Errorf("a repo without a limit has the limit %d, want 3", l.Of("kiln"))
+		}
+	})
 	for _, tc := range []struct{ name, content, want string }{
 		{"unknown member", one(`,"publish_comand":"x"`), `unknown field "publish_comand"`},
 		{"limit", `{"limit":3,"repos":[]}`, `unknown field "limit"`},
@@ -86,6 +98,10 @@ func TestLoad(t *testing.T) {
 		{"missing copy", `{"repos":[{"name":"kiln","own":true}]}`, `"kiln" has no copy`},
 		{"two own", `{"repos":[{"name":"a","copy":"/a","own":true},{"name":"b","copy":"/b","own":true}]}`, "more than one repo is marked"},
 		{"name with /", `{"repos":[{"name":"a/b","copy":"/a","own":true}]}`, "is not only ASCII"},
+		{"limit 0", one(`,"limit":0`), `: the limit of the repo "kiln" is 0; it is at least 1`},
+		{"limit -1", one(`,"limit":-1`), `: the limit of the repo "kiln" is -1; it is at least 1`},
+		{"limit 1.5", one(`,"limit":1.5`), "limit"},
+		{"limit as a string", one(`,"limit":"3"`), "limit"},
 		{"over 1 MiB", one("") + strings.Repeat(" ", MaxFile), "is larger than 1 MiB"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

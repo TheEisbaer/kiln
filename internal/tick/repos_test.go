@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/TheEisbaer/kiln/internal/settings"
 	"github.com/TheEisbaer/kiln/internal/store"
+	"github.com/TheEisbaer/kiln/internal/web"
 )
 
 // twoRepos is a core on a store of its own and two local bare repos, kiln,
@@ -396,4 +398,93 @@ func TestRepoGoneDoneStarts(t *testing.T) {
 		}
 	}
 	core.stop(t)
+}
+
+// TestLimitPerRepoTick has kiln at its limit of 1, with a card waiting for
+// approval: a second kiln card, started under the core's limits, is queued,
+// and a tick starts the spec run of a card of second while the queued card
+// gets no run and no line. Once the first kiln card is dropped, the next tick
+// releases the queued card by the rule and starts its run.
+func TestLimitPerRepoTick(t *testing.T) {
+	r := newTwoRepos(t)
+	r.kiln.Limit, r.second.Limit = 1, 3
+	r.c.Repos = []settings.Repo{r.kiln, r.second}
+	c := r.c
+	var out syncBuilder
+	c.out = &out
+	c.activity = web.NewActivity()
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(func() { cancel(); c.followers.Wait() })
+
+	first := r.card(t, store.KilnRepo)
+	if _, err := c.store.Move(first.ID, store.State{Stage: store.Spec, WaitsFor: store.Approval}, store.CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	start := func(repo string) store.Card {
+		t.Helper()
+		cd, err := c.store.CreateIn(repo, "A card of "+repo+".", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cd, err = c.store.StartWith(cd.ID, c.limits()); err != nil {
+			t.Fatal(err)
+		}
+		return cd
+	}
+	kiln, second := start(store.KilnRepo), start("second")
+	if kiln.State != queued || second.State != waiting {
+		t.Fatalf("the kiln card is in %v and the card of second in %v, want queued and waiting for a run", kiln.State, second.State)
+	}
+	runs := func(card int64) int {
+		t.Helper()
+		n, err := c.store.RunCount(card)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	// The tick's followers write the runs; the engine says which started.
+
+	e := c.engine.(*fakeEngine)
+	if err := c.tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e.waitStarted(t, group(second.ID))
+	if cd, _ := c.store.Card(kiln.ID); cd.State != queued || runs(kiln.ID) != 0 {
+		t.Errorf("the kiln card is in %v with %d runs, want queued with none", cd.State, runs(kiln.ID))
+	}
+	if strings.Contains(out.String(), fmt.Sprintf("card %d:", kiln.ID)) {
+		t.Errorf("the core printed a line for the queued card:\n%s", out.String())
+	}
+
+	if _, err := c.store.Decide(first.ID, store.Drop, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("kiln core: card %d: its repo kiln has room under its limit of 1; its spec run starts by the rule\n", kiln.ID)
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("the core printed\n%s\nwant the line %q", out.String(), want)
+	}
+	e.waitStarted(t, group(second.ID), group(kiln.ID))
+}
+
+// syncBuilder is a strings.Builder that the tick and its followers can write
+// to at once.
+type syncBuilder struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuilder) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuilder) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

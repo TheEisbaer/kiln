@@ -44,8 +44,14 @@ func merged(t *testing.T, s *Store, id int64) {
 // moved, with the number of entries it wrote.
 func release(t *testing.T, s *Store) (moved []string, wrote int) {
 	t.Helper()
+	return releaseWith(t, s, nil)
+}
+
+// releaseWith is release under the limits.
+func releaseWith(t *testing.T, s *Store, l Limits) (moved []string, wrote int) {
+	t.Helper()
 	before := countRows(t, s, "entries")
-	got, err := s.Release()
+	got, err := s.Release(l)
 	if err != nil {
 		t.Fatal(err)
 	}
