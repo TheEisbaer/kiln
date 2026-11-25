@@ -905,8 +905,8 @@ func (c *core) fetchFor(cards []int64, inFlight map[int64]string, paused string)
 // open and whose repo and instance have room under their limits
 // (store.Release), also while the instance is paused: a released card only
 // waits for a run. Each entry the rule writes is said in one line, also one
-// that only names another limit a card waits for; an error is printed, and
-// the tick goes on.
+// that only names another limit a card waits for; each card's error is printed
+// in a line of its own, and the tick goes on.
 func (c *core) release() {
 	moved, err := c.store.Release(c.limits())
 	for _, r := range moved {
@@ -916,8 +916,14 @@ func (c *core) release() {
 		}
 		fmt.Fprintf(c.out, "kiln core: card %d: %s\n", r.ID, line)
 	}
-	if err != nil {
-		fmt.Fprintln(c.errOut, "kiln core: queued cards:", run.Printable(err.Error()))
+	errs := []error{err}
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		errs = j.Unwrap()
+	}
+	for _, err := range errs {
+		if err != nil {
+			fmt.Fprintln(c.errOut, "kiln core: queued cards:", run.Printable(err.Error()))
+		}
 	}
 }
 

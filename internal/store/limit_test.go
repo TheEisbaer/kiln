@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -420,5 +421,35 @@ func TestCountsForInstance(t *testing.T) {
 		if got := CountsForInstance(st); got != want || sql != want {
 			t.Errorf("%v counts: Go %v, SQL %v; want %v", st, got, sql, want)
 		}
+	}
+}
+
+// TestLimitPastUnreadableSince has a card queued for room whose since cannot
+// be read: it takes no place in the queue, and no other card's release, start
+// or moves fail for it.
+func TestLimitPastUnreadableSince(t *testing.T) {
+	s := open(t)
+	busy(t, s, "kiln", State{Spec, Run})
+	x := startIn(t, s, limits, "kiln", "x")
+	wantState(t, s, x.ID, queued)
+	p := busy(t, s, "second", State{Spec, Run})
+	y := startIn(t, s, limits, "second", "y", p)
+	merged(t, s, p)
+	badSince(t, s, x.ID)
+
+	got, err := s.Release(limits)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("card %d:", x.ID)) {
+		t.Errorf("Release returned the error %v", err)
+	}
+	if len(got) != 1 || got[0].ID != y.ID || got[0].State != (State{Spec, Run}) {
+		t.Errorf("Release returned %+v, want card %d released", got, y.ID)
+	}
+	n := createIn(t, s, "second", "new")
+	if _, err := s.StartWith(n.ID, limits); err != nil {
+		t.Errorf("StartWith: %v", err)
+	}
+	b := createIn(t, s, "second", "backlog")
+	if _, err := s.Moves(b, false); err != nil {
+		t.Errorf("Moves: %v", err)
 	}
 }
