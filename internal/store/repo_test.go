@@ -18,7 +18,8 @@ func makeV15(t *testing.T) string {
 	}
 	mustCreate(t, s, "the first card")
 	mustCreate(t, s, "the second card")
-	if _, err := s.db.Exec(`ALTER TABLE cards DROP COLUMN repo;
+	if _, err := s.db.Exec(`ALTER TABLE cards DROP COLUMN work_item;
+ALTER TABLE cards DROP COLUMN repo;
 PRAGMA user_version = 15`); err != nil {
 		t.Fatal(err)
 	}
@@ -51,8 +52,8 @@ func TestMigrateV15(t *testing.T) {
 	}
 
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != 16 {
-		t.Fatalf("the store is version %d, want 16", v)
+	if v := userVersion(t, s); v != 17 {
+		t.Fatalf("the store is version %d, want 17", v)
 	}
 	for _, id := range []int64{1, 2} {
 		if c, err := s.Card(id); err != nil || c.Repo != KilnRepo {

@@ -151,6 +151,9 @@ type Info struct {
 	// command: the table of moves of its cards then has publish (card 19).
 	// A nil map publishes no card.
 	Publishing map[string]bool
+	// NeedsWorkItem is true for the name of each repo whose cards are not
+	// published without a work item number. A nil map needs none.
+	NeedsWorkItem map[string]bool
 	// Version is the commit the core's program was built from, or empty for
 	// a program built by hand; the board's header shows it.
 	Version string
@@ -426,6 +429,8 @@ type (
 		Interventions int `json:"interventions"`
 		// Fixes is the merged card it fixes, 0 for none.
 		Fixes int64 `json:"fixes"`
+		// WorkItem is the card's work item number, 0 for none.
+		WorkItem int64 `json:"work_item"`
 	}
 	partJSON struct {
 		USD     float64 `json:"usd"`
@@ -460,6 +465,9 @@ type (
 		NamedBy []namedJSON `json:"named_by"`
 		// FixedBy are the cards that name it as the card they fix.
 		FixedBy []int64 `json:"fixed_by"`
+		// WorkItemNeeded is true when the card's repo needs a work item
+		// number before publishing and the card has none.
+		WorkItemNeeded bool `json:"work_item_needed"`
 		// The card's pull request, once it has an address, and whether the
 		// core is publishing it, from when the developer publishes until it
 		// has one (card 19).
@@ -647,7 +655,7 @@ func costOf(c *store.CardCost) *costJSON {
 
 func tile(s store.Summary) tileJSON {
 	t := tileJSON{ID: s.ID, Title: title(s.Text), Repo: s.Repo, Headline: headline(title(s.Text)), Stage: s.Stage, WaitsFor: s.WaitsFor, Reason: s.Reason,
-		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds, SendBacks: s.SendBacks, Cost: costOf(s.Cost), Interventions: s.Interventions, Fixes: s.Fixes}
+		Dropped: s.Dropped, Merged: s.Merged, Documents: s.Kinds, SendBacks: s.SendBacks, Cost: costOf(s.Cost), Interventions: s.Interventions, Fixes: s.Fixes, WorkItem: s.WorkItem}
 	if t.Documents == nil {
 		t.Documents = []string{}
 	}
@@ -881,6 +889,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	if pub.Address != "" && (atHost || sum.Merged) {
 		out.PullRequest = &pullJSON{Address: pub.Address, Commit: pub.Commit}
 	}
+	out.WorkItemNeeded = h.info.NeedsWorkItem[c.Repo] && c.WorkItem == 0
 	out.Publishing = atHost && pub.Address == "" && h.info.Publishing[c.Repo]
 	seen := map[string]bool{}
 	for _, d := range docs {
@@ -916,13 +925,19 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 // written.
 func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Text         *string `json:"text"`
-		Repo         string  `json:"repo"`
-		Predecessors []int64 `json:"predecessors"`
-		Fixes        int64   `json:"fixes"`
+		Text         *string         `json:"text"`
+		Repo         string          `json:"repo"`
+		Predecessors []int64         `json:"predecessors"`
+		Fixes        int64           `json:"fixes"`
+		WorkItem     json.RawMessage `json:"work_item"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Text == nil {
-		fail(w, http.StatusBadRequest, `the body must be {"text": …, "predecessors": [card, …], "fixes": card}, the predecessors and fixes optional`)
+		fail(w, http.StatusBadRequest, `the body must be {"text": …, "predecessors": [card, …], "fixes": card, "work_item": number}, the predecessors, fixes and work item optional`)
+		return
+	}
+	workItem, err := workItemOf(body.WorkItem)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if strings.TrimSpace(*body.Text) == "" {
@@ -934,8 +949,8 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	c, err := h.store.CreateIn(repo, *body.Text, body.Fixes, body.Predecessors...)
-	if errors.Is(err, store.ErrPredecessor) || errors.Is(err, store.ErrFix) {
+	c, err := h.store.CreateWithWorkItem(repo, *body.Text, body.Fixes, workItem, body.Predecessors...)
+	if errors.Is(err, store.ErrPredecessor) || errors.Is(err, store.ErrFix) || errors.Is(err, store.ErrWorkItem) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -952,6 +967,24 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply(w, http.StatusCreated, out)
+}
+
+// workItemOf reads the work item number of a body's "work_item": left out or
+// null, none (0); a JSON integer from 1 to store.MaxWorkItem, the number.
+// Anything else is refused with the reason, which says what was given.
+func workItemOf(raw json.RawMessage) (int64, error) {
+	given := strings.TrimSpace(string(raw))
+	if given == "" || given == "null" {
+		return 0, nil
+	}
+	if n, err := strconv.ParseInt(given, 10, 64); err == nil && given[0] != '+' && n >= 1 && n <= store.MaxWorkItem &&
+		given == strconv.FormatInt(n, 10) {
+		return n, nil
+	}
+	if len(given) > 40 {
+		given = given[:40]
+	}
+	return 0, fmt.Errorf(`"work_item" is a whole number from 1 to %d, or left out; got %s`, store.MaxWorkItem, run.Printable(given))
 }
 
 // repoNames are the instance's repos' names: Info.Repos, or kiln when it is
@@ -991,14 +1024,20 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Action      store.Action `json:"action"`
-		Note        string       `json:"note"`
-		WorkflowYes bool         `json:"workflow_yes"`
+		Action      store.Action    `json:"action"`
+		Note        string          `json:"note"`
+		WorkflowYes bool            `json:"workflow_yes"`
+		WorkItem    json.RawMessage `json:"work_item"`
 		// The tip of the change the page showed when the developer said yes.
 		Tip string `json:"tip"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		fail(w, http.StatusBadRequest, `the body must be {"action": …, "note": …}, the note optional`)
+		return
+	}
+	workItem, err := workItemOf(body.WorkItem)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// Whether the card can be published is a fact of its repo. A card's repo
@@ -1013,7 +1052,8 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	opts := store.Options{Publishing: h.info.Publishing[card.Repo], Limits: h.info.Limits}
+	opts := store.Options{Publishing: h.info.Publishing[card.Repo], Limits: h.info.Limits,
+		WorkItem: workItem, NeedsWorkItem: h.info.NeedsWorkItem[card.Repo]}
 	if body.Action == store.Publish {
 		// A change to the workflow files is published only after the
 		// developer has seen them and said yes, for this very change, which
@@ -1044,6 +1084,10 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, store.ErrNoCard):
 		fail(w, http.StatusNotFound, fmt.Sprintf("no card %d", id))
+		return
+	case errors.Is(err, store.ErrWorkItem):
+		// Not a 409, which the page reads as "the card moved meanwhile".
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	case errors.Is(err, store.ErrNote):
 		// The sentence of what does not fit, such as "this move needs a note

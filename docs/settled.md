@@ -179,6 +179,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - `scripts/kiln-up` makes a relative `KILN_SETTINGS` absolute once, from the directory it is run in, with its directories' symlinks resolved, and says the path it gives (2026-11-25).
 - The board's header shows Kiln's own copy when the instance has one repo, and every repo's name and copy, in the settings' order, when it has more. `GET /api/board` carries them as `repos`, beside `repo` (2026-11-25).
 - Kiln's `CLAUDE.md` was rewritten by the same lens as the stage instructions, with its three rules kept (2026-11-25).
+- The settings file's repos take `work_item`, `"required"` or left out. Any other value is refused with the reason, and the core does not start. A core started from its flags requires none (2026-11-25).
 
 ## ADR 0026: Kiln's repo lives in the developer's personal space on their company's GitHub; checks run on the developer's machine
 
@@ -188,6 +189,13 @@ A line says what was settled and ends with the date in brackets, for example (20
 - Kiln cannot act as an app on a personal repo on this Git host, so the fallback this decision names was taken: a public repo on github.com under the developer's personal account, with checks on the Git host's own runners (ADR 0049). GitHub as the first Git host, Kiln building no checker, and Kiln acting under its own identity all stand.
 - Of this decision's cost rules, two stand: Kiln's repo causes no billable usage, and there are no hosted background jobs. The rules about the developer's own runner and its caches ended with that runner (ADR 0049). What may be stored on the Git host, and how CPU time per check run is recorded there (ADR 0031), is settled by the card that needs it.
 - What may be stored on the Git host: Actions caches of Kiln's repo, within the default limit of 10 GB, which costs nothing. The limit is not raised, and over it the Git host evicts the entries accessed longest ago. Only the workflow `cache`, on a push to `main`, saves; it runs none of the repo's code but the protected script, workflows and Dockerfile, and compiles the rest without running it. The check on pull requests restores and has a read-only cache token (`cache-mode: read`) (2026-11-20).
+
+## ADR 0027: Azure DevOps is supported as a thin slice for the work repo, built to be deleted
+
+- A card holds at most one work item number, a whole number from 1 to 2147483647, in `cards.work_item`, NULL for none. It is given when the card is written (`"work_item"` in `POST /api/cards`, the field "Work item" of the new-card dialog), or with the approval of its spec (`"work_item"` beside the note). A later approval replaces it, and an approval without one leaves it. Publish gives one to a card that has none, and refuses a different one. Nothing else writes it. A bad value is refused with 400 and the reason, and nothing is written (2026-11-25).
+- A repo whose settings have `"work_item": "required"` publishes no card without a number. A review that passes leaves such a card in review, waiting for approval, by the rule, with the reason `the repo <name> needs a work item number before publishing; give it with the approval or when you publish`. "Publish" then shows a field for the number, and publish without one is refused with 400 and that reason. The publisher refuses such a card the same way, before it writes anything, as a failed publishing. Giving the number with "Publish" is an intervention, as the move publish always was (2026-11-25).
+- Kiln links nothing itself: the publish command gets the number as `KILN_WORK_ITEM`, set only when the card has one and taken out of the core's own environment otherwise, and links it. Kiln does not create, read or check work items, and shows the number as `#<n>` on the tile and the card's page, linked to nothing (2026-11-25).
+- The core learns of a merge on Azure DevOps as on GitHub, from the copy's `main` with no call to the Git host. A squash commit with a message of the Git host's own is found, since only trees are compared (tried with git 2.47.3: squash, no-fast-forward and semi-linear merges) (2026-11-25).
 
 ## ADR 0029: Every run has three ceilings, and a run that hits one is not retried
 
@@ -223,6 +231,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The schema is version 14: `proposals`, one row per proposal a review run wrote, with the card it was noticed on, the run, its place in the file, its title and text as written, the card made from it and the note it was dismissed with, NULL until then; and `entries.proposal`, the proposal an entry is about, NULL on every other entry (2026-11-24).
 - The schema is version 15: `cards.fixes`, the merged card a card fixes, NULL on every other card and on the cards that were there (2026-11-24).
 - The schema is version 16: `cards.repo`, the name of the card's repo. Every card that was there is in `kiln`, the one repo of an instance started from its flags (2026-11-25).
+- The schema is version 17: `cards.work_item`, the card's work item number, NULL on every card without one and on the cards that were there (2026-11-25).
 
 ## ADR 0033: A problem review notices outside a card's change is proposed to the developer, not acted on
 
@@ -428,6 +437,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - The check result command's contract, since it lives outside the repo: owner and repo are fixed in the command; `KILN_COMMIT` is 40 lowercase hex digits and is never evaluated, only quoted; no check yet for the commit is `pending`; standard output carries only the check's output and the result, never a token; the command holds what reading the check needs, at most a token that only reads the check of the one repo, not the app's key. On GitHub a fine-grained token cannot list a commit's check runs, so the command reads the runs of the check's workflow by `head_sha`, with a fine-grained token that has only "Actions: read" on the one repo (2026-11-24).
 - Kiln is started from the repo: `scripts/kiln-up` builds, makes or updates the copy and runs `kiln launch`, and `scripts/kiln-down` stops the proxy. The publish command and the check result command stay outside the repo, holding what they hold, until the work repo's own publishing is designed. The script gives them to the core from `KILN_PUBLISH_COMMAND` and `KILN_CHECK_RESULT_COMMAND`, and without them the core gets neither flag (the developer's decision of 2026-11-24).
 - Each repo's publish command is run for its own cards only, with `KILN_REPO` the copy of the card's repo, and each repo's check result command for its own cards' published commits only. A repo without a publish command publishes none of its cards: a review of one of them that passes waits for approval, and its moves have no `publish`, as a core without a command had. The core keeps no state across repos: a card's repo is written when the card is (2026-11-25).
+- The publish command also gets `KILN_WORK_ITEM` when the card has a work item number (2026-11-25).
 
 ## ADR 0053: Each stage starts with a fresh session, and a stage that is sent back resumes its own
 

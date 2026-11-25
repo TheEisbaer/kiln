@@ -44,7 +44,7 @@ func TestCreateFixes(t *testing.T) {
 		{fmt.Sprintf(`{"text":"x","fixes":%d}`, gone), fmt.Sprintf("card %d was dropped; only a merged card can be fixed", gone)},
 		{`{"text":"x","fixes":99}`, "no card 99 to fix"},
 		{fmt.Sprintf(`{"text":"x","fixes":%d}`, fix.ID+1), fmt.Sprintf("card %d cannot fix itself", fix.ID+1)},
-		{`{"text":"x","fixes":"7"}`, `the body must be {"text": …, "predecessors": [card, …], "fixes": card}, the predecessors and fixes optional`},
+		{`{"text":"x","fixes":"7"}`, `the body must be {"text": …, "predecessors": [card, …], "fixes": card, "work_item": number}, the predecessors, fixes and work item optional`},
 	} {
 		w := f.do(t, "POST", "/api/cards", tc.body)
 		if got := decode[map[string]string](t, w)["error"]; w.Code != 400 || got != tc.want {

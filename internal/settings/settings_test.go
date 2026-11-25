@@ -125,3 +125,27 @@ func TestLoad(t *testing.T) {
 		t.Errorf("a missing file: %v", err)
 	}
 }
+
+func TestLoadWorkItem(t *testing.T) {
+	load := func(member string) (Settings, error) {
+		path := filepath.Join(t.TempDir(), "settings.json")
+		body := `{"repos":[{"name":"kiln","copy":"/a/kiln.git","own":true` + member + `}]}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path)
+	}
+	for member, want := range map[string]bool{``: false, `,"work_item":"required"`: true, `,"work_item":""`: false} {
+		got, err := load(member)
+		if err != nil || got.Repos[0].NeedsWorkItem != want {
+			t.Errorf("%q: %+v, %v; want NeedsWorkItem %v", member, got.Repos, err, want)
+		}
+	}
+	_, err := load(`,"work_item":"optional"`)
+	if err == nil || !strings.Contains(err.Error(), `the work item of the repo "kiln" is "optional"; it is "required" or left out`) {
+		t.Errorf(`"optional": %v`, err)
+	}
+	if _, err := load(`,"work_item":1`); err == nil {
+		t.Error("a number was taken as the work item")
+	}
+}

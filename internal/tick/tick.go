@@ -774,13 +774,15 @@ func (c *core) serve() (func(), error) {
 	}
 	var repos []web.Repo
 	publishing := map[string]bool{}
+	needsWorkItem := map[string]bool{}
 	for _, r := range c.repos() {
 		repos = append(repos, web.Repo{Name: r.Name, Copy: r.Copy})
 		publishing[r.Name] = r.PublishCommand != ""
+		needsWorkItem[r.Name] = r.NeedsWorkItem
 	}
 	info := web.Info{Instance: c.instance, Repo: c.own().Copy, Repos: repos, Model: c.model(store.Spec),
 		ImplementModel: c.model(store.Implement), ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change,
-		Page: c.Page, Publishing: publishing, Limits: c.limits(), Version: versionOf(c.Version), Accepting: c.acting.Load}
+		Page: c.Page, Publishing: publishing, NeedsWorkItem: needsWorkItem, Limits: c.limits(), Version: versionOf(c.Version), Accepting: c.acting.Load}
 	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()
@@ -1429,6 +1431,15 @@ func (c *core) passedRule(ctx context.Context, repo settings.Repo, id int64) (*s
 	if len(files) > 0 {
 		return &store.Rule{To: reviewPassed, Reason: run.Printable(
 			"the review passed; the change touches workflow files and waits for your yes before it is published: " + fileNames(files))}, nil
+	}
+	if repo.NeedsWorkItem {
+		card, err := c.store.Card(id)
+		if err != nil {
+			return nil, err
+		}
+		if card.WorkItem == 0 {
+			return &store.Rule{To: reviewPassed, Reason: store.NeedsWorkItemReason(repo.Name)}, nil
+		}
 	}
 	return &store.Rule{To: atHost, Reason: "the review passed; the core publishes the change by the rule", Publish: true}, nil
 }
