@@ -6,6 +6,7 @@ package seal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,6 +40,17 @@ const (
 	proxyUser = "65532"
 	pushDir   = "/run/kiln"
 )
+
+// ErrProxyDown is what PushCredential and ProxyUp wrap when the proxy is down:
+// there is no container of its name, or the one of Kiln's is not running, as
+// after a restart of the container engine. KeepProxy starts it again.
+var ErrProxyDown = errors.New("the proxy is down")
+
+// downError is a message that is ErrProxyDown.
+type downError string
+
+func (e downError) Error() string        { return string(e) }
+func (e downError) Is(target error) bool { return target == ErrProxyDown }
 
 // Proxy is a proxy container.
 type Proxy struct {
@@ -157,20 +169,47 @@ func sameProxy(ctx context.Context, id string, p Proxy) (bool, error) {
 // credential on its standard input; that program hands it to the proxy over
 // the push socket (cmd/proxy). So the credential is never an argument, never
 // in an environment and never in a file, and nothing outside the proxy's
-// container can push one. A proxy without the label kiln.proxy is refused.
-// An error never carries the credential.
+// container can push one. A proxy without the label kiln.proxy is refused. A
+// proxy that is not there, or does not run, gives an error that is
+// ErrProxyDown, before anything is run in it. An error never carries the
+// credential.
 func PushCredential(ctx context.Context, proxy, credential string) error {
 	return pushFrom(ctx, proxy, strings.NewReader(credential))
 }
 
 // pushFrom is PushCredential with the credential read from r.
 func pushFrom(ctx context.Context, proxy string, r io.Reader) error {
-	p, err := kilnProxy(ctx, proxy)
+	p, err := upProxy(ctx, proxy)
 	if err != nil {
 		return err
 	}
 	// By ID, so that a container that took the name in between gets nothing.
 	return dockerIO(ctx, r, nil, "exec", "--interactive", p.id, "/proxy", "push")
+}
+
+// ProxyUp returns nil when the proxy of the name runs. A proxy that is not
+// there, or is not running, gives an error that is ErrProxyDown; one without
+// the label kiln.proxy is refused, and any other failure is returned as it is.
+func ProxyUp(ctx context.Context, proxy string) error {
+	_, err := upProxy(ctx, proxy)
+	return err
+}
+
+// upProxy finds the running proxy container of a name. kilnProxy, which
+// CreateRunNetwork and AttachProxy use, does not look at the state.
+func upProxy(ctx context.Context, proxy string) (*foundContainer, error) {
+	p, err := findContainer(ctx, proxy, proxyLabel)
+	switch {
+	case err != nil:
+		return nil, err
+	case p == nil:
+		return nil, downError("there is no proxy " + proxy)
+	case p.label == "":
+		return nil, notOurs("container", proxy, proxyLabel)
+	case p.state != "running":
+		return nil, downError(fmt.Sprintf("the proxy %s is %s", proxy, p.state))
+	}
+	return p, nil
 }
 
 // dirKey is the key of the directory InDir puts in a context.
