@@ -386,3 +386,30 @@ func TestCompareEveryRepo(t *testing.T) {
 		t.Errorf("Kiln's own repo, which answers, was said:\n%s", out)
 	}
 }
+
+// TestNotTestedNamesRepo: the line that says the cards at the Git host are not
+// tested names the repo when the instance has more than one, and not when it
+// has one, as the comparison's line does.
+func TestNotTestedNamesRepo(t *testing.T) {
+	broken := settings.Repo{Name: "second", Copy: t.TempDir()} // not a git repo
+	published := map[int64]string{1: "abc"}
+
+	var two strings.Builder
+	c := &core{Config: Config{Repos: []settings.Repo{{Name: store.KilnRepo, Own: true}, broken}}, errOut: &two}
+	c.testAtHost(t.Context(), broken, published)
+	want := "kiln core: the cards at the Git host are not tested: repo second: git rev-parse"
+	if !strings.HasPrefix(two.String(), want) {
+		t.Errorf("two repos: want a line that starts with %q, got:\n%s", want, two.String())
+	}
+
+	var one strings.Builder
+	c = &core{Config: Config{Repo: broken.Copy}, errOut: &one}
+	c.testAtHost(t.Context(), broken, published)
+	want = "kiln core: the cards at the Git host are not tested: git rev-parse"
+	if !strings.HasPrefix(one.String(), want) {
+		t.Errorf("one repo: want a line that starts with %q, got:\n%s", want, one.String())
+	}
+	if strings.Contains(one.String(), "repo ") {
+		t.Errorf("one repo: the line names a repo:\n%s", one.String())
+	}
+}

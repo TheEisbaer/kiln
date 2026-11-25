@@ -405,8 +405,8 @@ type hostTest struct{ main, commit string }
 // so that no checker is started for it in this round.
 //
 // A test that ended without an error, a refusal included, is kept in tested;
-// an error is printed and keeps nothing, and the card is tested again after
-// the next round.
+// an error is printed, with the repo's name when the instance has more than
+// one, and keeps nothing, and the card is tested again after the next round.
 func (c *core) testAtHost(ctx context.Context, repo settings.Repo, published map[int64]string) {
 	if c.tested == nil {
 		c.tested = map[int64]hostTest{}
@@ -416,7 +416,11 @@ func (c *core) testAtHost(ctx context.Context, repo settings.Repo, published map
 	}
 	main, mainTree, err := mainAndTree(ctx, repo.Copy)
 	if err != nil {
-		fmt.Fprintf(c.errOut, "kiln core: the cards at the Git host are not tested: %s\n", run.Printable(err.Error()))
+		text := run.Printable(err.Error())
+		if len(c.repos()) > 1 {
+			text = "repo " + repo.Name + ": " + text
+		}
+		fmt.Fprintf(c.errOut, "kiln core: the cards at the Git host are not tested: %s\n", text)
 		return
 	}
 	for _, id := range slices.Sorted(maps.Keys(published)) {
