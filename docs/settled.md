@@ -163,6 +163,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - `scripts/kiln-up` gives `KILN_SETTINGS`, when it is set, as `--settings`, and then none of `--repo`, `--spec-hosts`, `--publish-command` and `--check-result-command`; it then neither makes nor fetches the copy of `KILN_REPO`, and refuses a program without `--settings` (2026-11-25).
 - `scripts/kiln-up` makes a relative `KILN_SETTINGS` absolute once, from the directory it is run in, with its directories' symlinks resolved, and says the path it gives (2026-11-25).
 - The board's header shows Kiln's own copy when the instance has one repo, and every repo's name and copy, in the settings' order, when it has more. `GET /api/board` carries them as `repos`, beside `repo` (2026-11-25).
+- Kiln's `CLAUDE.md` was rewritten by the same lens as the stage instructions, with its three rules kept (2026-11-25).
 
 ## ADR 0026: Kiln's repo lives in the developer's personal space on their company's GitHub; checks run on the developer's machine
 
@@ -417,6 +418,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - A part of what a run is told that a run wrote (`## The last spec`, `## The last report`, `## The last review` and `## The approved spec`) is told inside a code fence with the info string `markdown`, as the change is told inside one with `diff`. The fence is backticks, one longer than the longest run of backticks in the part, so nothing in the part ends it and only the tick's own headings are headings. The card and the developer's note are not fenced, and the store keeps every document as the run wrote it (2026-11-20).
 - The developer's note on the spec is told unfenced, like the card and the developer's note, between the approved spec and the parts after it (2026-11-23).
 - A run in flight whose `instructions/<run>.md` is missing has it written again. If the text differs from the one its container or record was started with, or it cannot be written again, the run is ended as failed at once, with the reason naming the file (2026-11-24).
+- The stage instructions were rewritten for agents, by the lens of the public writing-for-agents skill (github.com/mattpocock/skills, `skills/productivity/writing-for-agents`, read at commit 3216582): rules phrased by what to do, a sentence per stage that says when the run is done, each rule in one place, and negation kept for the hard guardrails, each paired with what to do. Every rule and fact they held stays, with the same force; the lines the core and the tests read stay byte for byte, and so does the heading "First, the card's size" (2026-11-25).
 
 ## ADR 0060: Kiln may change workflow files, and the developer says yes before such a change is published
 
