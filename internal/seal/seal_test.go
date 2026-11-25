@@ -321,6 +321,12 @@ func TestSeal(t *testing.T) {
 		}
 		before := must(t, "inspect", "--format", "{{.Id}}", proxy)
 		must(t, "stop", proxy)
+		if err := PushCredential(t.Context(), proxy, credential); !errors.Is(err, ErrProxyDown) {
+			t.Errorf("PushCredential to a stopped proxy: %v, want ErrProxyDown", err)
+		}
+		if err := ProxyUp(t.Context(), proxy); !errors.Is(err, ErrProxyDown) {
+			t.Errorf("ProxyUp of a stopped proxy: %v, want ErrProxyDown", err)
+		}
 		if kept, err := KeepProxy(t.Context(), proxyConfig); err != nil || kept {
 			t.Fatalf("KeepProxy of a stopped proxy: kept %v, %v", kept, err)
 		}
@@ -336,6 +342,14 @@ func TestSeal(t *testing.T) {
 		}
 		if got := seenKey(t, probe, proxyURL); got != credential+"-again" {
 			t.Errorf("after the push the upstream saw %q", got)
+		}
+		if err := ProxyUp(t.Context(), proxy); err != nil {
+			t.Errorf("ProxyUp of the proxy that runs: %v", err)
+		}
+		// A proxy that is gone; the cleanup's rm --force succeeds for it.
+		must(t, "rm", "--force", proxy)
+		if err := PushCredential(t.Context(), proxy, credential); !errors.Is(err, ErrProxyDown) {
+			t.Errorf("PushCredential to a removed proxy: %v, want ErrProxyDown", err)
 		}
 	})
 

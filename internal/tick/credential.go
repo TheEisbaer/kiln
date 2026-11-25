@@ -23,6 +23,14 @@ import (
 // the credential, at most once in refusedEvery. A credential that is pushed
 // replaces the one before, also when it is the same.
 //
+// A proxy that the push finds down, as after a restart of the container
+// engine (no container of its name, or one that does not run), is kept as at
+// the core's start, within keepLimit, and the same credential is pushed again
+// in the same renewal. A keep that fails pauses the instance like a failed
+// push, and the next attempt tries both again. The tick, too, asks for a
+// renewal at once when it finds the proxy down before it starts a run, and
+// starts none until the renewal has kept it.
+//
 // The credential is unavailable when the command fails, runs out of time or
 // prints nothing, or when the push fails or runs out of time. The instance is
 // then paused (ADR 0016, rule 3): the pause is the instance's state in the
@@ -54,6 +62,8 @@ var (
 	// pushLimit bounds one push to the proxy, so that an engine that hangs
 	// holds neither the core's start nor the renewal.
 	pushLimit = 30 * time.Second
+	// keepLimit bounds one keep of the proxy inside a renewal.
+	keepLimit = 30 * time.Second
 )
 
 // maxCredential is the most the credential command may print, as the proxy
@@ -79,6 +89,7 @@ func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) 
 type credentialState struct {
 	failing   bool      // the last attempt failed, or its outcome was not written
 	refusedAt time.Time // when a refused credential last asked for a renewal
+	downAt    time.Time // when the tick, finding the proxy down, last asked for one
 }
 
 // checkCredential refuses a configuration without an upstream that is an
@@ -138,20 +149,42 @@ func (c *core) renewal(ctx context.Context) {
 func (c *core) credentialRefused() {
 	c.credMu.Lock()
 	defer c.credMu.Unlock()
+	c.askRenewal(&c.cred.refusedAt, "kiln core: the upstream refused the Claude credential in a run; it is renewed now")
+}
+
+// proxyIsDown reports whether the proxy is down, and then asks for a renewal
+// at once, at most once in refusedEvery, which keeps the proxy; the tick
+// starts no run meanwhile, as it would fail. Any other failure to look is not
+// said to be the proxy's: the run's start meets it by itself.
+func (c *core) proxyIsDown(ctx context.Context) bool {
+	if !errors.Is(c.engine.ProxyUp(ctx, c.Proxy), seal.ErrProxyDown) {
+		return false
+	}
+	c.credMu.Lock()
+	defer c.credMu.Unlock()
+	c.askRenewal(&c.cred.downAt, fmt.Sprintf("kiln core: the proxy %s is not running; it is started again and given the credential now, and no run starts before", c.Proxy))
+	return true
+}
+
+// askRenewal asks for a renewal at once, unless one was asked for by the same
+// cause, whose time is *last, less than refusedEvery ago, and says why. The
+// caller holds credMu.
+func (c *core) askRenewal(last *time.Time, say string) {
 	now := c.clock.Now()
-	if !c.cred.refusedAt.IsZero() && now.Sub(c.cred.refusedAt) < refusedEvery {
+	if !last.IsZero() && now.Sub(*last) < refusedEvery {
 		return
 	}
-	c.cred.refusedAt = now
+	*last = now
 	select {
 	case c.renewNow <- struct{}{}:
-		fmt.Fprintln(c.out, "kiln core: the upstream refused the Claude credential in a run; it is renewed now")
+		fmt.Fprintln(c.out, say)
 	default: // one is asked for already
 	}
 }
 
 // renew runs the credential command, pushes what it printed to the proxy
-// within pushLimit, and pauses the instance, or ends its pause, by the
+// within pushLimit, keeps the proxy and pushes again when the push finds it
+// down, and pauses the instance, or ends its pause, by the
 // outcome. The terminal says so only when the store's state changed, so that
 // a reason is said once, also across a restart of the core; a store that
 // cannot be written counts as a failure, and is tried again after
@@ -159,16 +192,12 @@ func (c *core) credentialRefused() {
 func (c *core) renew(ctx context.Context) {
 	credential, why := c.credential(ctx)
 	if why == "" {
-		pctx, cancel := context.WithTimeout(ctx, pushLimit)
-		err := c.engine.PushCredential(pctx, c.Proxy, credential)
-		timedOut := errors.Is(pctx.Err(), context.DeadlineExceeded)
-		cancel()
-		switch {
-		case err != nil && timedOut && ctx.Err() == nil:
-			// The engine's own text then varies from one attempt to the next.
-			why = fmt.Sprintf("the credential could not be given to the proxy: the push did not end within %s", pushLimit)
-		case err != nil:
-			why = "the credential could not be given to the proxy: " + err.Error()
+		var down bool
+		why, down = c.give(ctx, credential)
+		if down && ctx.Err() == nil {
+			if why = c.keepAgain(ctx); why == "" {
+				why, _ = c.give(ctx, credential)
+			}
 		}
 	}
 	if ctx.Err() != nil {
@@ -191,6 +220,41 @@ func (c *core) renew(ctx context.Context) {
 		fmt.Fprintln(c.out, "kiln core: the Claude credential is available again; runs start")
 	}
 	at("renewed")
+}
+
+// give pushes the credential to the proxy within pushLimit, and returns why
+// it could not, or "". down says that the push found the proxy down.
+func (c *core) give(ctx context.Context, credential string) (why string, down bool) {
+	pctx, cancel := context.WithTimeout(ctx, pushLimit)
+	defer cancel()
+	err := c.engine.PushCredential(pctx, c.Proxy, credential)
+	timedOut := errors.Is(pctx.Err(), context.DeadlineExceeded)
+	switch {
+	case err != nil && timedOut && ctx.Err() == nil:
+		// The engine's own text then varies from one attempt to the next.
+		return fmt.Sprintf("the credential could not be given to the proxy: the push did not end within %s", pushLimit), false
+	case err != nil:
+		return "the credential could not be given to the proxy: " + err.Error(), errors.Is(err, seal.ErrProxyDown)
+	}
+	return "", false
+}
+
+// keepAgain keeps the proxy as the core's start does, within keepLimit, and
+// returns why it could not, or "". Unlike at the start, a proxy that cannot be
+// kept does not end the core: the instance is paused, and the next attempt
+// tries again.
+func (c *core) keepAgain(ctx context.Context) string {
+	kctx, cancel := context.WithTimeout(ctx, keepLimit)
+	defer cancel()
+	_, err := c.engine.KeepProxy(kctx, seal.Proxy{Name: c.Proxy, Image: c.ProxyImage, Network: c.ProxyNetwork, Upstream: c.Upstream})
+	switch {
+	case err != nil && errors.Is(kctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil:
+		return fmt.Sprintf("the proxy %s is not running, and starting it again did not end within %s", c.Proxy, keepLimit)
+	case err != nil:
+		return fmt.Sprintf("the proxy %s is not running, and could not be started again: %s", c.Proxy, err)
+	}
+	fmt.Fprintf(c.out, "kiln core: the proxy %s was not running, and is started again\n", c.Proxy)
+	return ""
 }
 
 // setPaused writes the instance's pause. Only the test changes it.

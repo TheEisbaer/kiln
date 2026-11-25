@@ -267,7 +267,11 @@ func TestRenewal(t *testing.T) {
 	}
 	e.mu.Lock()
 	e.pushFails = false
+	nkeeps := len(e.keeps)
 	e.mu.Unlock()
+	if nkeeps != 1 {
+		t.Errorf("a push that failed for another reason, or no push, called KeepProxy: %d calls, want the start's one", nkeeps)
+	}
 	cmd.set(t, "echo cred-4")
 	clk.advance(retryEvery)
 	n++
@@ -644,4 +648,176 @@ func TestStartedWhilePaused(t *testing.T) {
 			t.Errorf("the instance's history is %+v, %v; want the one entry from before", h, err)
 		}
 	})
+}
+
+// proxyKept is what the core keeps the proxy with, as the test's configuration
+// has it.
+func proxyKept(b *bench) seal.Proxy {
+	return seal.Proxy{Name: "kiln-proxy", Image: "kiln-proxy", Network: "kiln", Upstream: b.cfg.Upstream}
+}
+
+// TestProxyKeptAtRenewal stops the proxy under a running core, as a restart of
+// the container engine does: the renewal's push finds it down, keeps it as at
+// the core's start and pushes the same credential again, in the same renewal
+// and with no pause.
+func TestProxyKeptAtRenewal(t *testing.T) {
+	b, clk, cmd := withClock(t, 3)
+	e := newFakeEngine()
+	r := b.start(t, e, 3)
+	clk.waiting(t, 1)
+
+	e.mu.Lock()
+	e.proxyDown = true
+	e.mu.Unlock()
+	cmd.set(t, "echo cred-2")
+	clk.advance(renewEvery)
+	if d := clk.waiting(t, 2); d != renewEvery {
+		t.Errorf("after the proxy was kept the renewal waits %s, want %s", d, renewEvery)
+	}
+	if got := e.pushed(); !slices.Equal(got, []string{"cred-1", "cred-2"}) {
+		t.Errorf("pushed %q, want cred-1 and cred-2", got)
+	}
+	e.mu.Lock()
+	keeps := slices.Clone(e.keeps)
+	e.mu.Unlock()
+	if want := proxyKept(b); len(keeps) != 2 || keeps[0] != want || keeps[1] != want {
+		t.Errorf("the proxy kept: %+v, want twice %+v", keeps, want)
+	}
+	if got := b.paused(t); got != "" {
+		t.Errorf("the store says paused %q", got)
+	}
+	if n := cmd.runs(t); n != 2 {
+		t.Errorf("the command ran %d times, want 2: the second push does not run it again", n)
+	}
+	r.stop(t)
+	out := r.out.String()
+	if got := strings.Count(out, "kiln core: the proxy kiln-proxy was not running, and is started again\n"); got != 1 {
+		t.Errorf("the terminal says the proxy was started again %d times:\n%s", got, out)
+	}
+	if strings.Contains(out, "paused:") || strings.Contains(out, "cred-") {
+		t.Errorf("the terminal:\n%s", out)
+	}
+	b.with(t, func(s *store.Store) {
+		if h, err := s.InstanceHistory(); err != nil || len(h) != 0 {
+			t.Errorf("the instance's history is %+v, %v; want none", h, err)
+		}
+	})
+}
+
+// TestProxyNotKept makes the keep fail, and then hang: the instance is paused
+// with the keep's reason, said once, every attempt tries the push and the keep
+// again, and a later renewal that can keep the proxy ends the pause.
+func TestProxyNotKept(t *testing.T) {
+	was := keepLimit
+	keepLimit = 200 * time.Millisecond
+	t.Cleanup(func() { keepLimit = was })
+	b, clk, cmd := withClock(t, 3)
+	e := newFakeEngine()
+	r := b.start(t, e, 3)
+	clk.waiting(t, 1)
+	set := func(down, fails, hangs bool) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.proxyDown, e.keepFails, e.keepHangs = down, fails, hangs
+	}
+	keeps := func() int {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return len(e.keeps)
+	}
+
+	set(true, true, false)
+	cmd.set(t, "echo cred-2")
+	clk.advance(renewEvery)
+	if d := clk.waiting(t, 2); d != retryEvery {
+		t.Errorf("after a keep that failed the renewal waits %s, want %s", d, retryEvery)
+	}
+	failed := unavailable + "the proxy kiln-proxy is not running, and could not be started again: the keep failed, as the test has it"
+	if got := b.paused(t); got != failed {
+		t.Errorf("the store says paused %q, want %q", got, failed)
+	}
+	clk.advance(retryEvery)
+	clk.waiting(t, 3)
+	if got := b.paused(t); got != failed {
+		t.Errorf("the store says paused %q, want %q", got, failed)
+	}
+	if n := keeps(); n != 3 {
+		t.Errorf("%d keeps, want the start's and one per attempt, 3", n)
+	}
+
+	set(true, true, true)
+	clk.advance(retryEvery)
+	clk.waiting(t, 4)
+	hung := unavailable + "the proxy kiln-proxy is not running, and starting it again did not end within 200ms"
+	if got := b.paused(t); got != hung {
+		t.Errorf("the store says paused %q, want %q", got, hung)
+	}
+
+	set(true, false, false)
+	cmd.set(t, "echo cred-3")
+	clk.advance(retryEvery)
+	if d := clk.waiting(t, 5); d != renewEvery {
+		t.Errorf("after the pause the renewal waits %s, want %s", d, renewEvery)
+	}
+	if got := b.paused(t); got != "" {
+		t.Errorf("after a keep that worked the store says paused %q", got)
+	}
+	if got := e.pushed(); len(got) != 2 || got[1] != "cred-3" {
+		t.Errorf("pushed %q, want cred-3 last", got)
+	}
+	r.stop(t)
+	out := r.out.String()
+	if got := strings.Count(out, "kiln core: paused: "); got != 2 {
+		t.Errorf("the terminal says paused %d times, want once per reason, 2:\n%s", got, out)
+	}
+	if got := strings.Count(out, "kiln core: the Claude credential is available again; runs start"); got != 1 {
+		t.Errorf("the terminal says the pause ended %d times:\n%s", got, out)
+	}
+	b.with(t, func(s *store.Store) {
+		h, err := s.InstanceHistory()
+		if err != nil || len(h) != 3 {
+			t.Errorf("the instance's history is %+v, %v; want two reasons and the end", h, err)
+		}
+	})
+}
+
+// TestProxyDownHoldsRun finds the proxy down when the tick is about to start a
+// run: the run does not start, the renewal is asked for at once, and not after
+// renewEvery, and keeps the proxy and pushes; a later tick starts the run.
+func TestProxyDownHoldsRun(t *testing.T) {
+	b, clk, _ := withClock(t, 1)
+	var card int64
+	b.with(t, func(s *store.Store) { card = b.card(t, s, store.Spec) })
+	e := newFakeEngine()
+	e.lookDown = 1 // the first tick's look; the core's own keep has not cleared it
+	r := b.start(t, e, 1)
+	e.waitStarted(t, group(card))
+	if d := clk.waiting(t, 2); d != renewEvery {
+		t.Errorf("after the renewal the renewal waits %s, want %s", d, renewEvery)
+	}
+	e.mu.Lock()
+	keeps, left := len(e.keeps), e.lookDown
+	down, kept := slices.Clone(e.startedDown), slices.Clone(e.keptAtStart)
+	e.mu.Unlock()
+	if keeps != 2 || left != 0 {
+		t.Errorf("the proxy was kept %d times and %d looks were left, want 2 and 0", keeps, left)
+	}
+	if len(down) != 0 {
+		t.Errorf("the runs of cards %v started while the proxy was down", down)
+	}
+	if len(kept) != 1 || kept[0] != 2 {
+		t.Errorf("the runs started with %v keeps before them, want one run after the second keep", kept)
+	}
+	if got := e.pushed(); len(got) != 2 {
+		t.Errorf("pushed %q, want the credential at the start and once more", got)
+	}
+	if got := b.paused(t); got != "" {
+		t.Errorf("the store says paused %q", got)
+	}
+	e.open(card, "exit")
+	b.waitEnded(t, e, card)
+	r.stop(t)
+	if got := strings.Count(r.out.String(), "kiln core: the proxy kiln-proxy is not running; it is started again and given the credential now"); got != 1 {
+		t.Errorf("the terminal says it %d times:\n%s", got, r.out.String())
+	}
 }

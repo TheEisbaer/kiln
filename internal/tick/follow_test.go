@@ -31,36 +31,42 @@ import (
 // called ("add"), before a created container starts ("start"), and after the
 // record and before Carry returns ("end").
 type fakeEngine struct {
-	mu         sync.Mutex
-	containers map[string]string // a run's container's status, by the run's ID
-	most       int               // the most containers there were at once
-	started    []int64           // the cards whose runs' containers started, in order
-	carrying   map[int64]int     // the calls of Carry under way, by card
-	carried    map[int64]int     // the calls of Carry so far, by card
-	twice      []int64           // the cards that had two calls of Carry at once
-	removed    []string          // the runs RemoveRun removed
-	lists      int               // the calls of ListRuns, one per tick and one per comparison
-	listFails  int               // the calls of ListRuns still to fail
-	inspects   int               // the calls of InspectRun
-	inspected  map[string]int    // the calls of InspectRun, by the run's ID
-	gates      map[string]chan struct{}
-	held       map[string]bool      // the points that hold a card's run, as <card>/<point>
-	fail       map[int64]bool       // the cards whose runs fail
-	errOnce    map[int64]bool       // the cards whose first Carry fails once its run is in the store
-	refuse     map[int64]bool       // the cards whose Carry always fails before starting
-	keeps      []seal.Proxy         // the calls of KeepProxy
-	pushes     []string             // the credentials pushed, in order
-	pushFails  bool                 // whether a push fails
-	pushHangs  bool                 // whether a push hangs until its context ends
-	firstTick  int                  // the pushes when the first tick began, -1 before it
-	keptAtList int                  // the calls of KeepProxy when ListRuns was last called
-	inputs     map[int64]run.Inputs // the inputs of each card's last Carry
-	reviews    map[int64][]string   // the first lines of a card's reviews, taken in order; then Verdict: passes
-	reviewed   map[string]string    // the review each review run was given, by the run's ID
-	saves      map[int64]bool       // the cards whose implement runs save a commit
-	models     map[string]string    // the model in the inputs of each run's Carry, by the run's ID
-	builds     []seal.Program       // the calls of Build
-	buildFails bool                 // whether a build fails
+	mu          sync.Mutex
+	containers  map[string]string // a run's container's status, by the run's ID
+	most        int               // the most containers there were at once
+	started     []int64           // the cards whose runs' containers started, in order
+	carrying    map[int64]int     // the calls of Carry under way, by card
+	carried     map[int64]int     // the calls of Carry so far, by card
+	twice       []int64           // the cards that had two calls of Carry at once
+	removed     []string          // the runs RemoveRun removed
+	lists       int               // the calls of ListRuns, one per tick and one per comparison
+	listFails   int               // the calls of ListRuns still to fail
+	inspects    int               // the calls of InspectRun
+	inspected   map[string]int    // the calls of InspectRun, by the run's ID
+	gates       map[string]chan struct{}
+	held        map[string]bool      // the points that hold a card's run, as <card>/<point>
+	fail        map[int64]bool       // the cards whose runs fail
+	errOnce     map[int64]bool       // the cards whose first Carry fails once its run is in the store
+	refuse      map[int64]bool       // the cards whose Carry always fails before starting
+	keeps       []seal.Proxy         // the calls of KeepProxy
+	pushes      []string             // the credentials pushed, in order
+	pushFails   bool                 // whether a push fails
+	pushHangs   bool                 // whether a push hangs until its context ends
+	proxyDown   bool                 // whether the proxy is down: a push and ProxyUp say so, until a KeepProxy succeeds
+	lookDown    int                  // the calls of ProxyUp, from now on, that find the proxy gone down: it stays so until a KeepProxy succeeds
+	keepFails   bool                 // whether KeepProxy fails, leaving proxyDown as it is
+	keepHangs   bool                 // whether KeepProxy hangs until its context ends
+	startedDown []int64              // the cards whose runs Carry was given to start while the proxy was down
+	keptAtStart []int                // the calls of KeepProxy so far at each Carry given a run to start, in order
+	firstTick   int                  // the pushes when the first tick began, -1 before it
+	keptAtList  int                  // the calls of KeepProxy when ListRuns was last called
+	inputs      map[int64]run.Inputs // the inputs of each card's last Carry
+	reviews     map[int64][]string   // the first lines of a card's reviews, taken in order; then Verdict: passes
+	reviewed    map[string]string    // the review each review run was given, by the run's ID
+	saves       map[int64]bool       // the cards whose implement runs save a commit
+	models      map[string]string    // the model in the inputs of each run's Carry, by the run's ID
+	builds      []seal.Program       // the calls of Build
+	buildFails  bool                 // whether a build fails
 	// The outcomes of a card's runs, taken in order, one per run: "fail",
 	// "oom", "refused" or "finish"; then as fail and saves say. outcome is the
 	// outcome each run was given, by the run's ID, the same for every verdict
@@ -165,12 +171,37 @@ func newFakeEngine() *fakeEngine {
 		removeFails: map[string]bool{}, breakOff: map[int64]bool{}, proposals: map[int64]string{}}
 }
 
-func (e *fakeEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {
+func (e *fakeEngine) KeepProxy(ctx context.Context, p seal.Proxy) (bool, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.keeps = append(e.keeps, p)
 	e.book.Events = append(e.book.Events, "keep "+p.Image+" "+e.book.id(p.Image))
+	hangs := e.keepHangs
+	e.mu.Unlock()
+	if hangs {
+		<-ctx.Done()
+		return false, fmt.Errorf("docker run: %v at %s", ctx.Err(), time.Now().Format(time.RFC3339Nano))
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.keepFails {
+		return false, errors.New("the keep failed, as the test has it")
+	}
+	e.proxyDown = false
 	return len(e.keeps) > 1, nil
+}
+
+func (e *fakeEngine) ProxyUp(context.Context, string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.lookDown > 0 {
+		e.lookDown--
+		e.proxyDown = true
+		return fmt.Errorf("the proxy kiln-proxy is exited: %w", seal.ErrProxyDown)
+	}
+	if e.proxyDown {
+		return fmt.Errorf("the proxy kiln-proxy is exited: %w", seal.ErrProxyDown)
+	}
+	return nil
 }
 
 func (e *fakeEngine) PushCredential(ctx context.Context, _, credential string) error {
@@ -183,6 +214,9 @@ func (e *fakeEngine) PushCredential(ctx context.Context, _, credential string) e
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.proxyDown {
+		return fmt.Errorf("the proxy kiln-proxy is exited: %w", seal.ErrProxyDown)
+	}
 	if e.pushFails {
 		return errors.New("the push failed, as the test has it")
 	}
@@ -364,6 +398,12 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 	refuse := e.refuse[card]
 	other := e.otherInstruction[card]
 	breakOff := e.breakOff[card]
+	if starting != nil {
+		if e.proxyDown {
+			e.startedDown = append(e.startedDown, card)
+		}
+		e.keptAtStart = append(e.keptAtStart, len(e.keeps))
+	}
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()

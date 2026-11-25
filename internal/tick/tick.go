@@ -683,6 +683,9 @@ type engine interface {
 	ReadDocument(runs, id, kind string) (run.Document, error)
 	KeepProxy(ctx context.Context, p seal.Proxy) (bool, error)
 	PushCredential(ctx context.Context, proxy, credential string) error
+	// ProxyUp is nil when the proxy runs, and wraps seal.ErrProxyDown when it
+	// is not there or does not.
+	ProxyUp(ctx context.Context, proxy string) error
 	Build(ctx context.Context, p seal.Program, src io.Reader, out io.Writer) error
 	BuildImage(ctx context.Context, im seal.Image, src io.Reader) error
 	ImageID(ctx context.Context, ref string) (string, error)
@@ -701,6 +704,8 @@ func (sealed) KeepProxy(ctx context.Context, p seal.Proxy) (bool, error) {
 func (sealed) PushCredential(ctx context.Context, proxy, credential string) error {
 	return seal.PushCredential(ctx, proxy, credential)
 }
+
+func (sealed) ProxyUp(ctx context.Context, proxy string) error { return seal.ProxyUp(ctx, proxy) }
 
 func (sealed) Build(ctx context.Context, p seal.Program, src io.Reader, out io.Writer) error {
 	return seal.Build(ctx, p, src, out)
@@ -1220,6 +1225,11 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 	}
 	switch decide(inFlight, container, recorded) {
 	case start:
+		// A run started against a proxy that is down fails; the renewal keeps
+		// the proxy, and a later tick starts the run.
+		if c.proxyIsDown(ctx) {
+			return nil, nil
+		}
 		f.starting = func() error {
 			mark("before-add")
 			if err := c.store.AddRun(f.row, c.Runs); err != nil {
