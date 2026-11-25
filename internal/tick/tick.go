@@ -32,6 +32,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -160,7 +161,7 @@ func (c Config) repoOf(card store.Card) (settings.Repo, error) {
 			return r, nil
 		}
 	}
-	return settings.Repo{}, fmt.Errorf("card %d is of the repo %q, which this instance does not have", card.ID, card.Repo)
+	return settings.Repo{}, fmt.Errorf("card %d is of the repo %q, which is not in the settings", card.ID, card.Repo)
 }
 
 // checkRepos refuses, with the reason, repos that the core cannot work with:
@@ -184,6 +185,40 @@ func checkRepos(cfg Config) error {
 	if len(cfg.Repos) > 1 {
 		return errors.New("an instance of more than one repo is not built yet: publishing, the check result command, " +
 			"the tests at the Git host and the update still work on Kiln's own repo only")
+	}
+	return nil
+}
+
+// checkOpenCards refuses the start when a card that is not done or dropped is
+// of a repo that is not in the settings, naming each such repo and its cards.
+// It only reads the store.
+func checkOpenCards(s *store.Store, cfg Config) error {
+	board, err := s.Board()
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for _, r := range cfg.repos() {
+		have[r.Name] = true
+	}
+	var order []string
+	open := map[string][]string{}
+	for _, c := range board {
+		if c.Stage == store.Done || have[c.Repo] {
+			continue
+		}
+		if open[c.Repo] == nil {
+			order = append(order, c.Repo)
+		}
+		open[c.Repo] = append(open[c.Repo], strconv.FormatInt(c.ID, 10))
+	}
+	var parts []string
+	for _, name := range order {
+		parts = append(parts, fmt.Sprintf("the repo %q is not in the settings, and its cards %s are not done or dropped; "+
+			"put the repo back into the settings to finish or drop them", name, strings.Join(open[name], ", ")))
+	}
+	if len(parts) > 0 {
+		return errors.New(strings.Join(parts, "; "))
 	}
 	return nil
 }
@@ -292,18 +327,19 @@ func openStore(dir string) (*store.Store, *os.File, error) {
 	return s, lock, nil
 }
 
-// AddCard is `kiln card`: under the lock, it writes a card with the text and
-// makes it wait in spec for a run, and returns the card's ID. It stands in for
+// AddCard is `kiln card`: under the lock, it writes a card of the repo, named
+// by the caller, with the text and makes it wait in spec for a run, and
+// returns the card's ID. It stands in for
 // the API, which is the only way to change the store (ADR 0044), and never
 // writes beside a running core.
-func AddCard(dir, text string) (int64, error) {
+func AddCard(dir, repo, text string) (int64, error) {
 	s, lock, err := openStore(dir)
 	if err != nil {
 		return 0, err
 	}
 	defer lock.Close()
 	defer s.Close()
-	c, err := s.Create(text)
+	c, err := s.CreateIn(repo, text, 0)
 	if err != nil {
 		return 0, err
 	}
@@ -438,6 +474,9 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 			return fmt.Errorf("automatic merging is not turned off: %w", err)
 		}
 		fmt.Fprintln(out, "kiln core: automatic merging is off until you turn it on from the screen")
+	}
+	if err := checkOpenCards(s, cfg); err != nil {
+		return err
 	}
 	fillCosts(s, filepath.Join(cfg.Data, "runs"), out)
 	instance, err := s.Instance()

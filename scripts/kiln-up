@@ -18,6 +18,12 @@
 #                      ~/.claude/settings.json; neither value is ever printed
 #   KILN_PUBLISH_COMMAND, KILN_CHECK_RESULT_COMMAND
 #                      none: no card is published and no check is read
+#   KILN_SETTINGS      none: the settings file of the instance's repos. When
+#                      it is set the core is started with --settings and none
+#                      of --repo, --spec-hosts, --publish-command and
+#                      --check-result-command, KILN_REPO, KILN_ORIGIN and the
+#                      two commands above are not used, and no copy is made
+#                      or fetched: the copies are the file's
 #
 # Every step can fail or be killed and the script be run again: what it writes
 # is written beside its place and renamed only once whole.
@@ -42,6 +48,11 @@ origin=${KILN_ORIGIN:-https://github.com/TheEisbaer/kiln.git}
 model=${KILN_MODEL:-claude-opus-5-5}
 implement_model=${KILN_IMPLEMENT_MODEL-}
 cache=${XDG_CACHE_HOME:-$HOME/.cache}/kiln
+kiln_settings=${KILN_SETTINGS-}
+
+if [ -n "$kiln_settings" ] && [ ! -f "$kiln_settings" ]; then
+    die "KILN_SETTINGS names $kiln_settings, which is not a file"
+fi
 
 [ -f "$src/go.mod" ] && [ -d "$src/cmd/core" ] ||
     die "$src is not Kiln's source (no go.mod or no cmd/core); set KILN_SOURCE"
@@ -179,7 +190,11 @@ fi
 
 # The instance's copy: cloned once, beside its place, and renamed whole. A
 # copy that is there is used as it is; one that is not bare is not touched.
-if [ ! -e "$repo" ]; then
+# With a settings file the copies are the file's, and the core fetches their
+# main itself.
+if [ -n "$kiln_settings" ]; then
+    :
+elif [ ! -e "$repo" ]; then
     rm -rf "$repo.new"
     git clone --bare "$origin" "$repo.new" || die "cloning $origin failed"
     mv "$repo.new" "$repo"
@@ -188,8 +203,10 @@ elif [ "$(git -C "$repo" rev-parse --is-bare-repository 2>/dev/null || :)" != tr
 fi
 # A fetch that fails is said, and the main that is there is used, as the core
 # does.
-GIT_TERMINAL_PROMPT=0 git -C "$repo" fetch --quiet origin +refs/heads/main:refs/heads/main ||
-    echo "kiln-up: fetching main into $repo failed; the main that is there is used" >&2
+if [ -z "$kiln_settings" ]; then
+    GIT_TERMINAL_PROMPT=0 git -C "$repo" fetch --quiet origin +refs/heads/main:refs/heads/main ||
+        echo "kiln-up: fetching main into $repo failed; the main that is there is used" >&2
+fi
 
 # The flags this program has, from its usage, so that an older Kiln starts too.
 usage=$("$data/kiln" 2>&1 || :)
@@ -200,7 +217,12 @@ has() {
     esac
 }
 
-set -- launch --data "$data" --repo "$repo" --model "$model"
+if [ -n "$kiln_settings" ]; then
+    has --settings || die "KILN_SETTINGS is set, but this program has no --settings"
+    set -- launch --data "$data" --settings "$kiln_settings" --model "$model"
+else
+    set -- launch --data "$data" --repo "$repo" --model "$model"
+fi
 if [ -z "$implement_model" ]; then
     :
 elif has --implement-model; then
@@ -208,28 +230,39 @@ elif has --implement-model; then
 else
     echo "kiln-up: KILN_IMPLEMENT_MODEL is set, but this program has no --implement-model, so it is not given"
 fi
-has --spec-hosts && set -- "$@" --spec-hosts '*'
 
-# The developer's commands, which live outside the repo (ADR 0052). Their
-# values are not printed.
-unset_parts=
-lacking=
-if [ -z "${KILN_PUBLISH_COMMAND-}" ]; then
-    unset_parts="KILN_PUBLISH_COMMAND is not set, so no card is published"
-elif has --publish-command; then
-    set -- "$@" --publish-command "$KILN_PUBLISH_COMMAND"
+if [ -n "$kiln_settings" ]; then
+    # The file holds the repos and their commands. Only the names are said.
+    ignored=
+    for name in KILN_REPO KILN_ORIGIN KILN_PUBLISH_COMMAND KILN_CHECK_RESULT_COMMAND; do
+        eval "value=\${$name-}"
+        [ -z "$value" ] || ignored="${ignored:+$ignored, }$name"
+    done
+    [ -z "$ignored" ] || echo "kiln-up: KILN_SETTINGS is set, so $ignored are not used; the settings file holds the repos"
 else
-    lacking=KILN_PUBLISH_COMMAND
+    has --spec-hosts && set -- "$@" --spec-hosts '*'
+
+    # The developer's commands, which live outside the repo (ADR 0052). Their
+    # values are not printed.
+    unset_parts=
+    lacking=
+    if [ -z "${KILN_PUBLISH_COMMAND-}" ]; then
+        unset_parts="KILN_PUBLISH_COMMAND is not set, so no card is published"
+    elif has --publish-command; then
+        set -- "$@" --publish-command "$KILN_PUBLISH_COMMAND"
+    else
+        lacking=KILN_PUBLISH_COMMAND
+    fi
+    if [ -z "${KILN_CHECK_RESULT_COMMAND-}" ]; then
+        unset_parts="${unset_parts:+$unset_parts; }KILN_CHECK_RESULT_COMMAND is not set, so no check is read"
+    elif has --check-result-command; then
+        set -- "$@" --check-result-command "$KILN_CHECK_RESULT_COMMAND"
+    else
+        lacking="${lacking:+$lacking and }KILN_CHECK_RESULT_COMMAND"
+    fi
+    [ -z "$unset_parts" ] || echo "kiln-up: $unset_parts"
+    [ -z "$lacking" ] || echo "kiln-up: $lacking is set, but this program has no flag for it, so it is not given"
 fi
-if [ -z "${KILN_CHECK_RESULT_COMMAND-}" ]; then
-    unset_parts="${unset_parts:+$unset_parts; }KILN_CHECK_RESULT_COMMAND is not set, so no check is read"
-elif has --check-result-command; then
-    set -- "$@" --check-result-command "$KILN_CHECK_RESULT_COMMAND"
-else
-    lacking="${lacking:+$lacking and }KILN_CHECK_RESULT_COMMAND"
-fi
-[ -z "$unset_parts" ] || echo "kiln-up: $unset_parts"
-[ -z "$lacking" ] || echo "kiln-up: $lacking is set, but this program has no flag for it, so it is not given"
 
 # The screen, once it answers, or after 60 seconds; without curl after 3.
 (

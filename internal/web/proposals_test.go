@@ -282,3 +282,43 @@ func TestProposalsPage(t *testing.T) {
 		t.Errorf("the proposals' part is at %d, not between the strip at %d and the measures at %d", proposals, strip, measures)
 	}
 }
+
+// TestMakeCardOfGoneRepo refuses a card from a proposal noticed on a card of a
+// repo that is not in the settings, writes nothing, and still lets the
+// proposal be dismissed; a proposal on a card of kiln makes a card.
+func TestMakeCardOfGoneRepo(t *testing.T) {
+	f := newFixture(t)
+	c, err := f.store.CreateIn("second", "A card of second.", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Move(c.ID, store.State{Stage: store.Review, WaitsFor: store.Run}, store.CauseRule); err != nil {
+		t.Fatal(err)
+	}
+	run := fmt.Sprintf("ab12cd34-%d-1", c.ID)
+	if err := f.store.AddRun(store.RunRow{ID: run, Card: c.ID, Commit: "c0ffee", Model: "m", Effort: "high"}, 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.EndRun(run, store.Finished, "sends back; exit 0", needsYou, store.Cost{}); err != nil {
+		t.Fatal(err)
+	}
+	f.propose(t, c.ID, run, "A leak", "Another")
+	kilnCard, kilnRun := f.reviewed(t, "A card of kiln.")
+	f.propose(t, kilnCard, kilnRun, "From kiln")
+	before := len(decode[boardJSON](t, f.do(t, "GET", "/api/board", "")).Cards)
+
+	out := f.decideProposal(t, 1, `{"action":"make-card"}`)
+	want := `proposal 1 was noticed on a card of the repo "second", which is not in the settings, so no card is made from it; dismiss it instead`
+	if out["code"] != float64(409) || out["error"] != want {
+		t.Errorf("make-card on a card of a gone repo: %v, want 409 and %q", out, want)
+	}
+	if after := len(decode[boardJSON](t, f.do(t, "GET", "/api/board", "")).Cards); after != before {
+		t.Errorf("the board has %d cards after the refusal, want %d", after, before)
+	}
+	if out := f.decideProposal(t, 2, `{"action":"dismiss"}`); out["code"] != float64(200) {
+		t.Errorf("dismiss: %v, want 200", out)
+	}
+	if out := f.decideProposal(t, 3, `{"action":"make-card"}`); out["code"] != float64(201) {
+		t.Errorf("make-card on a card of kiln: %v, want 201", out)
+	}
+}
