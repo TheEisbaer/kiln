@@ -154,6 +154,10 @@ type Info struct {
 	// Version is the commit the core's program was built from, or empty for
 	// a program built by hand; the board's header shows it.
 	Version string
+	// Limits are the repos' limits of cards in progress (ADR 0014), by
+	// which a new card and the developer's start are queued; nil, or a repo
+	// left out, has store.DefaultLimit.
+	Limits store.Limits
 	// Accepting says whether the core accepts moves: until its report, every
 	// POST is refused (ADR 0036, rule 3). Nil accepts.
 	Accepting func() bool
@@ -324,9 +328,13 @@ type (
 		// Measures are the board's measures over the whole history.
 		Measures measuresJSON `json:"measures"`
 	}
+	// repoJSON: Limit is the repo's limit of cards in progress, and
+	// InProgress its cards in spec, implement or review (ADR 0014).
 	repoJSON struct {
-		Name string `json:"name"`
-		Copy string `json:"copy"`
+		Name       string `json:"name"`
+		Copy       string `json:"copy"`
+		Limit      int    `json:"limit"`
+		InProgress int    `json:"in_progress"`
 	}
 	// measuresJSON: PerMerged is null with no merged card.
 	measuresJSON struct {
@@ -701,8 +709,14 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 	}
 	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Version: h.info.Version, Repo: h.info.Repo, Models: h.models(), Runs: h.info.Runs, Now: time.Now().UTC(),
 		Repos: []repoJSON{}, Paused: paused, MergingOff: merging, Cards: []tileJSON{}, Proposals: []proposalJSON{}}
+	busy := map[string]int{}
+	for _, c := range cards {
+		if c.Stage == store.Spec || c.Stage == store.Implement || c.Stage == store.Review {
+			busy[c.Repo]++
+		}
+	}
 	for _, r := range h.info.Repos {
-		b.Repos = append(b.Repos, repoJSON{Name: r.Name, Copy: r.Copy})
+		b.Repos = append(b.Repos, repoJSON{Name: r.Name, Copy: r.Copy, Limit: h.info.Limits.Of(r.Name), InProgress: busy[r.Name]})
 	}
 	headlines := map[int64]string{}
 	for _, c := range cards {
@@ -885,7 +899,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 
 // create writes a new card of its repo, with its predecessors and the card it
 // fixes, if any, and starts it: to spec, waiting for a run, or queued while a
-// predecessor is not done. A repo the instance does not have, none with more
+// predecessor is not done or its repo has no room under its limit. A repo the instance does not have, none with more
 // than one, and a predecessor the store refuses are said with the reason, and
 // no card is written.
 func (h *handler) create(w http.ResponseWriter, r *http.Request) {
@@ -914,7 +928,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err == nil {
-		c, err = h.store.Start(c.ID)
+		c, err = h.store.StartWith(c.ID, h.info.Limits)
 	}
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
@@ -987,7 +1001,7 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	opts := store.Options{Publishing: h.info.Publishing[card.Repo]}
+	opts := store.Options{Publishing: h.info.Publishing[card.Repo], Limits: h.info.Limits}
 	if body.Action == store.Publish {
 		// A change to the workflow files is published only after the
 		// developer has seen them and said yes, for this very change, which

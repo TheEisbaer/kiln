@@ -226,6 +226,7 @@ func cardCommand(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	names := []string{store.KilnRepo}
+	limits := store.Limits{}
 	if given {
 		repos, err := settings.Load(*settingsFile)
 		if err != nil {
@@ -235,6 +236,7 @@ func cardCommand(args []string, stdout, stderr io.Writer) int {
 		names = names[:0]
 		for _, r := range repos {
 			names = append(names, r.Name)
+			limits[r.Name] = r.Limit
 		}
 	}
 	repo := *repoName
@@ -248,7 +250,7 @@ func cardCommand(args []string, stdout, stderr io.Writer) int {
 	case repo == "":
 		repo = names[0]
 	}
-	id, err := tick.AddCard(*data, repo, fs.Arg(0))
+	id, err := tick.AddCard(*data, repo, fs.Arg(0), limits[repo])
 	if err != nil {
 		fmt.Fprintln(stderr, "kiln card:", err)
 		return 1

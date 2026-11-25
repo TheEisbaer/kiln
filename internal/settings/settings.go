@@ -33,6 +33,9 @@ type Repo struct {
 	// Own is true for Kiln's own repo, whose merges update the core
 	// (ADR 0019, ADR 0037).
 	Own bool
+	// Limit is the most cards of the repo in progress at once (ADR 0014);
+	// 0 is the default, store.DefaultLimit.
+	Limit int
 }
 
 // MaxName is the longest name a repo can have.
@@ -42,8 +45,8 @@ var name = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 
 // Check refuses, with the reason, a list of repos that is empty, has a name
 // that is empty, too long or not of ASCII letters, digits and -, has a name
-// twice, has a repo with no copy, or does not mark exactly one repo as Kiln's
-// own.
+// twice, has a repo with no copy or a limit below 0, or does not mark exactly
+// one repo as Kiln's own.
 func Check(repos []Repo) error {
 	if len(repos) == 0 {
 		return errors.New("the instance has no repo")
@@ -62,6 +65,8 @@ func Check(repos []Repo) error {
 			return fmt.Errorf("the repo name %q is given twice", r.Name)
 		case r.Copy == "":
 			return fmt.Errorf("the repo %q has no copy", r.Name)
+		case r.Limit < 0:
+			return fmt.Errorf("the limit of the repo %q is %d; it is at least 1", r.Name, r.Limit)
 		}
 		seen[r.Name] = true
 		if r.Own {
@@ -94,12 +99,15 @@ type fileRepo struct {
 	PublishCommand     string   `json:"publish_command"`
 	CheckResultCommand string   `json:"check_result_command"`
 	SpecHosts          []string `json:"spec_hosts"`
+	// Limit is read as a pointer, so that a missing member and 0 differ.
+	Limit *int `json:"limit"`
 }
 
 // Load reads the settings file at path, one JSON object with the member
 // repos, and returns its repos in order, after Check. It refuses, with the
 // reason, a file over 1 MiB, a member it does not know, a value of the wrong
-// type, anything after the object, and a copy that is not an absolute path.
+// type, anything after the object, a copy that is not an absolute path, and a
+// limit below 1. A repo without a limit has Limit 0, the default.
 // It only reads.
 func Load(path string) ([]Repo, error) {
 	f, err := os.Open(path)
@@ -128,8 +136,15 @@ func Load(path string) ([]Repo, error) {
 		if r.Copy != "" && !filepath.IsAbs(r.Copy) {
 			return nil, fmt.Errorf("the settings file %s: the copy of the repo %q is not an absolute path: %q", path, r.Name, r.Copy)
 		}
+		limit := 0
+		if r.Limit != nil {
+			if *r.Limit < 1 {
+				return nil, fmt.Errorf("the settings file %s: the limit of the repo %q is %d; it is at least 1", path, r.Name, *r.Limit)
+			}
+			limit = *r.Limit
+		}
 		repos = append(repos, Repo{Name: r.Name, Copy: r.Copy, Own: r.Own, PublishCommand: r.PublishCommand,
-			CheckResultCommand: r.CheckResultCommand, SpecHosts: r.SpecHosts})
+			CheckResultCommand: r.CheckResultCommand, SpecHosts: r.SpecHosts, Limit: limit})
 	}
 	if err := Check(repos); err != nil {
 		return nil, fmt.Errorf("the settings file %s: %w", path, err)

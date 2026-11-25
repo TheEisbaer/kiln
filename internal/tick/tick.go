@@ -142,6 +142,16 @@ func (c Config) repos() []settings.Repo {
 		CheckResultCommand: c.CheckResultCommand, SpecHosts: c.Hosts, Own: true}}
 }
 
+// limits are the repos' limits of cards in progress, by name (ADR 0014); a
+// repo whose Limit is 0 has the default.
+func (c Config) limits() store.Limits {
+	l := store.Limits{}
+	for _, r := range c.repos() {
+		l[r.Name] = r.Limit
+	}
+	return l
+}
+
 // own is Kiln's own repo, the one marked Own (ADR 0019, ADR 0037).
 func (c Config) own() settings.Repo {
 	repos := c.repos()
@@ -323,11 +333,13 @@ func openStore(dir string) (*store.Store, *os.File, error) {
 }
 
 // AddCard is `kiln card`: under the lock, it writes a card of the repo, named
-// by the caller, with the text and makes it wait in spec for a run, and
+// by the caller, with the text and starts it as the developer's start does,
+// under the repo's limit of cards in progress, 0 for the default (ADR 0014):
+// to spec, waiting for a run, or queued while the repo has no room. It
 // returns the card's ID. It stands in for
 // the API, which is the only way to change the store (ADR 0044), and never
 // writes beside a running core.
-func AddCard(dir, repo, text string) (int64, error) {
+func AddCard(dir, repo, text string, limit int) (int64, error) {
 	s, lock, err := openStore(dir)
 	if err != nil {
 		return 0, err
@@ -338,7 +350,7 @@ func AddCard(dir, repo, text string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if _, err := s.Move(c.ID, waiting, store.CauseDeveloper); err != nil {
+	if _, err := s.StartWith(c.ID, store.Limits{repo: limit}); err != nil {
 		return 0, err
 	}
 	return c.ID, nil
@@ -759,7 +771,7 @@ func (c *core) serve() (func(), error) {
 	}
 	info := web.Info{Instance: c.instance, Repo: c.own().Copy, Repos: repos, Model: c.model(store.Spec),
 		ImplementModel: c.model(store.Implement), ReviewModel: c.model(store.Review), Runs: c.Runs, Change: c.change,
-		Page: c.Page, Publishing: publishing, Version: versionOf(c.Version), Accepting: c.acting.Load}
+		Page: c.Page, Publishing: publishing, Limits: c.limits(), Version: versionOf(c.Version), Accepting: c.acting.Load}
 	h, err := web.Handler(c.store, info, c.activity, ln.Addr().String())
 	if err != nil {
 		ln.Close()
@@ -785,9 +797,9 @@ func (c *core) serve() (func(), error) {
 }
 
 // tick is one tick: the sweep; the queued cards whose predecessors are done
-// released (release), so that their spec runs can start in this tick; main
-// brought up to date and the cards at the Git host looked after
-// (atHostRound); then each card that waits for a run, in
+// and whose repo has room released (release), so that their spec runs can
+// start in this tick; main brought up to date and the cards at the Git host
+// looked after (atHostRound); then each card that waits for a run, in
 // the order of store.Waiting, except that a card whose last start failed
 // before its run was in the store comes after the others: its follower takes
 // a place until it fails, and would otherwise keep the cards behind it from
@@ -886,11 +898,11 @@ func (c *core) fetchFor(cards []int64, inFlight map[int64]string, paused string)
 }
 
 // release ends the wait of the queued cards whose predecessors are no longer
-// open (store.Release), also while the instance is paused: a released card
-// only waits for a run. Each card moved is said in one line; an error is
-// printed, and the tick goes on.
+// open and whose repo has room under its limit (store.Release), also while
+// the instance is paused: a released card only waits for a run. Each entry the
+// rule writes is said in one line; an error is printed, and the tick goes on.
 func (c *core) release() {
-	moved, err := c.store.Release()
+	moved, err := c.store.Release(c.limits())
 	for _, r := range moved {
 		line := r.Reason
 		if r.State == waiting {

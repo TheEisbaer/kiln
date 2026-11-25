@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/TheEisbaer/kiln/internal/store"
@@ -13,6 +14,13 @@ import (
 // newReposFixture is a fixture whose handler is told the instance's repos, by
 // name, each with a copy /data/<name>.git.
 func newReposFixture(t *testing.T, names ...string) *fixture {
+	t.Helper()
+	return newLimitsFixture(t, nil, names...)
+}
+
+// newLimitsFixture is newReposFixture with the repos' limits of cards in
+// progress.
+func newLimitsFixture(t *testing.T, limits store.Limits, names ...string) *fixture {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "store.db")
 	s, err := store.Open(path)
@@ -25,7 +33,7 @@ func newReposFixture(t *testing.T, names ...string) *fixture {
 		repos = append(repos, Repo{Name: n, Copy: "/data/" + n + ".git"})
 	}
 	act := NewActivity()
-	h, err := Handler(s, Info{Instance: "ab12cd34", Repo: "/data/repo.git", Repos: repos, Model: "claude-opus-5-5", Runs: 3}, act, addr)
+	h, err := Handler(s, Info{Instance: "ab12cd34", Repo: "/data/repo.git", Repos: repos, Model: "claude-opus-5-5", Runs: 3, Limits: limits}, act, addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,16 +148,76 @@ func TestPublishingPerRepo(t *testing.T) {
 	}
 }
 
-// TestBoardRepos answers every repo's name and copy in the board, in order,
-// beside Kiln's own copy, and none for an instance told no repos.
+// TestBoardRepos answers every repo's name, copy, limit and cards in progress
+// in the board, in order, beside Kiln's own copy, and none for an instance
+// told no repos. A card in the backlog or in done is not in progress.
 func TestBoardRepos(t *testing.T) {
-	b := decode[boardJSON](t, newReposFixture(t, "kiln", "second").do(t, "GET", "/api/board", ""))
-	want := []repoJSON{{Name: "kiln", Copy: "/data/kiln.git"}, {Name: "second", Copy: "/data/second.git"}}
+	f := newLimitsFixture(t, store.Limits{"kiln": 1}, "kiln", "second")
+	for _, st := range []store.State{{Stage: store.Review, WaitsFor: store.Host}, {Stage: store.Backlog, WaitsFor: store.Developer},
+		{Stage: store.Done, WaitsFor: store.Nothing}} {
+		c, err := f.store.CreateIn("kiln", "a card", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.store.Move(c.ID, st, store.CauseRule); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := decode[boardJSON](t, f.do(t, "GET", "/api/board", ""))
+	want := []repoJSON{{Name: "kiln", Copy: "/data/kiln.git", Limit: 1, InProgress: 1}, {Name: "second", Copy: "/data/second.git", Limit: 3}}
 	if !reflect.DeepEqual(b.Repos, want) || b.Repo != "/data/repo.git" {
 		t.Errorf("the board's repos are %+v and its repo %q, want %+v and /data/repo.git", b.Repos, b.Repo, want)
 	}
 	w := newReposFixture(t).do(t, "GET", "/api/board", "")
 	if got := decode[map[string]any](t, w)["repos"]; !reflect.DeepEqual(got, []any{}) {
 		t.Errorf("the board's repos without any: %#v, want []", got)
+	}
+}
+
+// TestCreateUnderLimit has kiln at its limit of 1: a second card of kiln is
+// queued for room, with the store's words as its reason, while a card of
+// second starts; and the developer's start of a kiln card in the backlog
+// queues it too.
+func TestCreateUnderLimit(t *testing.T) {
+	f := newLimitsFixture(t, store.Limits{"kiln": 1}, "kiln", "second")
+	if w := f.do(t, "POST", "/api/cards", `{"text":"the first","repo":"kiln"}`); w.Code != 201 || decode[cardJSON](t, w).Stage != store.Spec {
+		t.Fatalf("the first card: %d %s", w.Code, w.Body)
+	}
+	w := f.do(t, "POST", "/api/cards", `{"text":"the second","repo":"kiln"}`)
+	c := decode[cardJSON](t, w)
+	if want := "waits for room in its repo kiln, whose limit is 1 cards in progress"; w.Code != 201 || c.Stage != store.Backlog ||
+		c.WaitsFor != store.Room || c.Reason != want || len(c.QueuedFor) != 0 {
+		t.Errorf("the second kiln card: %d %+v, want 201 queued with %q", w.Code, c.tileJSON, want)
+	}
+	if h := c.History; len(h) == 0 || h[len(h)-1].Note != "" {
+		t.Errorf("the start's entry has a note: %+v", h)
+	}
+	w = f.do(t, "POST", "/api/cards", `{"text":"of second","repo":"second"}`)
+	if c := decode[cardJSON](t, w); w.Code != 201 || c.Stage != store.Spec || c.WaitsFor != store.Run {
+		t.Errorf("the card of second: %d %s, want 201 in spec waiting for a run", w.Code, w.Body)
+	}
+
+	b, err := f.store.CreateIn("kiln", "in the backlog", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = f.do(t, "POST", fmt.Sprintf("/api/cards/%d/decide", b.ID), `{"action":"start"}`)
+	if c := decode[cardJSON](t, w); w.Code != 200 || c.Stage != store.Backlog || c.WaitsFor != store.Room {
+		t.Errorf("start of a kiln card: %d %s, want 200 queued", w.Code, w.Body)
+	}
+}
+
+// TestReposPage holds the page's parts for more than one repo: the dialog's
+// field Repo and what addCard sends, each option's cards in progress, the
+// card page's "In" and the tile's label.
+func TestReposPage(t *testing.T) {
+	page := newFixture(t).do(t, "GET", "/", "").Body.String()
+	for _, want := range []string{
+		`id="d-repo"`, `<label for="d-repo">Repo</label>`, `body.repo = $("d-repo").value`, `" in progress"`,
+		`"In " + c.repo`, `el("span", "repo-of", c.repo)`, `.tile .repo-of`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the page lacks %s", want)
+		}
 	}
 }

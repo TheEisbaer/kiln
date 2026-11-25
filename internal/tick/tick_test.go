@@ -308,7 +308,7 @@ func asKiln(spec string) int {
 	}
 	switch c.Command {
 	case "card":
-		id, err := AddCard(c.Config.Data, store.KilnRepo, c.Text)
+		id, err := AddCard(c.Config.Data, store.KilnRepo, c.Text, 0)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "kiln card:", err)
 			return 1

@@ -41,8 +41,11 @@ const MaxNote = 16 << 10
 // whether the card's last entry is a publishing that failed (PublishFailed);
 // whether the card has a pull request's address, kept by its publishing; and
 // its predecessors that are not done, Open, and those that were dropped,
-// Dropped, each in ID order (ADR 0010). The store reads all but Publishing;
-// the core says that.
+// Dropped, each in ID order (ADR 0010); and, for a card in the backlog, what
+// its repo's room depends on (ADR 0014): the repo's cards in progress,
+// InProgress; whether the card is queued and waits for room, ForRoom; and the
+// repo's other cards that wait for room before it, Ahead (see readRoom). The
+// store reads all but Publishing; the core says that.
 type Facts struct {
 	InFlight      bool
 	Publishing    bool
@@ -50,7 +53,11 @@ type Facts struct {
 	Published     bool
 	Open          []int64
 	Dropped       []int64
+	InProgress    int
+	ForRoom       bool
+	Ahead         int
 	all           []int64 // every predecessor, in ID order
+	repo          string  // the card's repo
 }
 
 // move is one row of the table of moves: from a state, to a state, what it
@@ -196,18 +203,21 @@ func (e Entry) Note() string {
 	if Dropped(e.State, e.Cause, e.Reason) {
 		return strings.TrimPrefix(strings.TrimPrefix(e.Reason, DroppedReason), ": ")
 	}
-	if strings.HasPrefix(e.Reason, QueuedPrefix) {
+	if strings.HasPrefix(e.Reason, QueuedPrefix) || strings.HasPrefix(e.Reason, RoomPrefix) {
 		return "" // the store's words on a start that queued the card
 	}
 	return e.Reason
 }
 
 // Options are what a move depends on besides the card and the note: whether
-// the core has a publish command, and, for publish, the commit of the card's
-// branch whose workflow files the developer said yes to, if any (ADR 0060).
+// the core has a publish command; for publish, the commit of the card's
+// branch whose workflow files the developer said yes to, if any (ADR 0060);
+// and, for start, the repos' limits of cards in progress (ADR 0014), nil for
+// the default.
 type Options struct {
 	Publishing  bool
 	WorkflowYes string
+	Limits      Limits
 }
 
 // Decide makes one of the developer's moves on a card, by the table of a core
@@ -222,7 +232,8 @@ func (s *Store) Decide(id int64, action Action, note string) (Card, error) {
 // its facts are read and changed in the one transaction of change, so that a
 // move is judged against the state it changes. Start queues the card, with
 // QueuedPrefix and the predecessors it waits for as its reason, while one is
-// not done. A move the table does not have
+// not done, and, once none is open, with the reason of RoomPrefix while its
+// repo has no room under o.Limits (ADR 0014). A move the table does not have
 // for the card's state is refused with ErrRefused, a note that does not fit
 // the move with ErrNote, and the card is returned as it is. Publish writes
 // the card's publication anew in the same transaction: the developer's yes,
@@ -264,7 +275,7 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 				return State{}, fmt.Errorf("%w: this move takes no note", ErrNote)
 			}
 			if action == Start {
-				return queueing(m.to, f), nil
+				return queueing(m.to, f, o.Limits), nil
 			}
 			return m.to, nil
 		}
@@ -277,7 +288,7 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 		return State{}, fmt.Errorf("%w: %q from %s waiting for %s", ErrRefused, action, from.Stage, from.WaitsFor)
 	}
 	if action == Start {
-		e.because = queuedReason
+		e.because = func(to State, f Facts) string { return queuedReason(to, f, o.Limits) }
 	}
 	if action == Approve && note != "" {
 		e.write = func(tx *sql.Tx, card int64) error {

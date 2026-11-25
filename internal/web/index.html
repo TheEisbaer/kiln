@@ -275,6 +275,7 @@ button:disabled { opacity: .55; cursor: default; }
 .tile.fresh { animation: arrive .9s ease-out; }
 @keyframes arrive { from { box-shadow: 0 0 0 2px var(--accent); } }
 .tile .id { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.tile .repo-of { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-left: 6px; }
 .tile .t {
   font-weight: 550;
   line-height: 1.4;
@@ -517,7 +518,12 @@ dialog input[type=text] {
   font: 14px/1.5 var(--sans);
 }
 dialog .after { margin-top: 12px; }
-dialog .after input + label { margin-top: 10px; }
+dialog .after input + label, dialog .after #d-repo-row + label { margin-top: 10px; }
+dialog select {
+  width: 100%; background: var(--surface); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px;
+  font: 14px/1.5 var(--sans);
+}
 dialog .act { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 14px; }
 dialog .act .hint { margin-right: auto; font-size: 12px; color: var(--faint); }
 dialog .act .err { margin-right: auto; font-size: 12.5px; color: var(--amber-ink); }
@@ -594,6 +600,10 @@ kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); 
     <textarea id="d-text" placeholder="What should change, and why?" spellcheck="true"></textarea>
     <div class="need" id="d-need" hidden>Write what the card is about.</div>
     <div class="after">
+      <div id="d-repo-row" hidden>
+        <label for="d-repo">Repo</label>
+        <select id="d-repo"></select>
+      </div>
       <label for="d-after">After cards (optional)</label>
       <input type="text" id="d-after" placeholder="3, 5" autocomplete="off" spellcheck="false">
       <label for="d-fixes">Fixes card (optional)</label>
@@ -680,6 +690,8 @@ function el(tag, cls, text) {
 let skew = 0;           // the core's clock minus this one's, in ms
 let openId = null;      // the card whose page is open
 let boardSeen = false;
+let manyRepos = false;  // whether the instance has more than one repo
+let repoNames = "";     // the repos the field Repo was built with
 const tiles = new Map(); // id -> {el, key}
 const columns = {};
 
@@ -877,7 +889,10 @@ function tileOf(c) {
   const t = el("article", "tile" + (needsYou(c) ? " needs" : "") + (c.dropped ? " dropped" : ""));
   t.tabIndex = 0;
   t.dataset.id = c.id;
-  t.append(el("span", "id", "#" + c.id), el("div", "t", c.title || "(no title)"));
+  t.append(el("span", "id", "#" + c.id));
+  // With more than one repo, the tile names its card's.
+  if (manyRepos) t.append(el("span", "repo-of", c.repo));
+  t.append(el("div", "t", c.title || "(no title)"));
   const foot = el("div", "foot");
   // In the column done, a finished card shows no badge, and a dropped or a
   // merged one says so.
@@ -897,10 +912,30 @@ function tileOf(c) {
   return t;
 }
 
+// renderRepoField fills the new card's field Repo, shown only with more than
+// one repo: the repos in the settings' order, each with its cards in progress
+// and its limit. The first is chosen when the list is built; a refresh with
+// the same repos only changes the words, and keeps the choice.
+function renderRepoField(repos) {
+  const sel = $("d-repo");
+  $("d-repo-row").hidden = repos.length < 2;
+  const names = repos.length < 2 ? "" : JSON.stringify(repos.map((r) => r.name));
+  const text = (r) => r.name + " · " + r.in_progress + " of " + r.limit + " in progress";
+  if (names === repoNames) {
+    repos.forEach((r, i) => { const o = sel.options[i]; if (o && o.textContent !== text(r)) o.textContent = text(r); });
+    return;
+  }
+  repoNames = names;
+  sel.replaceChildren(...(names ? repos : []).map((r) => { const o = el("option", null, text(r)); o.value = r.name; return o; }));
+  sel.selectedIndex = 0;
+}
+
 function renderBoard(b) {
   skew = Date.parse(b.now) - Date.now();
   // One repo shows Kiln's own copy; more show each repo's name and copy.
   const repos = b.repos || [];
+  manyRepos = repos.length > 1;
+  renderRepoField(repos);
   const where = repos.length > 1 ? repos.map(r => r.name + " " + r.copy).join(" · ") : b.repo;
   $("repo").textContent = where;
   $("repo").title = where;
@@ -921,7 +956,7 @@ function renderBoard(b) {
   const per = Object.fromEntries(STAGES.map(([s]) => [s, []]));
   for (const c of b.cards) {
     ids.add(c.id);
-    const key = JSON.stringify(c);
+    const key = JSON.stringify([c, manyRepos]);
     let t = tiles.get(c.id);
     if (!t || t.key !== key) {
       const fresh = tileOf(c);
@@ -1342,9 +1377,10 @@ function renderCard(c) {
     $("p-cost").textContent = c.cost ? c.cost.label : "";
     $("p-interventions").textContent = interventionsText(c.interventions);
   });
-  part("order", [c.predecessors, c.queued_for, c.fixes, c.fixed_by], () => {
+  part("order", [c.repo, manyRepos, c.predecessors, c.queued_for, c.fixes, c.fixed_by], () => {
     const o = $("p-order");
     const lines = [];
+    if (manyRepos) lines.push([document.createTextNode("In " + c.repo)]);
     if (c.predecessors.length) lines.push([document.createTextNode("After " + cardList(c.predecessors) + (c.queued_for.length ? " · waits for " + cardList(c.queued_for) : ""))]);
     if (c.fixes) lines.push([document.createTextNode("Fixes card "), cardLink(c.fixes)]);
     if (c.fixed_by.length) {
@@ -1970,11 +2006,13 @@ async function addCard() {
   try {
     const body = { text, predecessors };
     if (fixes) body.fixes = fixes;
+    if (!$("d-repo-row").hidden) body.repo = $("d-repo").value;
     const r = await api("POST", "/api/cards", body);
     if (!r.ok) throw new Error(r.data && r.data.error);
     $("d-text").value = "";
     $("d-after").value = "";
     $("d-fixes").value = "";
+    $("d-repo").selectedIndex = 0;
     $("dialog").close();
     setOnline(true);
     await refreshBoard();
