@@ -1,17 +1,25 @@
 // Package settings holds the instance's repos as the core knows them: for
 // each, its name, its bare copy, its publish command, its check result
 // command and its spec runs' list of hosts, and which one is Kiln's own
-// (ADR 0025).
+// (ADR 0025). The repos come from the settings file, which Load reads, or,
+// for a core started from its flags, from the one repo the flags make
+// (internal/tick).
 package settings
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
 
-// Repo is one of the instance's repos.
+// Repo is one of the instance's repos, read from the settings file by Load,
+// or made from the flags of a core that has no file.
 type Repo struct {
 	// Name is the repo's name: ASCII letters, digits and -, at most MaxName
 	// characters, unique in the instance.
@@ -68,4 +76,63 @@ func Check(repos []Repo) error {
 	default:
 		return fmt.Errorf("more than one repo is marked as Kiln's own: %s", strings.Join(own, ", "))
 	}
+}
+
+// MaxFile is the largest settings file Load reads.
+const MaxFile = 1 << 20
+
+// file is the shape of the settings file. The top level is an object so that
+// the limits can be added beside repos and inside a repo.
+type file struct {
+	Repos []fileRepo `json:"repos"`
+}
+
+type fileRepo struct {
+	Name               string   `json:"name"`
+	Copy               string   `json:"copy"`
+	Own                bool     `json:"own"`
+	PublishCommand     string   `json:"publish_command"`
+	CheckResultCommand string   `json:"check_result_command"`
+	SpecHosts          []string `json:"spec_hosts"`
+}
+
+// Load reads the settings file at path, one JSON object with the member
+// repos, and returns its repos in order, after Check. It refuses, with the
+// reason, a file over 1 MiB, a member it does not know, a value of the wrong
+// type, anything after the object, and a copy that is not an absolute path.
+// It only reads.
+func Load(path string) ([]Repo, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("the settings file %s: %w", path, err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, MaxFile+1))
+	if err != nil {
+		return nil, fmt.Errorf("the settings file %s: %w", path, err)
+	}
+	if len(data) > MaxFile {
+		return nil, fmt.Errorf("the settings file %s is larger than 1 MiB", path)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var in file
+	if err := dec.Decode(&in); err != nil {
+		return nil, fmt.Errorf("the settings file %s: %w", path, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("the settings file %s: there is more after the object", path)
+	}
+	repos := make([]Repo, 0, len(in.Repos))
+	for _, r := range in.Repos {
+		if r.Copy != "" && !filepath.IsAbs(r.Copy) {
+			return nil, fmt.Errorf("the settings file %s: the copy of the repo %q is not an absolute path: %q", path, r.Name, r.Copy)
+		}
+		repos = append(repos, Repo{Name: r.Name, Copy: r.Copy, Own: r.Own, PublishCommand: r.PublishCommand,
+			CheckResultCommand: r.CheckResultCommand, SpecHosts: r.SpecHosts})
+	}
+	if err := Check(repos); err != nil {
+		return nil, fmt.Errorf("the settings file %s: %w", path, err)
+	}
+	return repos, nil
 }

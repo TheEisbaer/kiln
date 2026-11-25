@@ -15,6 +15,7 @@ Kiln is still being built; what it has to do first is the POC list in [docs/phas
 - `KILN_MODEL`: `claude-opus-5-5` by default. `KILN_IMPLEMENT_MODEL`: none by default.
 - `KILN_CLAUDE_UPSTREAM` and `KILN_CLAUDE_CREDENTIAL_COMMAND`: else `.env.ANTHROPIC_BASE_URL` and `.apiKeyHelper` of `~/.claude/settings.json`.
 - `KILN_PUBLISH_COMMAND` and `KILN_CHECK_RESULT_COMMAND`: the commands of `--publish-command` and `--check-result-command`, none by default.
+- `KILN_SETTINGS`: a settings file of the instance's repos (step 4), none by default. When it is set the script gives it as `--settings`, and `KILN_REPO`, `KILN_ORIGIN`, `KILN_PUBLISH_COMMAND` and `KILN_CHECK_RESULT_COMMAND` are not used; it makes and fetches no copy.
 
 The steps below are what the script does, and how to do it by hand. Kiln needs a container engine with the `docker` command, and Git. The commands run from the repo's root.
 
@@ -76,7 +77,28 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
 
    `--check-result-command` is the developer's own command that reads the check of a pull request on the Git host, run with `sh -c` in the data directory; empty, the default, no check is read. For every card at the Git host with a pull request the core runs it at once, and then at most every two minutes, never twice at once for one card, for at most one minute with its process group, with no standard input, and with the core's environment without any name that begins with `KILN_`, plus one: `KILN_COMMIT`, the published commit. Nothing else is told. Exit status 0 with the last line `pending`, `passed` or `failed` is a result; no check yet for the commit is `pending`. `pending` and `passed` change nothing. `failed` sends the card back to implement by the rule, as a send-back: what the command printed before that line is the check's output, of which the end is kept, at most 16 KiB from a line start. It goes into the card's history and is told to the implement run, which starts from the card's branch; review and publishing then run as before. A card that was sent back twice already waits in implement for you instead. A failed check for a commit that is no longer the published one changes nothing, and one for a change that is in `main` already closes the card as merged. Anything else, another last line, another status or a command that runs too long, changes nothing and is said once on the core's error output, with at most 2 KiB of the command's standard error, which goes nowhere else. The command holds what reading the check needs and lives outside the repo: owner and repo are fixed in it, `KILN_COMMIT` is 40 lowercase hex digits and is only ever quoted, and standard output carries only the check's output and the result, never a token. On GitHub, the check runs of a commit are listed with a GitHub App token, not a fine-grained personal token. The runs of `check.yml` by `head_sha`, and their job logs, can be read with a fine-grained token that has only "Actions: read" on the one repo.
 
-5. Open the screen at <http://127.0.0.1:4747/>. The core prints the address when it starts, and `--listen` serves the screen on another loopback address. Cards are written on the screen, or with `./kiln card --data <dir> <text>`. A card can name earlier cards as predecessors; it is queued until they are done, and then its spec run starts by itself. A card can also name one merged card that it fixes; the screen counts the merged cards that needed a follow-up fix. `./kiln run` carries out one run by hand, through the proxy that a core keeps and gives the credential. `--page <file>` reads the page from that file on every request instead of the embedded one, so that a change to it shows after a refresh; it is for work on the screen, and the file is trusted like the program itself. A page left open while the core is restarted with another page reloads itself once; with `--page` it reloads when the file changes.
+   Instead of `--repo` and the flags of one repo, `--settings <file>` reads the repos from a settings file: one JSON object whose member `repos` is a list of objects, each with these members.
+
+   - `name`: the repo's name, ASCII letters, digits and `-`, at most 40 characters, unique.
+   - `copy`: the absolute path of the repo's bare copy, made as in step 3.
+   - `own`: `true` for Kiln's own repo, whose merges update the core; exactly one repo has it.
+   - `publish_command`, `check_result_command` and `spec_hosts` (a list of names, or `["*"]`): what `--publish-command`, `--check-result-command` and `--spec-hosts` give, each optional.
+
+   A member the file does not know is refused, so a misspelt one is not left out silently. This is an example with Kiln's own repo alone, written with `jq` so that no command has to be escaped by hand:
+
+   ```sh
+   jq -n --arg copy "$HOME/kiln-live/repo.git" \
+         --arg pub "${KILN_PUBLISH_COMMAND-}" --arg check "${KILN_CHECK_RESULT_COMMAND-}" \
+         '{repos: [{name: "kiln", copy: $copy, own: true, spec_hosts: ["*"],
+                    publish_command: $pub, check_result_command: $check}]}' \
+         > ~/kiln-live/settings.json
+   chmod 600 ~/kiln-live/settings.json
+   ./kiln launch --data <dir> --settings ~/kiln-live/settings.json --model <model id>
+   ```
+
+   Kiln's own repo keeps the name `kiln`, which every card of an instance started from flags has: under another name, the open cards of those instances refuse the start. None of `--repo`, `--publish-command`, `--check-result-command` and `--spec-hosts` may be given with `--settings`. Every core reads the file at its start, the new core of an update too, so a change counts from the next restart. A file of more than one repo is refused at start until publishing works per repo. A repo taken out of the file while it has cards that are not done or dropped refuses the start, and names them. The file holds the same commands as the variables do, so keep it outside every repo, with mode 0600. `kiln card` takes `--settings` and `--repo <name>`, which must be one of the file's repos and may be left out when there is one.
+
+5. Open the screen at <http://127.0.0.1:4747/>. The core prints the address when it starts, and `--listen` serves the screen on another loopback address. Cards are written on the screen, or with `./kiln card --data <dir> [--settings <file>] [--repo <name>] <text>`. A card can name earlier cards as predecessors; it is queued until they are done, and then its spec run starts by itself. A card can also name one merged card that it fixes; the screen counts the merged cards that needed a follow-up fix. `./kiln run` carries out one run by hand, through the proxy that a core keeps and gives the credential. `--page <file>` reads the page from that file on every request instead of the embedded one, so that a change to it shows after a refresh; it is for work on the screen, and the file is trusted like the program itself. A page left open while the core is restarted with another page reloads itself once; with `--page` it reloads when the file changes.
 
 ## Where the decisions are
 

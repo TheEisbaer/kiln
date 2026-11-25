@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -162,7 +163,7 @@ func TestCardOfUnknownRepo(t *testing.T) {
 	r := newTwoRepos(t)
 	card := r.card(t, "third")
 	f, err := r.c.card(t.Context(), card.ID, true)
-	want := fmt.Sprintf(`card %d is of the repo "third", which this instance does not have`, card.ID)
+	want := fmt.Sprintf(`card %d is of the repo "third", which is not in the settings`, card.ID)
 	if f != nil || err == nil || err.Error() != want {
 		t.Fatalf("the card gave %v and %v, want the error %q", f, err, want)
 	}
@@ -325,4 +326,75 @@ func TestChangeOfUnknownCard(t *testing.T) {
 	if ch != nil || err != nil {
 		t.Errorf("the change of a card the store does not have is %v, %v, want nil, nil", ch, err)
 	}
+}
+
+// TestRepoGoneRefused starts a core from its flags on a store that has an
+// open card of a repo it does not have: the start is refused, naming the repo
+// and the card, before anything outside the store is made.
+func TestRepoGoneRefused(t *testing.T) {
+	b := newBench(t, 3)
+	b.cfg.Listen = freeAddress(t)
+	var gone, open int64
+	b.with(t, func(s *store.Store) {
+		c, err := s.CreateIn("second", "A card of second.", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Move(c.ID, waiting, store.CauseDeveloper); err != nil {
+			t.Fatal(err)
+		}
+		gone = c.ID
+		open = b.card(t, s, store.Spec) // a card of kiln is no trouble
+	})
+	e := newFakeEngine()
+	for range 2 {
+		err := runCore(t.Context(), b.cfg, io.Discard, io.Discard, e, 5*time.Millisecond, realClock{}, nil)
+		want := fmt.Sprintf(`the repo "second" is not in the settings, and its cards %d are not done or dropped`, gone)
+		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), fmt.Sprint(open)+" are") {
+			t.Fatalf("the core returned %v, want a refusal with %q", err, want)
+		}
+	}
+	e.mu.Lock()
+	keeps, lists := len(e.keeps), e.lists
+	e.mu.Unlock()
+	if keeps != 0 || lists != 0 {
+		t.Errorf("the refused core asked the engine: %d keeps, %d lists", keeps, lists)
+	}
+	if conn, err := net.DialTimeout("tcp", b.cfg.Listen, 200*time.Millisecond); err == nil {
+		conn.Close()
+		t.Errorf("something listens on %s after the refusal", b.cfg.Listen)
+	}
+}
+
+// TestRepoGoneDoneStarts has a dropped card of a repo the core does not have:
+// the core starts, and the card's change says the repo is not in the settings.
+func TestRepoGoneDoneStarts(t *testing.T) {
+	b := newBench(t, 3)
+	b.cfg.Listen = freeAddress(t)
+	var ids []int64
+	b.with(t, func(s *store.Store) {
+		for range 2 {
+			c, err := s.CreateIn("second", "A card of second.", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Decide(c.ID, store.Drop, ""); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, c.ID)
+		}
+	})
+	core := b.start(t, newFakeEngine(), 3)
+	for _, id := range ids {
+		var card struct {
+			Change struct {
+				Error string `json:"error"`
+			} `json:"change"`
+		}
+		getJSON(t, fmt.Sprintf("http://%s/api/cards/%d", b.cfg.Listen, id), &card)
+		if want := fmt.Sprintf(`card %d is of the repo "second", which is not in the settings`, id); card.Change.Error != want {
+			t.Errorf("the change error of card %d is %q, want %q", id, card.Change.Error, want)
+		}
+	}
+	core.stop(t)
 }

@@ -912,14 +912,20 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 	reply(w, http.StatusCreated, out)
 }
 
+// repoNames are the instance's repos' names: Info.Repos, or kiln when it is
+// empty.
+func (h *handler) repoNames() []string {
+	if len(h.info.Repos) == 0 {
+		return []string{store.KilnRepo}
+	}
+	return h.info.Repos
+}
+
 // repoOf is the repo a new card names, by its name: one of the instance's
 // repos, or, left out or empty, the instance's one repo. A name the instance
 // does not have, and none with more than one, are refused with the reason.
 func (h *handler) repoOf(name string) (string, error) {
-	repos := h.info.Repos
-	if len(repos) == 0 {
-		repos = []string{store.KilnRepo}
-	}
+	repos := h.repoNames()
 	if name == "" {
 		if len(repos) == 1 {
 			return repos[0], nil
@@ -1031,6 +1037,20 @@ func (h *handler) decideProposal(w http.ResponseWriter, r *http.Request) {
 	var p store.Proposal
 	var err error
 	if body.Action == makeCard {
+		// A card of a repo that is not in the settings must not get an open
+		// card: the next start would be refused for it.
+		if on, perr := h.store.Proposal(id); perr == nil {
+			if from, cerr := h.store.Card(on.Card); cerr == nil && !slices.Contains(h.repoNames(), from.Repo) {
+				out, jerr := h.proposalJSON(on)
+				if jerr != nil {
+					fail(w, http.StatusInternalServerError, jerr.Error())
+					return
+				}
+				msg := fmt.Sprintf("proposal %d was noticed on a card of the repo %q, which is not in the settings, so no card is made from it; dismiss it instead", id, from.Repo)
+				reply(w, http.StatusConflict, map[string]any{"error": run.Printable(msg), "proposal": out})
+				return
+			}
+		}
 		c, p, err = h.store.MakeCard(id)
 	} else {
 		var note string
