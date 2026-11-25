@@ -1,5 +1,7 @@
 // Command check is Kiln's one check command (ADR 0045). Run it from the repo's
-// root, normally through check/in-image.
+// root, normally through check/in-image. "check engine-tests <package>…"
+// prints the engine tests of each package instead (printEngineTests), for
+// check/in-image to run.
 package main
 
 import (
@@ -14,6 +16,17 @@ func main() {
 	if _, err := os.Stat("go.mod"); err != nil {
 		fmt.Fprintln(os.Stderr, "check: run it from the repo's root:", err)
 		os.Exit(2)
+	}
+	if len(os.Args) > 1 {
+		if os.Args[1] != "engine-tests" {
+			fmt.Fprintln(os.Stderr, "usage: go run ./check [engine-tests <package>…]")
+			os.Exit(2)
+		}
+		if err := printEngineTests(os.Stdout, os.DirFS("."), os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "check engine-tests:", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	failed := 0
@@ -51,6 +64,7 @@ var steps = []step{
 	{"test", func() error { return run(nil, "go", "test", "./...") }},
 	{"dependencies", dependencies},
 	{dockerStep, func() error { return dockerOnlyInSeal(os.DirFS(".")) }},
+	{engineStep, func() error { return engineTestsFound(os.DirFS(".")) }},
 	{"the scripts parse", func() error { return scriptsParse(scriptsDir) }},
 }
 
