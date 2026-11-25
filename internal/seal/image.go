@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
+	"unicode"
 )
 
 // The images of Kiln that the core's update builds (ADR 0019, ADR 0037): each
@@ -13,17 +16,30 @@ import (
 // under the plain name, and the new core makes the tag the plain name once it
 // has reported (ADR 0036).
 
-// Image is what BuildImage builds: the image Name:Tag from the Dockerfile at
-// the path Dockerfile in the context, with the build argument TOOLCHAIN set to
-// Toolchain unless it is empty, and with no network for its RUN instructions
-// when NoNetwork is set.
+//
+// A repo's own images, kiln-toolchain-<repo> and kiln-run-<repo>
+// (internal/tick), are built under the plain name instead, with the label
+// kiln.digest, which says what they were built from.
+
+// Image is what BuildImage builds: the image Name:Tag, or Name:latest for an
+// empty Tag, from the Dockerfile at the path Dockerfile in the context, with
+// the build argument TOOLCHAIN set to Toolchain unless it is empty, with the
+// Labels, and with no network for its RUN instructions when NoNetwork is set.
 type Image struct {
 	Name       string
 	Tag        string
 	Dockerfile string
 	Toolchain  string
 	NoNetwork  bool
+	Labels     map[string]string
 }
+
+// DigestLabel is the label of a repo's own image that says what it was built
+// from, which ImageDigest reads.
+const DigestLabel = "kiln.digest"
+
+// labelKey is the key of a label of Kiln's.
+var labelKey = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*$`)
 
 // imageName is the name of an image of Kiln's, a repository without a
 // registry or a path.
@@ -57,18 +73,33 @@ func checkRef(ref string, latest bool) (string, error) {
 // BuildImage builds an image (ADR 0037) with `docker build` from a context on
 // standard input, src, a tar as `git archive` makes it, tagged Name:Tag only.
 // Standard output is discarded; an error carries the last 4 KiB of standard
-// error.
+// error. A label's key is lower-case letters, digits, . and -, and its value
+// holds no control character.
 func BuildImage(ctx context.Context, im Image, src io.Reader) error {
 	if !imageName.MatchString(im.Name) {
 		return fmt.Errorf("the image %q is not a name of Kiln's", im.Name)
 	}
-	if !versionTag.MatchString(im.Tag) {
-		return fmt.Errorf("the tag %q of %s is not 12 hex digits", im.Tag, im.Name)
+	ref := im.Name + ":latest"
+	if im.Tag != "" {
+		if !versionTag.MatchString(im.Tag) {
+			return fmt.Errorf("the tag %q of %s is not 12 hex digits", im.Tag, im.Name)
+		}
+		ref = im.Name + ":" + im.Tag
 	}
 	if !dockerfilePath.MatchString(im.Dockerfile) || strings.Contains(im.Dockerfile, "..") {
 		return fmt.Errorf("the Dockerfile %q is not a path in the context", im.Dockerfile)
 	}
-	args := []string{"build", "--progress", "plain", "--tag", im.Name + ":" + im.Tag, "--file", im.Dockerfile}
+	args := []string{"build", "--progress", "plain", "--tag", ref, "--file", im.Dockerfile}
+	for _, k := range slices.Sorted(maps.Keys(im.Labels)) {
+		v := im.Labels[k]
+		if !labelKey.MatchString(k) {
+			return fmt.Errorf("the label %q of %s is not a key of Kiln's", k, im.Name)
+		}
+		if strings.ContainsFunc(v, unicode.IsControl) {
+			return fmt.Errorf("the label %s of %s has a control character in its value", k, im.Name)
+		}
+		args = append(args, "--label", k+"="+v)
+	}
 	if im.NoNetwork {
 		args = append(args, "--network", "none")
 	}
@@ -98,6 +129,29 @@ func ImageID(ctx context.Context, ref string) (string, error) {
 	id, err := docker(ctx, nil, "image", "inspect", "--format", "{{.Id}}", full)
 	if err == nil {
 		return id, nil
+	}
+	// The inspection failed: an image that is not there is no error.
+	there, lsErr := docker(ctx, nil, "image", "ls", "--quiet", "--no-trunc", full)
+	if lsErr == nil && there == "" {
+		return "", nil
+	}
+	return "", err
+}
+
+// ImageDigest is the label kiln.digest of the image of a reference, a name or
+// a name and a version's tag, or "" when no image has that reference or the
+// image has no such label.
+func ImageDigest(ctx context.Context, ref string) (string, error) {
+	full, err := checkRef(ref, false)
+	if err != nil {
+		return "", err
+	}
+	digest, err := docker(ctx, nil, "image", "inspect", "--format", `{{index .Config.Labels "`+DigestLabel+`"}}`, full)
+	if err == nil {
+		if digest == "<no value>" {
+			return "", nil
+		}
+		return digest, nil
 	}
 	// The inspection failed: an image that is not there is no error.
 	there, lsErr := docker(ctx, nil, "image", "ls", "--quiet", "--no-trunc", full)

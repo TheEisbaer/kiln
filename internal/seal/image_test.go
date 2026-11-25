@@ -75,6 +75,28 @@ func TestImage(t *testing.T) {
 	if tags, err := ImageTags(t.Context(), name); err != nil || !slices.Equal(tags, []string{"latest"}) {
 		t.Errorf("ImageTags(%s) = %q, %v", name, tags, err)
 	}
+	if d, err := ImageDigest(t.Context(), name); err != nil || d != "" {
+		t.Errorf("ImageDigest of an image without the label = %q, %v", d, err)
+	}
+
+	// A repo's own image: the plain name, with the label kiln.digest.
+	plain := name + "-plain"
+	t.Cleanup(func() { removeImagesOf(t, plain) })
+	if d, err := ImageDigest(t.Context(), plain); err != nil || d != "" {
+		t.Errorf("ImageDigest of a name with no image = %q, %v, want none", d, err)
+	}
+	src = imageTar(t, map[string]string{"Dockerfile": "ARG TOOLCHAIN\nFROM ${TOOLCHAIN}\n"})
+	err = BuildImage(t.Context(), Image{Name: plain, Dockerfile: "Dockerfile", Toolchain: toolchainImage,
+		Labels: map[string]string{DigestLabel: "d1gest"}}, bytes.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tags, err := ImageTags(t.Context(), plain); err != nil || !slices.Equal(tags, []string{"latest"}) {
+		t.Errorf("ImageTags(%s) = %q, %v, want latest only", plain, tags, err)
+	}
+	if d, err := ImageDigest(t.Context(), plain); err != nil || d != "d1gest" {
+		t.Errorf("ImageDigest(%s) = %q, %v, want d1gest", plain, d, err)
+	}
 }
 
 // TestImageNames refuses names, tags and Dockerfiles that are not Kiln's
@@ -93,6 +115,12 @@ func TestImageNames(t *testing.T) {
 		{Name: good.Name, Tag: good.Tag, Dockerfile: "../Dockerfile"},
 		{Name: good.Name, Tag: good.Tag, Dockerfile: good.Dockerfile, Toolchain: "--network=host"},
 		{Name: good.Name, Tag: good.Tag, Dockerfile: good.Dockerfile, Toolchain: "kiln-toolchain:latest"},
+		{Name: good.Name, Dockerfile: good.Dockerfile, Labels: map[string]string{"Kiln.digest": "d"}},
+		{Name: good.Name, Dockerfile: good.Dockerfile, Labels: map[string]string{"--network": "host"}},
+		{Name: good.Name, Dockerfile: good.Dockerfile, Labels: map[string]string{"": "d"}},
+		{Name: good.Name, Dockerfile: good.Dockerfile, Labels: map[string]string{"kiln digest": "d"}},
+		{Name: good.Name, Dockerfile: good.Dockerfile, Labels: map[string]string{DigestLabel: "a\nb"}},
+		{Name: good.Name, Dockerfile: good.Dockerfile, Labels: map[string]string{DigestLabel: "a\x7fb"}},
 	} {
 		if err := BuildImage(ctx, im, strings.NewReader("")); err == nil {
 			t.Errorf("BuildImage(%+v): %v", im, err)
@@ -101,6 +129,9 @@ func TestImageNames(t *testing.T) {
 	for _, ref := range []string{"kiln-proxy:latest", "kiln-proxy:mine", "-kiln-proxy", "kiln-proxy:0123456789ab:x"} {
 		if _, err := ImageID(ctx, ref); err == nil {
 			t.Errorf("ImageID(%q) was accepted", ref)
+		}
+		if _, err := ImageDigest(ctx, ref); err == nil {
+			t.Errorf("ImageDigest(%q) was accepted", ref)
 		}
 	}
 	for _, ref := range []string{"kiln-proxy", "kiln-proxy:latest", "kiln-proxy:mine"} {
