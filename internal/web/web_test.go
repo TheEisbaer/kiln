@@ -834,7 +834,7 @@ func TestPublish(t *testing.T) {
 		plain:   {Branch: "kiln/card-1", Tip: "c0ffee", Commits: []Commit{}, Workflows: nil},
 		touches: {Branch: "kiln/card-2", Tip: "beef", Commits: []Commit{}, Workflows: []string{".github/workflows/check.yml"}},
 	}
-	info := Info{Instance: "ab12cd34", Model: "m", Publishing: true,
+	info := Info{Instance: "ab12cd34", Model: "m", Publishing: map[string]bool{store.KilnRepo: true},
 		Change: func(_ context.Context, card int64) (*Change, error) { return changes[card], nil }}
 	without := f.h
 	h, err := Handler(f.store, info, f.act, addr)

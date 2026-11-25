@@ -899,8 +899,11 @@ function tileOf(c) {
 
 function renderBoard(b) {
   skew = Date.parse(b.now) - Date.now();
-  $("repo").textContent = b.repo;
-  $("repo").title = b.repo;
+  // One repo shows Kiln's own copy; more show each repo's name and copy.
+  const repos = b.repos || [];
+  const where = repos.length > 1 ? repos.map(r => r.name + " " + r.copy).join(" · ") : b.repo;
+  $("repo").textContent = where;
+  $("repo").title = where;
   const m = b.models;
   $("meta").textContent = "instance " + b.instance + " · " + "spec on " + m.spec +
     " · implement on the model its spec names, else " + m.implement + ", and on " + m.sent_back + " after a send-back" +

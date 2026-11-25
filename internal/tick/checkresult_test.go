@@ -457,7 +457,7 @@ func TestCheckFailedMerged(t *testing.T) {
 	// merge check can find the merge.
 	p.look(t, func(s *store.Store) {
 		c := &core{Config: p.cfg, store: s, out: io.Discard, errOut: io.Discard}
-		if err := c.checkFailed(t.Context(), card, commit, failedOutput); err != nil {
+		if err := c.checkFailed(t.Context(), c.own(), card, commit, failedOutput); err != nil {
 			t.Fatal(err)
 		}
 		c.followers.Wait()

@@ -278,7 +278,6 @@ func TestReposRefused(t *testing.T) {
 		{"two own", Config{Repos: []settings.Repo{kiln, {Name: "second", Copy: "/second.git", Own: true}}}, "more than one repo is marked"},
 		{"no copy", Config{Repos: []settings.Repo{{Name: store.KilnRepo, Own: true}}}, "has no copy"},
 		{"no repo", Config{}, "no repo is given"},
-		{"two repos", Config{Repos: []settings.Repo{kiln, second}}, "more than one repo is not built yet"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := filepath.Join(t.TempDir(), "data")

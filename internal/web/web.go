@@ -130,9 +130,10 @@ const maxBody = 1 << 20
 type Info struct {
 	Instance string
 	Repo     string // the copy of Kiln's own repo, shown in the board's header
-	// Repos are the names of the instance's repos, in order; empty, the
-	// instance has one, store.KilnRepo. A new card names one of them.
-	Repos []string
+	// Repos are the instance's repos, in order; empty, the instance has one,
+	// store.KilnRepo. A new card names one of them, and the board's header
+	// shows them when there is more than one.
+	Repos []Repo
 	// The models of the spec runs, the implement runs and the review runs the
 	// core starts.
 	Model, ImplementModel, ReviewModel string
@@ -146,9 +147,10 @@ type Info struct {
 	// policy, instead of the embedded one, for work on the screen. Empty, the
 	// embedded page is served.
 	Page string
-	// Publishing is set when the core has a publish command: the table of
-	// moves then has publish (card 19).
-	Publishing bool
+	// Publishing is true for the name of each repo that has a publish
+	// command: the table of moves of its cards then has publish (card 19).
+	// A nil map publishes no card.
+	Publishing map[string]bool
 	// Version is the commit the core's program was built from, or empty for
 	// a program built by hand; the board's header shows it.
 	Version string
@@ -156,6 +158,9 @@ type Info struct {
 	// POST is refused (ADR 0036, rule 3). Nil accepts.
 	Accepting func() bool
 }
+
+// Repo is one of the instance's repos: its name and the copy the core holds.
+type Repo struct{ Name, Copy string }
 
 // starting is the sentence of a move refused before the core's report.
 const starting = "Kiln is starting, and accepts moves once it has compared the store, the container engine and the Git host"
@@ -297,11 +302,15 @@ type (
 		Build    string `json:"build"`
 		// Version is the commit the core was built from, empty for a
 		// program built by hand.
-		Version string     `json:"version"`
-		Repo    string     `json:"repo"`
-		Models  modelsJSON `json:"models"`
-		Runs    int        `json:"runs"`
-		Now     time.Time  `json:"now"`
+		Version string `json:"version"`
+		// Repo is the copy of Kiln's own repo; Repos are every repo's name
+		// and copy, in the settings' order, which the header shows when
+		// there is more than one.
+		Repo   string     `json:"repo"`
+		Repos  []repoJSON `json:"repos"`
+		Models modelsJSON `json:"models"`
+		Runs   int        `json:"runs"`
+		Now    time.Time  `json:"now"`
 		// Paused is why the instance is paused, empty when it is not: then
 		// no run starts (ADR 0016, ADR 0055).
 		Paused string `json:"paused"`
@@ -314,6 +323,10 @@ type (
 		Proposals []proposalJSON `json:"proposals"`
 		// Measures are the board's measures over the whole history.
 		Measures measuresJSON `json:"measures"`
+	}
+	repoJSON struct {
+		Name string `json:"name"`
+		Copy string `json:"copy"`
 	}
 	// measuresJSON: PerMerged is null with no merged card.
 	measuresJSON struct {
@@ -687,7 +700,10 @@ func (h *handler) board(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b := boardJSON{Instance: h.info.Instance, Build: h.buildNow(), Version: h.info.Version, Repo: h.info.Repo, Models: h.models(), Runs: h.info.Runs, Now: time.Now().UTC(),
-		Paused: paused, MergingOff: merging, Cards: []tileJSON{}, Proposals: []proposalJSON{}}
+		Repos: []repoJSON{}, Paused: paused, MergingOff: merging, Cards: []tileJSON{}, Proposals: []proposalJSON{}}
+	for _, r := range h.info.Repos {
+		b.Repos = append(b.Repos, repoJSON{Name: r.Name, Copy: r.Copy})
+	}
 	headlines := map[int64]string{}
 	for _, c := range cards {
 		t := tile(c)
@@ -781,7 +797,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	if err != nil {
 		return cardJSON{}, err
 	}
-	moves, err := h.store.Moves(c, h.info.Publishing)
+	moves, err := h.store.Moves(c, h.info.Publishing[c.Repo])
 	if err != nil {
 		return cardJSON{}, err
 	}
@@ -840,7 +856,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	if pub.Address != "" && (atHost || sum.Merged) {
 		out.PullRequest = &pullJSON{Address: pub.Address, Commit: pub.Commit}
 	}
-	out.Publishing = atHost && pub.Address == "" && h.info.Publishing
+	out.Publishing = atHost && pub.Address == "" && h.info.Publishing[c.Repo]
 	seen := map[string]bool{}
 	for _, d := range docs {
 		out.Documents = append(out.Documents, documentJSON{Kind: d.Kind, Run: d.Run, Text: d.Text, Note: d.Note})
@@ -918,7 +934,11 @@ func (h *handler) repoNames() []string {
 	if len(h.info.Repos) == 0 {
 		return []string{store.KilnRepo}
 	}
-	return h.info.Repos
+	names := make([]string, 0, len(h.info.Repos))
+	for _, r := range h.info.Repos {
+		names = append(names, r.Name)
+	}
+	return names
 }
 
 // repoOf is the repo a new card names, by its name: one of the instance's
@@ -955,7 +975,19 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, `the body must be {"action": …, "note": …}, the note optional`)
 		return
 	}
-	opts := store.Options{Publishing: h.info.Publishing}
+	// Whether the card can be published is a fact of its repo. A card's repo
+	// is written once, when the card is, so it is read here, before the
+	// move's transaction.
+	card, err := h.store.Card(id)
+	switch {
+	case errors.Is(err, store.ErrNoCard):
+		fail(w, http.StatusNotFound, fmt.Sprintf("no card %d", id))
+		return
+	case err != nil:
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	opts := store.Options{Publishing: h.info.Publishing[card.Repo]}
 	if body.Action == store.Publish {
 		// A change to the workflow files is published only after the
 		// developer has seen them and said yes, for this very change, which
@@ -1156,7 +1188,7 @@ func (h *handler) refuse(w http.ResponseWriter, id int64, msg string, workflows 
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	moves, err := h.store.Moves(c, h.info.Publishing)
+	moves, err := h.store.Moves(c, h.info.Publishing[c.Repo])
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
