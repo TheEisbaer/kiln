@@ -86,6 +86,7 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
    - `publish_command`, `check_result_command` and `spec_hosts` (a list of names, or `["*"]`): what `--publish-command`, `--check-result-command` and `--spec-hosts` give, each optional.
    - `limit`: the most cards of the repo in progress at once, ready to merge included; optional, 3 by default, at least 1.
    - `work_item`: `"required"` when the repo's pull requests cannot merge without a linked work item: a card of it whose review passes waits for you until it has a number; optional, none needed by default.
+   - `toolchain`: the repo's own toolchain, `{"dockerfile": "<absolute path>", "inputs": ["<path in the repo>", …]}`; optional, and never on Kiln's own repo. Without it the repo's runs use `kiln-run`. See [A repo's own toolchain](#a-repos-own-toolchain).
 
    Beside `repos`, the optional member `limit` at the top of the file is the instance's limit: the most cards of all repos together that are in progress and not yet ready to merge; 3 by default, at least 1. A core started from its flags has 3.
 
@@ -128,6 +129,36 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
    The file is read again at the next start: stop the launcher with Ctrl-C and run `KILN_SETTINGS=~/kiln-live/settings.json scripts/kiln-up`. An update while Kiln runs reads the file too, and a file it refuses then ends the launcher, so change the file with Kiln stopped, or write it beside the old one and rename it over it, as the example does.
 
 5. Open the screen at <http://127.0.0.1:4747/>. The core prints the address when it starts, and `--listen` serves the screen on another loopback address. Cards are written on the screen, or with `./kiln card --data <dir> [--settings <file>] [--repo <name>] <text>`. A card can name earlier cards as predecessors; it is queued until they are done, and then its spec run starts by itself. A card is also queued while its repo has as many cards in progress as its limit, or the instance as many cards in progress that are not yet ready to merge as the instance's limit, and starts by itself once a place frees; its page says which limit it waits for, and the line above the columns shows the counts. A card can also name one merged card that it fixes; the screen counts the merged cards that needed a follow-up fix. `./kiln run` carries out one run by hand, through the proxy that a core keeps and gives the credential. `--page <file>` reads the page from that file on every request instead of the embedded one, so that a change to it shows after a refresh; it is for work on the screen, and the file is trusted like the program itself. A page left open while the core is restarted with another page reloads itself once; with `--page` it reloads when the file changes.
+
+## A repo's own toolchain
+
+A repo other than Kiln's own can bring its own toolchain: the tools and package caches its build and tests need offline. Its `toolchain` member in the settings file has two members.
+
+- `dockerfile`: the absolute path of a Dockerfile kept in the instance, beside the settings file, never in a repo. The image is built with the repo's `main`'s head as its context, `git archive` of it, with this Dockerfile added as `Dockerfile.kiln-toolchain`, a path `main` may not hold. `COPY` paths are therefore paths in the repo, and the repo's `.dockerignore` applies.
+- `inputs`: the files and directories of the repo whose change makes the image due again, such as its lock files; optional. A path is relative to the repo's root, in clean form. The Dockerfile itself always counts.
+
+A repo with a toolchain has a name of lower-case letters, digits and `-` that ends in a letter or digit. The core builds two images for it: `kiln-toolchain-<repo>` from the Dockerfile, and `kiln-run-<repo>`, Kiln's layer of the running core on top of it. Every run of the repo uses `kiln-run-<repo>`. They are built, with the network, when a run of the repo is about to start and they are missing, or when the Dockerfile, an input at `main` or Kiln's layer changed since. The repo's runs wait while the build runs or after it failed, and other repos' runs go on. The core prints the build's start and end, and a failure once, with the end of the build's output. A failed build is tried again at once when the Dockerfile, an input or Kiln's layer changes, and otherwise a minute after the failure. Kiln never removes these images; a rebuild leaves the previous one untagged.
+
+The Dockerfile must leave or provide:
+
+- uid 1000 free, for the run's user;
+- `sh`, `curl`, `sha256sum`, `useradd`, `install`, `mkdir` and `id`, for Kiln's layer;
+- `git`, `find` and `chmod`, for the save;
+- a glibc system, since Kiln's layer installs Claude Code's `linux-x64` or `linux-arm64` build, not its `-musl` one.
+
+A run is uid 1000 and the build is root, so the caches the Dockerfile fills must be readable by any user, and a cache a tool writes into while it runs must also be writable by uid 1000. Pin the base image by its digest: a newer base under the same tag does not make the image due. Add a toolchain to a repo while none of its implement runs is in flight, since such a run's save would wait for `kiln-run-<repo>`, which only a start builds.
+
+For example, with the `work` repo of the example above:
+
+```sh
+jq -n --arg copy "$HOME/kiln-live/repo.git" --arg work "$HOME/kiln-live/work.git" \
+      --arg dockerfile "$HOME/kiln-live/work.Dockerfile" \
+      '{repos: [{name: "kiln", copy: $copy, own: true},
+                {name: "work", copy: $work,
+                 toolchain: {dockerfile: $dockerfile, inputs: ["package-lock.json", "nuget"]}}]}' \
+      > ~/kiln-live/settings.json.new
+chmod 600 ~/kiln-live/settings.json.new && mv ~/kiln-live/settings.json.new ~/kiln-live/settings.json
+```
 
 ## Where the decisions are
 

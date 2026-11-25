@@ -417,7 +417,7 @@ func (c *core) buildImages(ctx context.Context, target string, all bool) (string
 		if im.dir != "" {
 			treeish += ":" + im.dir
 		}
-		err := c.fromArchive(ctx, append([]string{"archive", "--format=tar", treeish}, im.paths...),
+		err := c.fromArchive(ctx, c.own().Copy, append([]string{"archive", "--format=tar", treeish}, im.paths...),
 			func(ctx context.Context, src io.Reader) error { return c.engine.BuildImage(ctx, spec, src) })
 		if err != nil {
 			return "", fmt.Errorf("the image %s:%s: %w", im.name, tag, err)
@@ -460,13 +460,13 @@ func (c *core) build(ctx context.Context, target, toolchain string) (string, err
 	return program, nil
 }
 
-// fromArchive streams `git archive` with the arguments into consume, on a
-// context that ends with it. A consumer that did not read the whole archive
+// fromArchive streams `git archive` with the arguments, on a repo's copy, into
+// consume, on a context that ends with it. A consumer that did not read the whole archive
 // lets git go; its error carries git's, if git said one.
-func (c *core) fromArchive(ctx context.Context, args []string, consume func(context.Context, io.Reader) error) error {
+func (c *core) fromArchive(ctx context.Context, repo string, args []string, consume func(context.Context, io.Reader) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	archive := gitCommand(ctx, c.own().Copy, args...)
+	archive := gitCommand(ctx, repo, args...)
 	var stderr strings.Builder
 	archive.Stderr = &stderr
 	src, err := archive.StdoutPipe()
@@ -487,7 +487,7 @@ func (c *core) fromArchive(ctx context.Context, args []string, consume func(cont
 		return consumeErr
 	}
 	if err := archive.Wait(); err != nil {
-		return fmt.Errorf("git archive on %s: %w: %s", c.own().Copy, err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("git archive on %s: %w: %s", repo, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
@@ -504,7 +504,7 @@ func (c *core) buildInto(ctx context.Context, target, toolchain, path string) er
 	if err := f.Chmod(0o700); err != nil {
 		return err
 	}
-	err = c.fromArchive(ctx, []string{"archive", "--format=tar", target}, func(ctx context.Context, src io.Reader) error {
+	err = c.fromArchive(ctx, c.own().Copy, []string{"archive", "--format=tar", target}, func(ctx context.Context, src io.Reader) error {
 		return c.engine.Build(ctx, seal.Program{Instance: c.instance, Image: toolchain, Version: target,
 			GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}, src, f)
 	})

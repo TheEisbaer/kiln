@@ -108,6 +108,10 @@ type Config struct {
 	// (update.go).
 	ToolchainImage string
 	RunImage       string
+	// Layer is the directory of Kiln's layer that a repo's own run image is
+	// built from (toolchain.go); empty, the layer embedded in the program.
+	// Only the test sets it.
+	Layer string
 }
 
 // The limit of runs in flight: DefaultRuns unless `kiln core --runs` says
@@ -653,6 +657,10 @@ type core struct {
 	// and written by the tick only, like checked (publish.go).
 	tested map[int64]hostTest
 
+	// toolchains are the builds of the repos' own images, by the repo's name,
+	// guarded by mu; like followed, only a guard (toolchain.go).
+	toolchains map[string]*toolchainState
+
 	// update is the core's update to a newer version (update.go).
 	update updateState
 
@@ -689,6 +697,7 @@ type engine interface {
 	Build(ctx context.Context, p seal.Program, src io.Reader, out io.Writer) error
 	BuildImage(ctx context.Context, im seal.Image, src io.Reader) error
 	ImageID(ctx context.Context, ref string) (string, error)
+	ImageDigest(ctx context.Context, ref string) (string, error)
 	TagImage(ctx context.Context, src, dst string) error
 	RemoveImageTag(ctx context.Context, ref string) error
 	ImageTags(ctx context.Context, name string) ([]string, error)
@@ -716,6 +725,10 @@ func (sealed) BuildImage(ctx context.Context, im seal.Image, src io.Reader) erro
 }
 
 func (sealed) ImageID(ctx context.Context, ref string) (string, error) { return seal.ImageID(ctx, ref) }
+
+func (sealed) ImageDigest(ctx context.Context, ref string) (string, error) {
+	return seal.ImageDigest(ctx, ref)
+}
 
 func (sealed) TagImage(ctx context.Context, src, dst string) error {
 	return seal.TagImage(ctx, src, dst)
@@ -1154,7 +1167,8 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 	}
 	// A card of a repo the instance does not have starts no run, and its run
 	// in flight is not carried on.
-	if _, err := c.repoOf(card); err != nil {
+	repo, err := c.repoOf(card)
+	if err != nil {
 		return nil, err
 	}
 	// The points of the run, by their names and by the stage's.
@@ -1182,6 +1196,12 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 		}
 		if held != "" {
 			return nil, c.hold(card, held)
+		}
+		// A repo with a toolchain starts no run until its run image is built
+		// from what it is built from now; the card waits for a run as it is
+		// (toolchain.go).
+		if !c.runImageReady(ctx, repo) {
+			return nil, nil
 		}
 		model, err := c.modelOf(card)
 		if err != nil {
@@ -1717,7 +1737,7 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 		ID:          row.ID,
 		Instruction: instruction,
 		Runs:        filepath.Join(c.Data, "runs"),
-		Image:       c.Image,
+		Image:       c.imageOf(repo),
 		Proxy:       c.Proxy,
 		Model:       row.Model,
 		Effort:      row.Effort,

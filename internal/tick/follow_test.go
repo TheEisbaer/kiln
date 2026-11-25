@@ -1,6 +1,7 @@
 package tick
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
@@ -78,6 +79,8 @@ type fakeEngine struct {
 	book        imageBook
 	imageBuilds []imageBuild    // the calls of BuildImage
 	imageFails  map[string]bool // the names of the images whose builds fail
+	// imageGate, when not nil, holds every BuildImage until it is closed.
+	imageGate chan struct{}
 	// The next starts of a card's created container that fail, also after
 	// starting has returned: the container stays created, as when the engine
 	// refuses a start.
@@ -95,17 +98,36 @@ type fakeEngine struct {
 	breakOff map[int64]bool
 }
 
-// imageBuild is a call of BuildImage, with the names in its context.
+// imageBuild is a call of BuildImage, with the names in its context, and its
+// first entry's text.
 type imageBuild struct {
 	seal.Image
 	entries []string
+	first   string
 }
 
 func (e *fakeEngine) BuildImage(_ context.Context, im seal.Image, src io.Reader) error {
-	entries, err := tarEntries(src)
+	data, err := io.ReadAll(src)
+	var entries []string
+	if err == nil {
+		entries, err = tarEntries(bytes.NewReader(data))
+	}
+	first := ""
+	if tr := tar.NewReader(bytes.NewReader(data)); err == nil {
+		if _, err := tr.Next(); err == nil {
+			b, _ := io.ReadAll(tr)
+			first = string(b)
+		}
+	}
+	e.mu.Lock()
+	gate := e.imageGate
+	e.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.imageBuilds = append(e.imageBuilds, imageBuild{im, entries})
+	e.imageBuilds = append(e.imageBuilds, imageBuild{im, entries, first})
 	if err != nil {
 		return err
 	}
@@ -120,6 +142,12 @@ func (e *fakeEngine) ImageID(_ context.Context, ref string) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.book.id(ref), nil
+}
+
+func (e *fakeEngine) ImageDigest(_ context.Context, ref string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.book.digest(ref), nil
 }
 
 func (e *fakeEngine) TagImage(_ context.Context, src, dst string) error {

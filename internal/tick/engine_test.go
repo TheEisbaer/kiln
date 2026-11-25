@@ -29,6 +29,7 @@ import (
 	"github.com/TheEisbaer/kiln/instructions"
 	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/seal"
+	"github.com/TheEisbaer/kiln/internal/settings"
 	"github.com/TheEisbaer/kiln/internal/store"
 )
 
@@ -1115,6 +1116,11 @@ echo "https://git.example/pull/$KILN_CARD"`
 		}
 	})
 
+	t.Run("a repo with its own toolchain", func(t *testing.T) {
+		t.Parallel()
+		testToolchain(t, f)
+	})
+
 	t.Run("a refused credential is renewed, and the run goes on", func(t *testing.T) {
 		t.Parallel()
 		testRefused(t, f, name)
@@ -1171,6 +1177,110 @@ echo "https://git.example/pull/$KILN_CARD"`
 			}
 		}
 	})
+}
+
+// testToolchain runs runs of a repo with its own toolchain (toolchain.go): a
+// toy Dockerfile outside the repo that fills a cache from the repo's lock.txt,
+// with a .dockerignore that lets only lock.txt into the context, and the
+// stand-in layer, testdata/layer, with the stand-in for Claude Code. The
+// first card's run is on kiln-run-<repo> and reads the cache as uid 1000; a
+// commit of a file that is not an input leaves the image as it is for the
+// second card; a commit of lock.txt makes a new one for the third, which
+// reads the new text.
+func testToolchain(t *testing.T, f *fixture) {
+	c := f.newCase(t, f.standIn)
+	repo := "ticktest-" + f.id
+	toolchain, runImage := toolchainImageOf(repo), runImageOf(repo)
+	var ids []string
+	t.Cleanup(func() {
+		removeInstance(f.proxy.Name, c.instance)
+		dockerQuiet("rmi", runImage, toolchain)
+		for _, id := range ids {
+			dockerQuiet("rmi", id)
+		}
+	})
+	imageIDs := func() string {
+		t.Helper()
+		run, tc := must(t, "image", "inspect", "--format", "{{.Id}}", runImage), must(t, "image", "inspect", "--format", "{{.Id}}", toolchain)
+		ids = append(ids, run, tc)
+		return run
+	}
+	dir := t.TempDir()
+	dockerfile := filepath.Join(dir, "toy.Dockerfile")
+	if err := os.WriteFile(dockerfile, []byte("FROM kiln-toolchain\nCOPY lock.txt /opt/toy-cache/\nRUN chmod -R a+rX /opt/toy-cache\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	layer := filepath.Join(dir, "layer")
+	if err := os.MkdirAll(layer, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"testdata/layer/Dockerfile", "testdata/claude/claude"} {
+		if err := os.WriteFile(filepath.Join(layer, filepath.Base(name)), readFile(t, name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commitMain(t, c.repo, map[string]string{"lock.txt": "lock one\n", ".dockerignore": "*\n!lock.txt\n"})
+	kilnCopy, _ := bareRepo(t, map[string]string{"NOTES.md": "# Notes of kiln\n"})
+	cfg := f.config(c)
+	cfg.Repo, cfg.Hosts = "", nil
+	cfg.Repos = []settings.Repo{{Name: store.KilnRepo, Copy: kilnCopy, Own: true},
+		{Name: repo, Copy: c.repo, Toolchain: &settings.Toolchain{Dockerfile: dockerfile, Inputs: []string{"lock.txt"}}}}
+	cfg.Layer = layer
+	core, done := f.start(t, child{Command: "core", Config: cfg})
+
+	// cardRuns writes card n of the repo, waits until its run waits at its
+	// gate, and returns its container's image and what uid 1000 reads of the
+	// cache; then it lets the run end.
+	cardRuns := func(n int) (string, string) {
+		t.Helper()
+		s := f.open(t, c)
+		card, err := s.CreateIn(repo, fmt.Sprintf("Add a line to NOTES.md. kiln-case-toolchain-%d %s", n, gateWord), 0)
+		if err == nil {
+			_, err = s.Move(card.ID, waiting, store.CauseDeveloper)
+		}
+		s.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		container := fmt.Sprintf("kiln-run-%s-%d-1", c.instance, card.ID)
+		waitUntil(t, fmt.Sprintf("the run of card %d waits at its gate", card.ID), func() bool {
+			_, err := docker(t.Context(), "exec", container, "test", "-e", "/tmp/waiting")
+			return err == nil
+		})
+		image := must(t, "inspect", "--format", "{{.Config.Image}}", container)
+		cache := must(t, "exec", "--user", "1000", container, "cat", "/opt/toy-cache/lock.txt")
+		must(t, "exec", container, "touch", "/tmp/gate")
+		waitUntil(t, fmt.Sprintf("card %d waits no longer for a run", card.ID), func() bool {
+			s := f.open(t, c)
+			cd, err := s.Card(card.ID)
+			s.Close()
+			return err == nil && cd.WaitsFor != store.Run && instanceLeft(t, c.instance) == ""
+		})
+		return image, cache
+	}
+
+	if image, cache := cardRuns(1); image != runImage || cache != "lock one" {
+		t.Errorf("the first run is on %q and reads %q, want %s and lock one", image, cache, runImage)
+	}
+	first := imageIDs()
+	commitMain(t, c.repo, map[string]string{"NOTES.md": "# Notes\nA line on main.\n"})
+	if image, cache := cardRuns(2); image != runImage || cache != "lock one" {
+		t.Errorf("the second run is on %q and reads %q, want %s and lock one", image, cache, runImage)
+	}
+	if id := imageIDs(); id != first {
+		t.Errorf("a commit of a file that is not an input made a new run image, %s after %s", id, first)
+	}
+	commitMain(t, c.repo, map[string]string{"lock.txt": "lock two\n"})
+	if image, cache := cardRuns(3); image != runImage || cache != "lock two" {
+		t.Errorf("the third run is on %q and reads %q, want %s and lock two", image, cache, runImage)
+	}
+	if id := imageIDs(); id == first {
+		t.Errorf("a commit of lock.txt left the run image %s as it was", id)
+	}
+	f.stop(t, core, done)
+	if out := core.Stdout.(*bytes.Buffer).String(); strings.Count(out, "kiln core: repo "+repo+": built "+runImage+"\n") != 2 {
+		t.Errorf("the core did not build %s twice:\n%s", runImage, out)
+	}
 }
 
 // testRefused is the whole path of a refused credential (ADR 0040), with the

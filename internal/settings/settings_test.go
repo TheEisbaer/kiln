@@ -31,6 +31,14 @@ func TestCheck(t *testing.T) {
 		{"a limit below 0", []Repo{kiln, {Name: "second", Copy: "/c", Limit: -1}}, `the limit of the repo "second" is -1; it is at least 1`},
 		{"none own", []Repo{second}, "no repo is marked"},
 		{"two own", []Repo{kiln, {Name: "second", Copy: "/c", Own: true}}, "more than one repo is marked as Kiln's own: kiln, second"},
+		{"a toolchain", []Repo{kiln, {Name: "work-2", Copy: "/c", Toolchain: &Toolchain{Dockerfile: "/d"}}}, ""},
+		{"a toolchain on Kiln's own repo", []Repo{{Name: "kiln", Copy: "/c", Own: true, Toolchain: &Toolchain{Dockerfile: "/d"}}},
+			`the repo "kiln" is Kiln's own and has a toolchain`},
+		{"a toolchain on a name with upper case", []Repo{kiln, {Name: "Work", Copy: "/c", Toolchain: &Toolchain{Dockerfile: "/d"}}},
+			`the repo "Work" has a toolchain, so its name is lower-case`},
+		{"a toolchain on a name ending in -", []Repo{kiln, {Name: "work-", Copy: "/c", Toolchain: &Toolchain{Dockerfile: "/d"}}},
+			`the repo "work-" has a toolchain`},
+		{"upper case without a toolchain", []Repo{kiln, {Name: "Work", Copy: "/c"}}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := Check(tc.repos)
@@ -76,6 +84,20 @@ func TestLoad(t *testing.T) {
 	one := func(member string) string {
 		return `{"repos":[{"name":"kiln","copy":"/a/k.git","own":true` + member + `}]}`
 	}
+	work := func(member string) string {
+		return `{"repos":[{"name":"kiln","copy":"/a/k.git","own":true},{"name":"work","copy":"/a/w.git"` + member + `}]}`
+	}
+	t.Run("a toolchain", func(t *testing.T) {
+		s, err := Load(write(t, work(`,"toolchain":{"dockerfile":"/i/work.Dockerfile","inputs":["package-lock.json","src/lib/a..b"]}`)))
+		want := &Toolchain{Dockerfile: "/i/work.Dockerfile", Inputs: []string{"package-lock.json", "src/lib/a..b"}}
+		if err != nil || s.Repos[0].Toolchain != nil || !reflect.DeepEqual(s.Repos[1].Toolchain, want) {
+			t.Fatalf("Load = %+v, %v, want the toolchain %+v on work only", s, err, want)
+		}
+		s, err = Load(write(t, work(`,"toolchain":{"dockerfile":"/i/work.Dockerfile"}`)))
+		if err != nil || s.Repos[1].Toolchain == nil || len(s.Repos[1].Toolchain.Inputs) != 0 {
+			t.Fatalf("Load without inputs = %+v, %v", s, err)
+		}
+	})
 	t.Run("limit", func(t *testing.T) {
 		s, err := Load(write(t, `{"repos":[{"name":"kiln","copy":"/a/k.git","own":true},{"name":"work","copy":"/a/w.git","limit":2}]}`))
 		got := s.Repos
@@ -112,6 +134,19 @@ func TestLoad(t *testing.T) {
 		{"limit 1.5", one(`,"limit":1.5`), "limit"},
 		{"limit as a string", one(`,"limit":"3"`), "limit"},
 		{"over 1 MiB", one("") + strings.Repeat(" ", MaxFile), "is larger than 1 MiB"},
+		{"memory", work(`,"memory":"6g"`), `unknown field "memory"`},
+		{"cpus", work(`,"cpus":4`), `unknown field "cpus"`},
+		{"a toolchain's unknown member", work(`,"toolchain":{"dockerfile":"/d","input":["a"]}`), `unknown field "input"`},
+		{"a toolchain without a Dockerfile", work(`,"toolchain":{"inputs":["a"]}`), `the toolchain's Dockerfile of the repo "work" is not an absolute path: ""`},
+		{"a relative Dockerfile", work(`,"toolchain":{"dockerfile":"Dockerfile"}`), `the toolchain's Dockerfile of the repo "work" is not an absolute path: "Dockerfile"`},
+		{"an empty input", work(`,"toolchain":{"dockerfile":"/d","inputs":[""]}`), `the toolchain's input "" of the repo "work" is not a path in the repo`},
+		{"an absolute input", work(`,"toolchain":{"dockerfile":"/d","inputs":["/a"]}`), `the toolchain's input "/a"`},
+		{"an input not in clean form", work(`,"toolchain":{"dockerfile":"/d","inputs":["a/"]}`), `the toolchain's input "a/"`},
+		{"an input with //", work(`,"toolchain":{"dockerfile":"/d","inputs":["a//b"]}`), `the toolchain's input "a//b"`},
+		{"the input .", work(`,"toolchain":{"dockerfile":"/d","inputs":["."]}`), `the toolchain's input "."`},
+		{"the input ..", work(`,"toolchain":{"dockerfile":"/d","inputs":[".."]}`), `the toolchain's input ".."`},
+		{"an input below ..", work(`,"toolchain":{"dockerfile":"/d","inputs":["../a"]}`), `the toolchain's input "../a"`},
+		{"a toolchain on Kiln's own repo", one(`,"toolchain":{"dockerfile":"/d"}`), `the repo "kiln" is Kiln's own and has a toolchain`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := write(t, tc.content)

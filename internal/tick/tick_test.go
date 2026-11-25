@@ -2,11 +2,13 @@ package tick
 
 import (
 	"archive/tar"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -145,6 +147,14 @@ func (e noEngine) ImageID(_ context.Context, ref string) (id string, err error) 
 	return id, err
 }
 
+func (e noEngine) ImageDigest(_ context.Context, ref string) (d string, err error) {
+	err = e.withBook(func(b *imageBook) error {
+		d = b.digest(ref)
+		return nil
+	})
+	return d, err
+}
+
 func (e noEngine) TagImage(_ context.Context, src, dst string) error {
 	return e.withBook(func(b *imageBook) error { return b.tag(src, dst) })
 }
@@ -200,6 +210,8 @@ type imageBook struct {
 	Images map[string]string `json:"images"`
 	Events []string          `json:"events"`
 	Next   int               `json:"next"` // the builds so far, which name the IDs
+	// Labels are the labels of each image built, by its ID.
+	Labels map[string]map[string]string `json:"labels"`
 }
 
 // fullRef is a reference with its tag, latest for a plain name.
@@ -211,10 +223,12 @@ func fullRef(ref string) string {
 }
 
 // build records a build of an image from a context of the entries, under a
-// new ID. A context without the Dockerfile fails, as the engine's would.
+// new ID, with its labels: under its version's tag, or under the plain name
+// for an empty tag. A context without the Dockerfile fails, as the engine's
+// would.
 func (b *imageBook) build(im seal.Image, entries []string) error {
-	ref := im.Name + ":" + im.Tag
-	if im.Name == "" || !versionTag.MatchString(im.Tag) {
+	ref := im.Name + ":" + cmp.Or(im.Tag, "latest")
+	if im.Name == "" || (im.Tag != "" && !versionTag.MatchString(im.Tag)) {
 		return fmt.Errorf("the image %q is not one to build", ref)
 	}
 	if !slices.Contains(entries, im.Dockerfile) {
@@ -224,12 +238,24 @@ func (b *imageBook) build(im seal.Image, entries []string) error {
 	if b.Images == nil {
 		b.Images = map[string]string{}
 	}
-	b.Images[ref] = fmt.Sprintf("built-%d", b.Next)
+	id := fmt.Sprintf("built-%d", b.Next)
+	b.Images[ref] = id
+	if len(im.Labels) > 0 {
+		if b.Labels == nil {
+			b.Labels = map[string]map[string]string{}
+		}
+		b.Labels[id] = maps.Clone(im.Labels)
+	}
 	b.Events = append(b.Events, "build "+ref)
 	return nil
 }
 
 func (b *imageBook) id(ref string) string { return b.Images[fullRef(ref)] }
+
+// digest is the label kiln.digest of the image of a reference, "" for none.
+func (b *imageBook) digest(ref string) string {
+	return b.Labels[b.id(ref)][seal.DigestLabel]
+}
 
 func (b *imageBook) tag(src, dst string) error {
 	id := b.Images[fullRef(src)]
