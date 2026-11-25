@@ -617,13 +617,18 @@ func (r *run) collect(ctx context.Context) (*record, error) {
 	}
 
 	// A run with a list keeps what its way out let through and refused
-	// (ADR 0038, ADR 0059). One whose way out is gone has none.
+	// (ADR 0038, ADR 0059). One whose way out is gone has none. The way out
+	// is stopped first, so that it writes the line of each connection still
+	// open; a stopped way out is never started again for this run.
 	var hosts []string
 	if l := state.Labels[labelHosts]; l != "" {
 		hosts = strings.Split(l, ",")
 	}
 	wayOut := ""
 	if len(hosts) > 0 {
+		if err := seal.StopWayOut(ctx, r.ID); err != nil {
+			return nil, err
+		}
 		err := writeFile(filepath.Join(partial, "wayout.jsonl"), func(w io.Writer) error {
 			return seal.ReadWayOut(ctx, r.ID, w)
 		})

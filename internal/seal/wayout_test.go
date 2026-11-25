@@ -3,12 +3,14 @@ package seal
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The names of the fake web hosts, on the test's own networks. A run cannot
@@ -226,10 +228,19 @@ func testWayOut(t *testing.T, f fixture, credentials []string, published, other 
 		}
 		lines = strings.Split(strings.TrimSpace(out.String()), "\n")
 		decisions := map[string]string{}
+		ends := map[string][]wayOutEnd{}
 		for _, line := range lines {
-			var e struct{ Target, Decision string }
+			var e struct {
+				Target, Decision string
+				wayOutEnd
+			}
 			if err := json.Unmarshal([]byte(line), &e); err != nil {
 				t.Errorf("the way out's output has a line that is not JSON: %q", line)
+				continue
+			}
+			// A line with an end is a connection's end, not a request.
+			if e.End != "" {
+				ends[e.Target] = append(ends[e.Target], e.wayOutEnd)
 				continue
 			}
 			decisions[e.Target] = e.Decision
@@ -237,9 +248,19 @@ func testWayOut(t *testing.T, f fixture, credentials []string, published, other 
 		if decisions[hp(publicHost, "443")] != "allowed" || decisions[hp(publicHost, "8443")] != "refused" {
 			t.Errorf("the way out's output does not record the public host's two ports: %v", decisions)
 		}
+		// The probe's two connections that were let through each ended.
+		for _, target := range []string{hp(publicHost, "443"), hp(otherHost, "443")} {
+			if got := ends[target]; len(got) != 1 || got[0].Sent <= 0 || got[0].Received <= 0 {
+				t.Errorf("the end lines of %s are %+v, want one with bytes each way", target, got)
+			}
+		}
 		if err := ReadWayOut(t.Context(), f.runID("none"), &out); err != ErrNoWayOut {
 			t.Errorf("ReadWayOut with no way out: %v, want ErrNoWayOut", err)
 		}
+	})
+
+	t.Run("the way out writes its lines when docker stops it", func(t *testing.T) {
+		testStopWayOut(t, f, public)
 	})
 
 	// The credential stays where it is: no request to the web carries it, and
@@ -298,6 +319,77 @@ func testWayOut(t *testing.T, f fixture, credentials []string, published, other 
 		t.Parallel()
 		testRemoveWithWayOut(t, f)
 	})
+}
+
+// wayOutEnd is what a connection's end line of the way out holds.
+type wayOutEnd struct {
+	Sent, Received int64
+	End, Error     string
+}
+
+// testStopWayOut stops the way out of a run whose connection to the public
+// host is still open: the way out writes that connection's line with the end
+// stopped before it exits.
+func testStopWayOut(t *testing.T, f fixture, public string) {
+	id := f.runID("web-stop")
+	createRun(t, Run{ID: id, Image: f.runImage, Proxy: f.proxy.Name,
+		Command: []string{"sh", "-c", "curl -sSk -N https://" + publicHost + "/hold; sleep 600"},
+		Hosts:   []string{"*"}, WayOutImage: f.wayOutImage, WayOutNetwork: f.web})
+	must(t, "network", "connect", public, wayOutName(id))
+	if err := StartRun(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	target := net.JoinHostPort(publicHost, "443")
+	readLines := func(t *testing.T) []string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := ReadWayOut(t.Context(), id, &out); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimSpace(out.String()), "\n")
+	}
+	// The connection is open once the way out has let it through.
+	eventually(t, func() error {
+		for _, line := range readLines(t) {
+			var e struct{ Target, Decision string }
+			if json.Unmarshal([]byte(line), &e) == nil && e.Target == target && e.Decision == "allowed" {
+				return nil
+			}
+		}
+		return fmt.Errorf("the way out let no connection to %s through", target)
+	})
+	// The host has answered, so that bytes went both ways.
+	time.Sleep(time.Second)
+	if got := must(t, "inspect", "--format", "{{.State.Status}}", runName(id)); got != "running" {
+		t.Fatalf("the run is %s, want running while its connection is open", got)
+	}
+
+	if err := StopWayOut(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	var ends []wayOutEnd
+	for _, line := range readLines(t) {
+		t.Logf("wayout: %s", line)
+		var e struct {
+			Target string
+			wayOutEnd
+		}
+		if json.Unmarshal([]byte(line), &e) == nil && e.End != "" && e.Target == target {
+			ends = append(ends, e.wayOutEnd)
+		}
+	}
+	if len(ends) != 1 || ends[0].End != "stopped" || ends[0].Sent <= 0 || ends[0].Received <= 0 {
+		t.Errorf("the end lines of %s are %+v, want one stopped with bytes each way", target, ends)
+	}
+	if got := must(t, "inspect", "--format", "{{.State.Status}}", wayOutName(id)); got != "exited" {
+		t.Errorf("the way out is %s, want exited", got)
+	}
+	if err := StopWayOut(t.Context(), id); err != nil {
+		t.Errorf("StopWayOut a second time: %v", err)
+	}
+	if err := StopWayOut(t.Context(), f.runID("none")); err != nil {
+		t.Errorf("StopWayOut with no way out: %v", err)
+	}
 }
 
 // assertConnect asserts the probe's answer for every target.

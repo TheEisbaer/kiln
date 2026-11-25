@@ -143,6 +143,10 @@ type Info struct {
 	// branch. The tick hands it in, so that this package runs no command. Nil
 	// shows no change on any card.
 	Change func(ctx context.Context, card int64) (*Change, error)
+	// Reached reads the hosts a run reached through its way out, with the
+	// bytes each way (ADR 0059). The tick hands it in, as Change. Nil shows
+	// no host on any run.
+	Reached func(run string) ([]run.Reached, error)
 	// Page is a file the page is read from on every request, with its own
 	// policy, instead of the embedded one, for work on the screen. Empty, the
 	// embedded page is served.
@@ -531,6 +535,21 @@ type (
 		Effort  string       `json:"effort"`
 		Ending  store.Ending `json:"ending"`
 		Started *time.Time   `json:"started"`
+		// Reached are the hosts the run reached through its way out, the one
+		// it sent most to first; ReachedError says why they cannot be read.
+		Reached      []reachedJSON `json:"reached"`
+		ReachedError string        `json:"reached_error,omitempty"`
+	}
+	reachedJSON struct {
+		Host        string `json:"host"`
+		Connections int    `json:"connections"`
+		// NotCounted are the connections without an end line, whose bytes
+		// are not in Sent and Received.
+		NotCounted int   `json:"not_counted"`
+		Sent       int64 `json:"sent"`
+		Received   int64 `json:"received"`
+		// Marked is true when the run sent the host more than sentMark.
+		Marked bool `json:"marked"`
 	}
 	documentJSON struct {
 		Kind string `json:"kind"`
@@ -812,6 +831,29 @@ func (h *handler) change(ctx context.Context, card int64) *changeJSON {
 	return out
 }
 
+// sentMark is the most bytes a run may send one host in all before the
+// card's page marks the host. It is a first value, chosen before any record
+// counted bytes (docs/settled.md, ADR 0059); it blocks nothing.
+const sentMark = 64 << 10
+
+// reached is what a run reached through its way out, always an array, and a
+// reason when it cannot be read; the rest of the card is shown either way.
+func (h *handler) reached(id string) ([]reachedJSON, string) {
+	out := []reachedJSON{}
+	if h.info.Reached == nil {
+		return out, ""
+	}
+	hosts, err := h.info.Reached(id)
+	if err != nil {
+		return out, run.Printable(err.Error())
+	}
+	for _, r := range hosts {
+		out = append(out, reachedJSON{Host: r.Host, Connections: r.Connections,
+			NotCounted: max(r.Connections-r.Ended, 0), Sent: r.Sent, Received: r.Received, Marked: r.Sent > sentMark})
+	}
+	return out, ""
+}
+
 // cardJSON is everything the card's page shows.
 func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	history, err := h.store.History(c.ID)
@@ -880,8 +922,10 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 			Dropped: store.Dropped(e.State, e.Cause, e.Reason), Proposal: e.Proposal, Did: did(history, i, endings)})
 	}
 	for _, r := range runs {
-		out.Runs = append(out.Runs, runJSON{ID: r.ID, Commit: r.Commit, Model: r.Model, Effort: r.Effort,
-			Ending: r.Ending, Started: started(r.Started)})
+		rj := runJSON{ID: r.ID, Commit: r.Commit, Model: r.Model, Effort: r.Effort,
+			Ending: r.Ending, Started: started(r.Started)}
+		rj.Reached, rj.ReachedError = h.reached(r.ID)
+		out.Runs = append(out.Runs, rj)
 		if r.Ending == "" {
 			sum.InFlight = &r
 		}

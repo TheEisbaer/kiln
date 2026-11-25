@@ -6,8 +6,9 @@
 // that the test can tell that no request carries the credential.
 //
 // /page answers a page that holds the marker given as its argument,
-// /redirect sends the client to https://private.kiln-test.example/, and
-// anything else answers the marker as plain text.
+// /redirect sends the client to https://private.kiln-test.example/, /hold
+// answers the marker and holds the connection open until the client goes
+// away, and anything else answers the marker as plain text.
 package main
 
 import (
@@ -46,6 +47,11 @@ func main() {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Write([]byte("<!doctype html><html><head><title>Kiln's test page</title></head><body>" +
 				"<h1>Kiln's test page</h1><p>The page's marker is " + marker + ".</p></body></html>\n"))
+		case "/hold":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Write([]byte(marker + "\n"))
+			http.NewResponseController(w).Flush()
+			<-r.Context().Done()
 		case "/redirect":
 			http.Redirect(w, r, "https://private.kiln-test.example/", http.StatusFound)
 		default:
