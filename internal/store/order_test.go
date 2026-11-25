@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -247,5 +248,88 @@ func TestPredecessorsRefused(t *testing.T) {
 	c, err := s.Create("x", 1, 1)
 	if err != nil || c.ID != 3 || countRows(t, s, "predecessors") != 1 {
 		t.Errorf("a predecessor named twice: %+v, %v, %d rows", c, err, countRows(t, s, "predecessors"))
+	}
+}
+
+// badSince sets a card's since to text that is no time.
+func badSince(t *testing.T, s *Store, id int64) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE cards SET since = 'not a time' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReleasePastUnreadableSince has a queued card whose since cannot be read:
+// the rule reports it and releases the cards behind it, every time.
+func TestReleasePastUnreadableSince(t *testing.T) {
+	s := open(t)
+	p := mustCreate(t, s, "p").ID
+	mustMove(t, s, p, State{Spec, Run})
+	x := waiter(t, s, "x", p)
+	y := waiter(t, s, "y", p)
+	z := waiter(t, s, "z", p)
+	merged(t, s, p)
+	badSince(t, s, x.ID)
+	xEntries := len(mustHistory(t, s, x.ID))
+
+	got, err := s.Release(Limits{})
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("card %d:", x.ID)) || !strings.Contains(err.Error(), "parsing time") {
+		t.Errorf("Release returned the error %v, want one for card %d with the parse error", err, x.ID)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Release returned %d cards, want 2", len(got))
+	}
+	for _, r := range got {
+		if r.State != (State{Spec, Run}) || r.Reason != fmt.Sprintf("%s#%d", ReleasedPrefix, p) {
+			t.Errorf("released %+v", r)
+		}
+		if r.ID != y.ID && r.ID != z.ID {
+			t.Errorf("released card %d", r.ID)
+		}
+	}
+	wantState(t, s, x.ID, queued)
+	if n := len(mustHistory(t, s, x.ID)); n != xEntries {
+		t.Errorf("card %d has %d entries, want %d", x.ID, n, xEntries)
+	}
+	got, err = s.Release(Limits{})
+	if len(got) != 0 || err == nil || !strings.Contains(err.Error(), fmt.Sprintf("card %d:", x.ID)) {
+		t.Errorf("a repeat returned %v and %v", got, err)
+	}
+}
+
+// TestReleasePastFailedTransaction has the transaction of one card fail once:
+// the next card is released, and the failed one on the next call.
+func TestReleasePastFailedTransaction(t *testing.T) {
+	s := open(t)
+	p := mustCreate(t, s, "p").ID
+	mustMove(t, s, p, State{Spec, Run})
+	x := waiter(t, s, "x", p)
+	y := waiter(t, s, "y", p)
+	merged(t, s, p)
+	xEntries := len(mustHistory(t, s, x.ID))
+	calls := 0
+	afterCardWritten = func() error {
+		calls++
+		if calls == 1 {
+			return errors.New("injected")
+		}
+		return nil
+	}
+	t.Cleanup(func() { afterCardWritten = nil })
+
+	got, err := s.Release(Limits{})
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("card %d:", x.ID)) || !strings.Contains(err.Error(), "injected") {
+		t.Errorf("Release returned the error %v", err)
+	}
+	if len(got) != 1 || got[0].ID != y.ID {
+		t.Fatalf("Release returned %+v, want card %d", got, y.ID)
+	}
+	wantState(t, s, x.ID, queued)
+	if n := len(mustHistory(t, s, x.ID)); n != xEntries {
+		t.Errorf("card %d has %d entries, want %d", x.ID, n, xEntries)
+	}
+	got, err = s.Release(Limits{})
+	if err != nil || len(got) != 1 || got[0].ID != x.ID {
+		t.Errorf("the second Release returned %+v and %v, want card %d", got, err, x.ID)
 	}
 }

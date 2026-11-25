@@ -221,7 +221,7 @@ func (a queuedCard) before(b queuedCard) bool {
 
 // waitingForRoom reads the cards of every repo, but the card not, that are
 // queued and wait for room, as their last entries, apart from those about
-// proposals, say.
+// proposals, say. A card whose since cannot be read takes no place in the queue.
 func waitingForRoom(q querier, not int64) ([]queuedCard, error) {
 	rows, err := q.Query(`SELECT c.id, c.since, c.repo, COALESCE((SELECT e.reason FROM entries e
 		WHERE e.card = c.id AND e.proposal IS NULL ORDER BY e.number DESC LIMIT 1), '')
@@ -241,8 +241,7 @@ func waitingForRoom(q querier, not int64) ([]queuedCard, error) {
 			continue
 		}
 		if c.since, err = time.Parse(time.RFC3339Nano, since); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("card %d: %w", c.id, err)
+			continue
 		}
 		out = append(out, c)
 	}
@@ -407,13 +406,18 @@ var errStays = errors.New("the card stays as it is")
 // and nothing is written while its last reason begins with the reason of the
 // limit that holds it now; otherwise it gets one entry with that reason, and
 // its since is kept, so that it keeps its place in the queue. A card that is
-// no longer queued is passed over. It returns the cards it wrote an entry for.
+// no longer queued is passed over. It returns the cards it wrote an entry for
+// and, joined, one error per card it could not take, each with the card's ID:
+// a card whose since cannot be read, or whose transaction failed. The rule
+// goes on with the next card, and a card it could not take is tried again on
+// the next call. An error of the query or of reading the rows ends it at once.
 func (s *Store) Release(l Limits) ([]Released, error) {
 	rows, err := s.db.Query(`SELECT id, since FROM cards WHERE stage = ? AND waits_for = ?`, queued.Stage, queued.WaitsFor)
 	if err != nil {
 		return nil, err
 	}
 	var queue []queuedCard
+	var errs []error
 	for rows.Next() {
 		var c queuedCard
 		var since string
@@ -422,8 +426,8 @@ func (s *Store) Release(l Limits) ([]Released, error) {
 			return nil, err
 		}
 		if c.since, err = time.Parse(time.RFC3339Nano, since); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("card %d: %w", c.id, err)
+			errs = append(errs, fmt.Errorf("card %d: %w", c.id, err))
+			continue
 		}
 		queue = append(queue, c)
 	}
@@ -481,11 +485,12 @@ func (s *Store) Release(l Limits) ([]Released, error) {
 		case errors.Is(err, errStays):
 			continue
 		case err != nil:
-			return out, fmt.Errorf("card %d: %w", q.id, err)
+			errs = append(errs, fmt.Errorf("card %d: %w", q.id, err))
+			continue
 		}
 		out = append(out, Released{c, reason})
 	}
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
 // Order is a card's place among its predecessors: the cards it names, those

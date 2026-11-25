@@ -2,6 +2,7 @@ package tick
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"net"
@@ -587,4 +588,58 @@ func TestLimitPerInstanceTick(t *testing.T) {
 		t.Errorf("S2 is %+v, %v; want queued", cd, err)
 	}
 	e.waitStarted(t, group(k1.ID, s1.ID), group(k2.ID))
+}
+
+// TestReleasePrintsEachCard has two queued cards whose since cannot be read:
+// the tick prints one line for each, and says the card it released.
+func TestReleasePrintsEachCard(t *testing.T) {
+	r := newTwoRepos(t)
+	c := r.c
+	var out, errOut syncBuilder
+	c.out, c.errOut = &out, &errOut
+	p, err := c.store.CreateIn(store.KilnRepo, "A predecessor.", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.store.Move(p.ID, store.State{Stage: store.Spec, WaitsFor: store.Run}, store.CauseRule); err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for range 3 {
+		cd, err := c.store.CreateIn(store.KilnRepo, "A queued card.", 0, p.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.store.Start(cd.ID); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, cd.ID)
+	}
+	if _, err := c.store.MoveWithReason(p.ID, store.State{Stage: store.Spec, WaitsFor: store.Run}, store.State{Stage: store.Done, WaitsFor: store.Nothing}, store.CauseHost, store.MergedReason); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite3", filepath.Join(c.Data, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, id := range ids[:2] {
+		if _, err := db.Exec(`UPDATE cards SET since = 'not a time' WHERE id = ?`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.release()
+	if got := out.String(); !strings.HasSuffix(strings.TrimSpace(got), "; its spec run starts by the rule") || strings.Count(got, "\n") != 1 {
+		t.Errorf("out is %q", got)
+	}
+	lines := strings.Split(strings.TrimSpace(errOut.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("errOut has %d lines: %q", len(lines), errOut.String())
+	}
+	for _, id := range ids[:2] {
+		prefix := fmt.Sprintf("kiln core: queued cards: card %d: ", id)
+		if !slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, prefix) }) {
+			t.Errorf("no line starts with %q in %q", prefix, lines)
+		}
+	}
 }
