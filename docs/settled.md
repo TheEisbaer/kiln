@@ -118,7 +118,9 @@ A line says what was settled and ends with the date in brackets, for example (20
 
 ## ADR 0018: The POC runs on the developer's machine; Kubernetes is the second runtime
 
-- A run is not quite "a pod in all but name": placing files in a run and collecting them from it uses the container engine and is rebuilt for Kubernetes at the MVP (ADR 0038).
+> Since ADR 0061 Kubernetes is no longer part of the MVP; it comes later, as its own decision. The lines below still hold, except where one is marked.
+
+- *No longer holds since 2026-11-26, for "at the MVP": it is rebuilt when Kubernetes arrives, which is later; see ADR 0061.* A run is not quite "a pod in all but name": placing files in a run and collecting them from it uses the container engine and is rebuilt for Kubernetes at the MVP (ADR 0038).
 - Kiln no longer runs from a checkout. Each version is a program built in a sealed container, with the previous one kept beside it (ADR 0036, ADR 0037).
 
 ## ADR 0019: Kiln updates itself after a merge to its own repo
@@ -163,6 +165,8 @@ A line says what was settled and ends with the date in brackets, for example (20
 - A tile's bottom line wraps onto another line when its parts do not fit, each part whole on its line; the documents stay at the right end of the last line, cut with an ellipsis only when they alone are wider than the tile (2026-11-25).
 
 ## ADR 0023: Kiln's core is written in Go, its UI in Svelte
+
+> Since ADR 0061 Kubernetes comes later, not at the MVP. The lines below still hold.
 
 - The first screen is one embedded page, `internal/web/index.html`, with its CSS and JavaScript inside, and no build step, no dependency and nothing loaded from the network. A Svelte client replaces it when the screen outgrows one file (2026-11-19).
 - For work on the screen, `kiln core --page <file>` reads the page from that file on every request instead of the embedded one. Its Content-Security-Policy is computed from the file's own script and style, as the embedded page's is, so that the page runs as it will once embedded. A file that cannot be read, or that lacks a script or a style, is refused at start, and also refused without a screen (`--listen` empty). At a request it gives 500, never the embedded page (2026-11-20).
@@ -324,6 +328,8 @@ A line says what was settled and ends with the date in brackets, for example (20
 ## ADR 0038: The container engine carries everything into and out of a run
 
 > Since ADR 0059 a run with a list of hosts also reaches the hosts on its list. The lines below still hold.
+
+> Since ADR 0061 placing and collecting files is rebuilt when Kubernetes arrives, which is later and no longer at the MVP. The lines below still hold.
 
 - *No longer holds since 2026-11-26, for "the commit's files under /work": a laid-over run has main's Claude Code configuration there and the card's under /kiln/card-config; see ADR 0025.* What is placed in a run, and how: the commit's files under `/work`, owned by the run's user, and the instruction at `/kiln/instruction.md`. The seal writes them as one archive into a container that has never started, and refuses absolute names, `..` and anything but files, directories and symlinks, so nothing else can be placed.
 - *No longer holds since 2026-11-26, for "the run's … limits": the save has 4g, 2 CPUs and 1024 processes whatever its run's; see ADR 0038.* The change is collected by saving the working tree in a throwaway container from the run image, with no network, the run's user and limits, and no mounts. The engine pipes the tree from the run's container into it, so nothing of it is unpacked on the developer's machine; what comes back is a tree and a pack of its new objects.
@@ -527,3 +533,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 
 - A change touches a workflow file when the diff of the card's branch from where it left `main`, renames counted at both names, has a file under `.github/workflows/`, or the entry `.github` or `.github/workflows`, or the branch has either as a symlink or a submodule. "The change" on the card's page marks it with the files, and "Publish" then asks first, with their names. The yes travels with the move, `{"action": "publish", "workflow_yes": true, "tip": …}`, with the tip of the change the page showed, and is kept with it; a yes for a tip that is no longer the branch's is refused with 409, and the page asks again; a `publish` without it for such a change is refused with 409, the sentence and the files. The publisher checks again: a change to the workflow files whose yes is not for the tip it publishes is not handed to the command, and the card needs you. The test of both is part of the pull request that added this line (2026-11-20).
 - When the core publishes by itself, the yes is still asked on the screen. The rule never sends a change to the workflow files to the Git host: such a card waits in review for approval, with the reason and the files. The publisher's check of the yes for the tip it publishes stays (2026-11-23).
+
+## ADR 0061: Kubernetes comes later; the MVP's colleague installs Kiln on their own machine
+
+- MVP item 6 of `docs/phases.md` asks for a colleague's install on their own Mac from the instructions, without help, and for an automated test of a fresh install from those instructions. Kubernetes (k3s) is on the "Later" list, and the open point of the card that rebuilds placing and collecting for Kubernetes is now a later one (2026-11-26).

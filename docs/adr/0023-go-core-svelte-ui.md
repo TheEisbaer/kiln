@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: superseded in part by ADR 0061
 ---
 
 # Kiln's core is written in Go, its UI in Svelte
+
+> Revised in part by ADR 0061: Kubernetes no longer comes at the MVP but later, as its own decision. The choice of Go stands.
 
 Kiln's core (holding cards, starting and watching runs, talking to a Git host, serving the UI, updating itself) is written in Go, and the UI is a Svelte client application.
 

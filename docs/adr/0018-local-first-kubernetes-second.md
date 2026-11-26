@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: superseded in part by ADR 0061
 ---
 
 # The POC runs on the developer's machine; Kubernetes is the second runtime
+
+> Revised in part by ADR 0061: Kubernetes (k3s) no longer arrives at the MVP, and the whole path of a card is not tested on it there. The MVP's colleague runs Kiln on their own Mac with the same container engine as the developer; Kubernetes comes back as its own decision, later, once an instance has to run somewhere else than a person's own machine.
 
 In the POC, Kiln runs from a checkout on the developer's machine and sealed runs (ADR 0017) are started by the local container engine. Kubernetes (k3s) is the intended second runtime and arrives at the MVP, when a colleague needs to install Kiln. The developer wants Kubernetes for one deployment recipe on any machine, for resource limits and for isolation; containers already give the last two, and the first is not needed until an instance has to run somewhere else.
 
