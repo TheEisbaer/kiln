@@ -101,14 +101,18 @@ func (p *publishing) look(t *testing.T, f func(s *store.Store)) {
 // card writes a card whose review passed: its spec names publishTitle, its
 // implement run, run 2, wrote a report and publishText and saved the files on
 // the card's branch, on top of main, and its review run, run 3, passed. It
-// returns the card's ID.
+// returns the card's ID. It writes runs as the core would, so it is called
+// while no core runs (with): beside a running core, the core starts each run
+// the card waits for itself.
 func (p *publishing) card(t *testing.T, s *store.Store, files map[string]string) int64 {
 	t.Helper()
 	return p.stage(t, s, files, true)
 }
 
 // reviewing writes a card as card does, without its review run: it waits for
-// one, with its branch saved, and the run is the core's to start.
+// one, with its branch saved, and the run is the core's to start. It writes
+// runs as the core would, so it is called while no core runs (with): beside a
+// running core, the core starts the run the card waits for itself.
 func (p *publishing) reviewing(t *testing.T, s *store.Store, files map[string]string) int64 {
 	t.Helper()
 	return p.stage(t, s, files, false)

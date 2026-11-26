@@ -286,6 +286,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - Each repo's `main` is fetched from its own `origin`, at most once in 30 seconds, before a run of one of its cards starts. The tick starts the fetches of every such repo first, and waits for them at most 5 seconds in all. A repo's `main` is also fetched while one of its cards waits for the Git host, and Kiln's own, under a launcher, on every tick. Publishing, the check result command and the tests at the Git host work on each card's repo, after a round of that repo, and the comparison before the report reads every repo's `main` at its origin. A repo's failure to answer is printed with its name and holds no report. Only the update stays on Kiln's own repo (2026-11-25).
 - The line that says the cards at the Git host are not tested, because a repo's main and its tree cannot be read, names the repo, as "repo <name>: ", when the instance has more than one repo, as the comparison's line does (2026-11-25).
 - Which repo's image build is running, and which failure was printed last, are kept in memory only, as a guard. The image's label is the fact. A core started again may start a build that a killed core left running, and the two tag the same image (2026-11-25).
+- `AddRun` checks in its transaction that the card waits for a run, not that it is still in the stage the tick read. No writer but a run's end moves a card from one stage's run to another's while no run is in flight, so a run the tick decided cannot land in another stage (2026-11-26).
 
 ## ADR 0036: A small launcher judges every update, and the store is copied before it
 
@@ -378,6 +379,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - Backlog, waiting for room, also holds a card queued for its predecessors, and the reason names them. The developer's move from the backlog, waiting for the developer, is `start`, with no note: to spec, waiting for a run, or queued while a predecessor is not done. A card left in the backlog by a kill between its writing and its start has the same move. Whether a predecessor was dropped is read from its last entry, as the board reads it, until dropped is a mark on the card (2026-11-24).
 - Backlog, waiting for room, also holds a card queued for its repo's limit (ADR 0014). The reason of its last entry begins with `waits for room in its repo `, and a developer's entry with that reason carries no note (2026-11-25).
 - A recorded run whose `documents.tar` cannot be opened or read is failed, whatever its record says, with the reason naming the file, and its cost is kept. A damaged archive leaves the run finished, and the card needs you, as before (2026-11-24).
+- A test writes a card's runs only while no core runs, since a card that waits for a run is the core's to start. Beside a running core a test makes only the developer's moves, as the screen does (2026-11-26).
 
 ## ADR 0044: The UI sends requests; the core tells it about changes over one one-way event stream
 

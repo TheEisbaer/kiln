@@ -245,6 +245,14 @@ func TestUpdateOnlyByOwnMerge(t *testing.T) {
 	ts.second.mode(t, 0, "merge")
 	ts.kiln.mode(t, 0, "merge")
 	second := ts.second.published(t)
+	// Kiln's card is written before the core starts, as the bench's other
+	// cards are: written beside a running core, it would wait for a run
+	// that the core starts itself. Its passed review waits for the
+	// developer's move, which comes once the second card has merged.
+	var kiln int64
+	ts.kiln.with(t, func(s *store.Store) {
+		kiln = ts.kiln.card(t, s, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+	})
 	e := newFakeEngine()
 	h := startHanding(t, ts.config(), e, true)
 	if line := h.line(t); line != "healthy" {
@@ -261,11 +269,7 @@ func TestUpdateOnlyByOwnMerge(t *testing.T) {
 		t.Errorf("the core did not say the second card merged:\n%s", h.out)
 	}
 
-	var kiln int64
-	ts.kiln.look(t, func(s *store.Store) {
-		kiln = ts.kiln.card(t, s, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
-		ts.kiln.publish(t, s, kiln, false)
-	})
+	ts.kiln.look(t, func(s *store.Store) { ts.kiln.publish(t, s, kiln, false) })
 	line := h.line(t)
 	b := gitIn(t, ts.kiln.cfg.Repo, "rev-parse", "refs/heads/main")
 	if want := "replace " + filepath.Join(ts.kiln.cfg.Data, "programs", "kiln-"+b); line != want {
