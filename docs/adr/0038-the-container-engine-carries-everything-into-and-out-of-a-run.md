@@ -1,10 +1,12 @@
 ---
-status: superseded in part by ADR 0059
+status: superseded in part by ADR 0059, ADR 0061
 ---
 
 # The container engine carries everything into and out of a run
 
 > Revised in part by ADR 0059: "a run has no network but the proxy" no longer holds for a run that has a list of hosts. It also reaches the hosts on its list.
+
+> Revised in part by ADR 0061: placing and collecting files is rebuilt when Kubernetes arrives, which is later and no longer at the MVP, and the whole path of a card is not tested on k3s at the MVP.
 
 Kiln and its runs share no filesystem (ADR 0018), and a run has no network but the proxy (ADR 0017). What crosses the boundary of a run is carried by the container engine: the core copies the code and the instructions into the container before it starts, follows its output through the engine, and collects the results from the container after it has stopped. Nothing is mounted, no script inside the run talks to Kiln, and no run holds a secret of its own.
 

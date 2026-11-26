@@ -24,7 +24,7 @@ Every POC item was seen working on 2026-11-25; the MVP list is next (ADR 0004).
 3. **A pull request that cannot merge goes back by itself.** A conflict or a failed pipeline of the work repo returns the card to implement without the developer.
 4. **The work repo's own configuration applies and nothing of Kiln's is added.** Runs there follow its instructions, skills and hooks, and no file of Kiln's is committed to it.
 5. **A sealed run can build and test the work repo.** Inside its container an agent can build the work repo's code and run its tests.
-6. **A colleague runs their own instance.** The whole path of a card passes an automated test on k3s; a colleague installs Kiln from the instructions without help and gets a card through on the work repo.
+6. **A colleague runs their own instance.** A colleague installs Kiln on their own Mac from the instructions without help and gets a card through on the work repo, and a fresh install from those instructions passes an automated test.
 7. **Two repos share one instance.** With cards in Kiln's repo and in the work repo, the limit per repo and the limit per instance both hold.
 
 ## Later, each as its own decision
@@ -42,3 +42,4 @@ Not on either list, and not built until decided with what the earlier phases hav
 - A richer UI and a new visual design, in its own design session (ADR 0022).
 - Going public on GitHub, including how users of a public Kiln sign in to Claude (ADR 0020, ADR 0026).
 - Removing Azure DevOps support once the work repo has moved (ADR 0027).
+- Kubernetes (k3s) as a second runtime, once an instance has to run somewhere else than a person's own machine (ADR 0018, ADR 0061).
