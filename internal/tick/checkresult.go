@@ -21,12 +21,14 @@ import (
 // The check on the Git host. For every card at the Git host with a pull
 // request, a checker beside the tick, like a publisher and counted in no
 // limit, runs the developer's check result command with the published commit
-// and reads its result from the last line it prints: pending, passed or
-// failed. A failed check for the commit that is still published sends the
+// and reads its result from the last line it prints: pending, passed, failed
+// or closed. A failed check for the commit that is still published sends the
 // card back to implement by the rule, as a send-back (ADR 0012, rule 2; ADR
 // 0054), with the check's output in the entry, which the implement run is
-// told (told). pending and passed change nothing, and anything else is said
-// on the core's error output and changes nothing either.
+// told (told). closed says that the commit's pull request was closed without
+// a merge: the card goes to review, needing you, by the Git host, and it is no
+// send-back. pending and passed change nothing, and anything else is said on
+// the core's error output and changes nothing either.
 //
 // What the core knows of the checks is in memory only, as a guard and a
 // pace (ADR 0035): a core started again checks at once.
@@ -44,6 +46,7 @@ const (
 	checkPending = "pending"
 	checkPassed  = "passed"
 	checkFailed  = "failed"
+	checkClosed  = "closed"
 )
 
 // maxCheckOutput is the most of the check's output that is kept, its end,
@@ -153,9 +156,14 @@ func (c *core) check(ctx context.Context, id int64, st *checkState) {
 		c.sayCheck(st, "")
 	}
 	c.mu.Unlock()
-	if result == checkFailed {
+	switch result {
+	case checkFailed:
 		if err := c.checkFailed(ctx, st.repo, id, st.commit, output); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(c.errOut, "kiln core: card %d: the failed check is not acted on: %s\n", id, run.Printable(err.Error()))
+		}
+	case checkClosed:
+		if err := c.checkClosed(ctx, st.repo, id, st.commit); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(c.errOut, "kiln core: card %d: the closed pull request is not acted on: %s\n", id, run.Printable(err.Error()))
 		}
 	}
 	at("checked")
@@ -168,11 +176,7 @@ func (c *core) check(ctx context.Context, id int64, st *checkState) {
 // was sent back twice already. A card that is no longer at the Git host with
 // this commit is left as it is.
 func (c *core) checkFailed(ctx context.Context, repo settings.Repo, id int64, commit, output string) error {
-	c.refreshMain(ctx, repo, fetchLimit+10*time.Second)
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if err := c.closeIfMerged(ctx, repo, id, commit); err != nil && !errors.Is(err, store.ErrRefused) {
+	if err := c.mergeFirst(ctx, repo, id, commit); err != nil {
 		return err
 	}
 	card, err := c.store.Card(id)
@@ -198,6 +202,40 @@ func (c *core) checkFailed(ctx context.Context, repo settings.Repo, id int64, co
 		return err
 	}
 	fmt.Fprintf(c.out, "card %d: %s\n", id, sentence)
+	return nil
+}
+
+// mergeFirst brings the main of the card's repo up to date and closes the card
+// as merged when its commit, merged into main, changes nothing: a merge wins
+// over any result of the check. A card that is no longer at the Git host is
+// left as it is.
+func (c *core) mergeFirst(ctx context.Context, repo settings.Repo, id int64, commit string) error {
+	c.refreshMain(ctx, repo, fetchLimit+10*time.Second)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := c.closeIfMerged(ctx, repo, id, commit); err != nil && !errors.Is(err, store.ErrRefused) {
+		return err
+	}
+	return nil
+}
+
+// checkClosed acts on a pull request closed without a merge for a card's
+// commit: as for a failed check, a change that is in main already closes the
+// card as merged, and otherwise the card goes to review, needing you, by the
+// Git host, with the reason store.ClosedReason, as no send-back. A card that
+// is no longer at the Git host with this commit is left as it is.
+func (c *core) checkClosed(ctx context.Context, repo settings.Repo, id int64, commit string) error {
+	if err := c.mergeFirst(ctx, repo, id, commit); err != nil {
+		return err
+	}
+	if _, err := c.store.PullRequestClosed(id, commit); err != nil {
+		if errors.Is(err, store.ErrRefused) {
+			return nil // merged, moved by the developer, or published anew meanwhile
+		}
+		return err
+	}
+	fmt.Fprintf(c.out, "card %d: %s\n", id, store.ClosedReason)
 	return nil
 }
 
@@ -238,8 +276,8 @@ func (c *core) runCheckResult(ctx context.Context, command, commit string) (resu
 // readCheck reads what the check result command printed on its standard
 // output, of which a part at the start was dropped when cut is set: valid
 // UTF-8, without a carriage return before a newline, and trimmed at its end,
-// its last line, trimmed, is the result, pending, passed or failed. With
-// failed the output is what comes before it, trimmed and made printable, and
+// its last line, trimmed, is the result, pending, passed, failed or closed.
+// With closed what comes before it is dropped. With failed the output is what comes before it, trimmed and made printable, and
 // only its end when it is longer than maxCheckOutput or was cut: from the
 // first line start within the last maxCheckOutput bytes, or the first
 // character start when there is none, after a line that says so. Any other
@@ -255,7 +293,7 @@ func readCheck(data []byte, cut bool) (result, output, failure string) {
 		before, last = s[:i], s[i+1:]
 	}
 	switch last = strings.TrimSpace(last); last {
-	case checkPending, checkPassed:
+	case checkPending, checkPassed, checkClosed:
 		return last, "", ""
 	case checkFailed:
 	default:
@@ -266,7 +304,7 @@ func readCheck(data []byte, cut bool) (result, output, failure string) {
 			}
 			last = last[:end] + "…"
 		}
-		return "", "", "the check result command's last line is not pending, passed or failed: " + last
+		return "", "", "the check result command's last line is not pending, passed, failed or closed: " + last
 	}
 	output = strings.TrimSpace(run.Printable(before))
 	if len(output) > maxCheckOutput {

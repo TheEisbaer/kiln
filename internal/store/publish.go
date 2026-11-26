@@ -29,6 +29,9 @@ const (
 	PublishFailedReason = "publishing failed"
 	// MergedReason is the reason of a card the Git host merged.
 	MergedReason = "merged"
+	// ClosedReason is the reason of a card whose pull request the Git host
+	// closed without a merge, which then needs you.
+	ClosedReason = "its pull request was closed without a merge"
 	// PublishedReason begins the reason of the entry that keeps a card's pull
 	// request's address, followed by the address.
 	PublishedReason = "published as "
@@ -48,6 +51,14 @@ func Merged(s State, cause Cause, reason string) bool {
 	return s == (State{Done, Nothing}) && cause == CauseHost && reason == MergedReason
 }
 
+// PullClosed says whether a card's last entry, of the state, the cause and
+// the reason, left it under "needs you" because its pull request was closed
+// without a merge. Like Merged, it is told by the cause host and the exact
+// reason, which tells it from a failed publishing.
+func PullClosed(s State, cause Cause, reason string) bool {
+	return s == (State{Review, Developer}) && cause == CauseHost && reason == ClosedReason
+}
+
 // readFacts reads the facts of a card that the store keeps (see Facts).
 func readFacts(q querier, card int64) (Facts, error) {
 	var f Facts
@@ -62,6 +73,7 @@ func readFacts(q querier, card int64) (Facts, error) {
 	switch {
 	case err == nil:
 		f.PublishFailed = PublishFailed(e.State, e.Cause, reason.String)
+		f.PullClosed = PullClosed(e.State, e.Cause, reason.String)
 	case !errors.Is(err, sql.ErrNoRows):
 		return Facts{}, err
 	}
@@ -216,22 +228,55 @@ func (s *Store) CheckFailed(card int64, commit string, to State, reason string) 
 	}
 	c, err := s.change(edit{id: card, next: atHost.only(to), cause: CauseRule, reason: reason, sendBack: true,
 		write: func(tx *sql.Tx, card int64) error {
-			p, err := readPublication(tx, card)
-			if err != nil {
-				return err
-			}
-			if p.Commit != commit || p.Address == "" {
-				return fmt.Errorf("%w: card %d is published as %q, not as %s with an address", ErrRefused, card, p.Commit, commit)
-			}
-			return nil
+			_, err := publishedAs(tx, card, commit)
+			return err
 		}})
+	return s.keepIfRefused(card, c, err)
+}
+
+// publishedAs reads a card's publication in a transaction and refuses it with
+// ErrRefused unless it has the commit and an address.
+func publishedAs(tx *sql.Tx, card int64, commit string) (Publication, error) {
+	p, err := readPublication(tx, card)
+	if err != nil {
+		return Publication{}, err
+	}
+	if p.Commit != commit || p.Address == "" {
+		return Publication{}, fmt.Errorf("%w: card %d is published as %q, not as %s with an address", ErrRefused, card, p.Commit, commit)
+	}
+	return p, nil
+}
+
+// keepIfRefused returns the card as it is now when a change was refused by its
+// write, which rolled everything back and returned no card.
+func (s *Store) keepIfRefused(card int64, c Card, err error) (Card, error) {
 	if errors.Is(err, ErrRefused) && c.ID == 0 {
-		// The refusal came from the write, which rolled everything back.
 		if cur, cerr := s.Card(card); cerr == nil {
 			c = cur
 		}
 	}
 	return c, err
+}
+
+// PullRequestClosed moves a card that waits for the Git host to review,
+// waiting for the developer, by the Git host, with the reason ClosedReason,
+// because the card's pull request was closed without a merge for the commit.
+// It is no send-back: the number of send-backs stays as it is. In the same
+// transaction the card's publication must still have the commit and an
+// address; a card that is no longer at the Git host, or whose publication has
+// another commit or none, is refused with ErrRefused, nothing is written, and
+// the card is returned as it is. The publication is not changed: the next
+// publish move writes it anew.
+func (s *Store) PullRequestClosed(card int64, commit string) (Card, error) {
+	if commit == "" {
+		return Card{}, errors.New("a closed pull request needs a commit")
+	}
+	c, err := s.change(edit{id: card, next: atHost.only(State{Review, Developer}), cause: CauseHost, reason: ClosedReason, always: true,
+		write: func(tx *sql.Tx, card int64) error {
+			_, err := publishedAs(tx, card, commit)
+			return err
+		}})
+	return s.keepIfRefused(card, c, err)
 }
 
 // FailedCheck finds the card's newest entry of the rule whose reason begins
@@ -281,20 +326,11 @@ func (s *Store) PublishAgain(card int64, commit, reason string) (Card, error) {
 	}
 	c, err := s.change(edit{id: card, next: atHost.only(atHost), cause: CauseRule, reason: reason, always: true,
 		write: func(tx *sql.Tx, card int64) error {
-			p, err := readPublication(tx, card)
+			p, err := publishedAs(tx, card, commit)
 			if err != nil {
 				return err
 			}
-			if p.Commit != commit || p.Address == "" {
-				return fmt.Errorf("%w: card %d is published as %q, not as %s with an address", ErrRefused, card, p.Commit, commit)
-			}
 			return writePublication(tx, card, p.WorkflowYes)
 		}})
-	if errors.Is(err, ErrRefused) && c.ID == 0 {
-		// The refusal came from the write, which rolled everything back.
-		if cur, cerr := s.Card(card); cerr == nil {
-			c = cur
-		}
-	}
-	return c, err
+	return s.keepIfRefused(card, c, err)
 }
