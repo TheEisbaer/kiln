@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -184,28 +185,38 @@ func TestPublishMoves(t *testing.T) {
 	}
 }
 
-// TestPublishFailedAndMerged checks the two marks read off a card's last entry.
+// TestPublishFailedAndMerged checks the three marks read off a card's last entry.
 func TestPublishFailedAndMerged(t *testing.T) {
 	for _, tc := range []struct {
 		s              State
 		cause          Cause
 		reason         string
 		failed, merged bool
+		closed         bool
 	}{
-		{needsYou, CauseRule, "publishing failed: the publish command exited with status 1", true, false},
-		{needsYou, CauseRun, "publishing failed: x", false, false},
-		{needsYou, CauseRule, "the change is 1.3 MiB as a diff", false, false},
-		{atTheHost, CauseRule, "publishing failed: x", false, false},
-		{done, CauseHost, "merged", false, true},
-		{done, CauseRule, "merged", false, false},
-		{done, CauseHost, "merged, mostly", false, false},
-		{done, CauseDeveloper, "", false, false},
+		{needsYou, CauseRule, "publishing failed: the publish command exited with status 1", true, false, false},
+		{needsYou, CauseRun, "publishing failed: x", false, false, false},
+		{needsYou, CauseRule, "the change is 1.3 MiB as a diff", false, false, false},
+		{atTheHost, CauseRule, "publishing failed: x", false, false, false},
+		{done, CauseHost, "merged", false, true, false},
+		{done, CauseRule, "merged", false, false, false},
+		{done, CauseHost, "merged, mostly", false, false, false},
+		{done, CauseDeveloper, "", false, false, false},
+		{needsYou, CauseHost, ClosedReason, false, false, true},
+		{needsYou, CauseHost, ClosedReason + ", mostly", false, false, false},
+		{needsYou, CauseHost, "publishing failed: x", false, false, false},
+		{needsYou, CauseRule, ClosedReason, false, false, false},
+		{needsYou, CauseDeveloper, ClosedReason, false, false, false},
+		{atTheHost, CauseHost, ClosedReason, false, false, false},
 	} {
 		if got := PublishFailed(tc.s, tc.cause, tc.reason); got != tc.failed {
 			t.Errorf("PublishFailed(%v, %s, %q) = %v", tc.s, tc.cause, tc.reason, got)
 		}
 		if got := Merged(tc.s, tc.cause, tc.reason); got != tc.merged {
 			t.Errorf("Merged(%v, %s, %q) = %v", tc.s, tc.cause, tc.reason, got)
+		}
+		if got := PullClosed(tc.s, tc.cause, tc.reason); got != tc.closed {
+			t.Errorf("PullClosed(%v, %s, %q) = %v", tc.s, tc.cause, tc.reason, got)
 		}
 	}
 }
@@ -532,5 +543,83 @@ func TestAtHostPerRepo(t *testing.T) {
 	}
 	if got, err := s.AtHost("third"); err != nil || len(got) != 0 {
 		t.Errorf("AtHost of a repo without cards lists %v (%v)", got, err)
+	}
+}
+
+// TestPullRequestClosed moves a card at the Git host to "needs you" for a
+// pull request closed without a merge, with no send-back, and refuses one of
+// another commit, of a card without an address, and of one no longer at the
+// Git host, writing nothing. The developer can then publish again.
+func TestPullRequestClosed(t *testing.T) {
+	s := open(t)
+	const a, b = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	card := mustCreate(t, s, "a card")
+	if _, err := s.Move(card.ID, passed, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	with := Options{Publishing: true}
+	if _, err := s.DecideWith(card.ID, Publish, "", with); err != nil {
+		t.Fatal(err)
+	}
+	unchanged := func(what string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrRefused) {
+			t.Errorf("%s: %v, want ErrRefused", what, err)
+		}
+		c, err := s.Card(card.ID)
+		h, herr := s.History(card.ID)
+		if err != nil || herr != nil || c.State != atTheHost || h[len(h)-1].Reason == ClosedReason {
+			t.Errorf("%s: the card is %+v (%v), its last entry %+v (%v)", what, c, err, h[len(h)-1], herr)
+		}
+	}
+	// No address yet.
+	_, err := s.PullRequestClosed(card.ID, a)
+	unchanged("a card without an address", err)
+	if _, err := s.KeepPullRequest(card.ID, b, "https://git.example/pull/1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.PullRequestClosed(card.ID, a)
+	unchanged("an older commit", err)
+	if got.ID != card.ID || got.State != atTheHost {
+		t.Errorf("an older commit returns %+v", got)
+	}
+	if _, err := s.PullRequestClosed(card.ID, ""); err == nil || errors.Is(err, ErrRefused) {
+		t.Errorf("no commit: %v", err)
+	}
+
+	got, err = s.PullRequestClosed(card.ID, b)
+	if err != nil || got.State != needsYou || got.SendBacks != 0 {
+		t.Fatalf("the published commit: %+v, %v", got, err)
+	}
+	h, err := s.History(card.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := h[len(h)-1]; last.Cause != CauseHost || last.Reason != ClosedReason || last.Run != "" || last.State != needsYou {
+		t.Errorf("the entry is %+v", last)
+	}
+	if p, err := s.Publication(card.ID); err != nil || p.Commit != b || p.Address != "https://git.example/pull/1" {
+		t.Errorf("the publication is %+v (%v)", p, err)
+	}
+	// A repeat is refused: the card is no longer at the Git host.
+	if _, err := s.PullRequestClosed(card.ID, b); !errors.Is(err, ErrRefused) {
+		t.Errorf("a repeat: %v", err)
+	}
+	// Publish is among its moves with a publish command, and only then.
+	c, _ := s.Card(card.ID)
+	for publishing, want := range map[bool]bool{true: true, false: false} {
+		m, err := s.Moves(c, publishing)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if has := slices.Contains(m, Allowed{Publish, NoNote}); has != want {
+			t.Errorf("publishing %v: the moves are %v", publishing, m)
+		}
+	}
+	if got, err := s.DecideWith(card.ID, Publish, "", with); err != nil || got.State != atTheHost {
+		t.Fatalf("publish again: %+v, %v", got, err)
+	}
+	if p, _ := s.Publication(card.ID); p.Commit != "" || p.Address != "" {
+		t.Errorf("the publication after publishing again: %+v", p)
 	}
 }

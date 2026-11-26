@@ -38,7 +38,8 @@ const MaxNote = 16 << 10
 
 // Facts are what the table of moves looks at besides a card's state: whether
 // the card has a run in flight; whether the core has a publish command;
-// whether the card's last entry is a publishing that failed (PublishFailed);
+// whether the card's last entry is a publishing that failed (PublishFailed) or
+// a pull request closed without a merge (PullClosed);
 // whether the card has a pull request's address, kept by its publishing; and
 // its predecessors that are not done, Open, and those that were dropped,
 // Dropped, each in ID order (ADR 0010); and, for a card in the backlog, what
@@ -52,6 +53,7 @@ type Facts struct {
 	InFlight      bool
 	Publishing    bool
 	PublishFailed bool
+	PullClosed    bool
 	Published     bool
 	Open          []int64
 	Dropped       []int64
@@ -85,8 +87,10 @@ var atHost = State{Review, Host}
 func publishing(f Facts) bool { return f.Publishing }
 
 // retried is the condition of publish from "needs you": the core has a
-// publish command, and the card needs you because its publishing failed.
-func retried(f Facts) bool { return f.Publishing && f.PublishFailed }
+// publish command, and the card needs you because its publishing failed or
+// its pull request was closed without a merge; publishing then opens a new
+// pull request.
+func retried(f Facts) bool { return f.Publishing && (f.PublishFailed || f.PullClosed) }
 
 // settled is the condition of a move from the Git host: the card has its pull
 // request's address, or the core cannot publish it, so that nothing is under
@@ -96,7 +100,9 @@ func settled(f Facts) bool { return f.Published || !f.Publishing }
 // moves is the table of the developer's moves, the only ones Decide makes. A
 // card whose review passed waits in review for the developer's approval
 // (card 14): with a publish command the developer publishes it, and in any
-// case can close it without publishing. A card at the Git host is sent back
+// case can close it without publishing. A card that needs you because its
+// publishing failed, or its pull request was closed without a merge, can be
+// published again. A card at the Git host is sent back
 // to implement with a note, or closed (card 19). A spec that waits for
 // approval, or a review that passed, is sent back only with a note that says
 // what should change; a stage that needs you is run again or sent back with

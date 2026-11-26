@@ -23,7 +23,7 @@ import (
 // directory and its standard input to dir/env.<n>. dir/running is there while
 // a call runs; a call that finds it writes dir/twice and fails. What it
 // prints is in dir/mode.<n>, or else dir/mode, or else pending: "pending" or
-// "passed"; "failed", after three lines of output, one with a control
+// "passed"; "closed", after a line of output; "failed", after three lines of output, one with a control
 // character and one with a run of four backticks; "bad", the last line ok;
 // "empty", nothing; "exit", failed and then exit 1, with a token-like line
 // on standard error; "sleep", a sleep of 10 s whose pid is in dir/pid;
@@ -39,6 +39,7 @@ touch "$dir/running"
 mode=$(cat "$dir/mode.$n" 2>/dev/null || cat "$dir/mode" 2>/dev/null || echo pending)
 case "$mode" in
     pending|passed) echo "a line before the result"; rm "$dir/running"; echo "$mode" ;;
+    closed) echo "the pull request is closed, not merged"; rm "$dir/running"; echo closed ;;
     failed) printf 'FAIL TestOne\n\033[2Jcontrol\nsee ` + "````" + `go\n'; rm "$dir/running"; echo failed ;;
     bad) rm "$dir/running"; echo ok ;;
     empty) rm "$dir/running" ;;
@@ -380,7 +381,7 @@ func TestCheckBadResults(t *testing.T) {
 	})
 	out := core.out.String()
 	for _, want := range []string{
-		"kiln core: card 1: the check result command's last line is not pending, passed or failed: ok\n",
+		"kiln core: card 1: the check result command's last line is not pending, passed, failed or closed: ok\n",
 		"kiln core: card 1: the check result command printed nothing\n",
 		"kiln core: card 1: the check result command failed: exit status 1: token ghp_0123456789abcdef\n",
 		"kiln core: card 1: the check result command did not end within 200ms\n",
@@ -468,6 +469,124 @@ func TestCheckFailedMerged(t *testing.T) {
 	}
 }
 
+// TestCheckClosed moves a card whose pull request was closed without a merge
+// to "needs you", by the Git host, with no send-back and no run, and says so;
+// what the command printed before closed is kept nowhere. The developer can
+// publish it again, which runs the publish command for the same branch, and
+// the card waits for the Git host with the new address.
+func TestCheckClosed(t *testing.T) {
+	p := newChecking(t)
+	p.checkMode(t, 1, "closed")
+	card := p.published(t)
+	e := newFakeEngine()
+	core := p.start(t, e, 3)
+	last := p.waitFor(t, card, reviewNeedsYou, store.ClosedReason)
+	if last.Cause != store.CauseHost || last.Reason != store.ClosedReason || last.Run != "" {
+		t.Errorf("the entry is %+v", last)
+	}
+	p.look(t, func(s *store.Store) {
+		if c, _ := s.Card(card); c.SendBacks != 0 {
+			t.Errorf("the card has %d send-backs, want 0", c.SendBacks)
+		}
+		h, _ := s.History(card)
+		for _, e := range h {
+			if strings.Contains(e.Reason, "not merged") {
+				t.Errorf("an entry holds the command's output: %+v", e)
+			}
+		}
+		moves, err := s.Moves(store.Card{ID: card, State: reviewNeedsYou}, true)
+		if err != nil || !slices.Contains(moves, store.Allowed{Action: store.Publish, Note: store.NoNote}) {
+			t.Errorf("the moves are %v (%v), want publish among them", moves, err)
+		}
+	})
+	if got := e.snapshot().started; slices.Contains(got, card) {
+		t.Errorf("a run started: %v", got)
+	}
+	if want := "card 1: " + store.ClosedReason + "\n"; !strings.Contains(core.out.String(), want) || strings.Contains(core.out.String(), "not merged") {
+		t.Errorf("the core said\n%s", core.out)
+	}
+	branch := p.env(t, 1)["KILN_BRANCH"]
+
+	// Publish again: the publish command runs once more for the same branch.
+	p.look(t, func(s *store.Store) { p.publish(t, s, card, false) })
+	p.waitFor(t, card, atHost, "published as ")
+	core.stop(t)
+	if n := p.calls(t); n != 2 {
+		t.Fatalf("the publish command ran %d times, want 2", n)
+	}
+	if got := p.env(t, 2)["KILN_BRANCH"]; got == "" || got != branch {
+		t.Errorf("the second publishing is on the branch %q, the first was on %q", got, branch)
+	}
+	p.look(t, func(s *store.Store) {
+		if pub, err := s.Publication(card); err != nil || pub.Address != "https://git.example/pull/1" || pub.Branch != branch {
+			t.Errorf("the publication is %+v (%v)", pub, err)
+		}
+		if c, _ := s.Card(card); c.SendBacks != 0 {
+			t.Errorf("the card has %d send-backs, want 0", c.SendBacks)
+		}
+	})
+}
+
+// TestCheckClosedOlderCommit acts on no closed pull request of a commit that
+// is no longer the published one: the card is published anew while the check
+// runs.
+func TestCheckClosedOlderCommit(t *testing.T) {
+	p := newChecking(t)
+	p.checkMode(t, 1, "gate")
+	p.mode(t, 2, "gate") // a publisher that would publish the card again waits
+	card := p.published(t)
+	core := p.start(t, newFakeEngine(), 3)
+	waitUntil(t, "the check waits", func() bool { return p.exists("waiting") })
+	b := p.save(t, card, "refs/heads/main", map[string]string{"NOTES.md": "# Notes\nAnother line.\n"}, "again")
+	p.look(t, func(s *store.Store) {
+		if _, err := s.Move(card, reviewPassed, store.CauseDeveloper); err != nil {
+			t.Fatal(err)
+		}
+		p.publish(t, s, card, false)
+		if _, err := s.KeepPullRequest(card, b, "https://git.example/pull/1"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	write(t, p.check, map[string]string{"gate": "closed"})
+	waitUntil(t, "the commit B is checked", func() bool { return p.checks(t) >= 2 })
+	core.stop(t)
+	p.waitFor(t, card, atHost, "published as ")
+	p.look(t, func(s *store.Store) {
+		if pub, _ := s.Publication(card); pub.Commit != b {
+			t.Errorf("the publication is %+v, want %s", pub, b)
+		}
+		h, _ := s.History(card)
+		for _, e := range h {
+			if e.Reason == store.ClosedReason {
+				t.Errorf("an entry of a closed pull request: %+v", e)
+			}
+		}
+	})
+	if strings.Contains(core.out.String(), store.ClosedReason) {
+		t.Errorf("the core said\n%s", core.out)
+	}
+}
+
+// TestCheckClosedMerged closes a card as merged when its pull request is
+// reported closed for a change that is in main already: the merge wins.
+func TestCheckClosedMerged(t *testing.T) {
+	p := newChecking(t)
+	card := p.published(t)
+	r := p.start(t, newFakeEngine(), 3)
+	p.waitFor(t, card, atHost, "published as ")
+	r.stop(t)
+	commit := gitIn(t, p.cfg.Repo, "rev-parse", "refs/kiln/publish/card-1")
+	gitIn(t, p.cfg.Repo, "push", "--quiet", "origin", commit+":refs/heads/main")
+	p.look(t, func(s *store.Store) {
+		c := &core{Config: p.cfg, store: s, out: io.Discard, errOut: io.Discard}
+		if err := c.checkClosed(t.Context(), c.own(), card, commit); err != nil {
+			t.Fatal(err)
+		}
+		c.followers.Wait()
+	})
+	p.waitFor(t, card, closed, store.MergedReason)
+}
+
 // TestCheckOneAtATime runs the command for a card never twice at once, and
 // again once the call under way has ended.
 func TestCheckOneAtATime(t *testing.T) {
@@ -519,7 +638,10 @@ func TestReadCheck(t *testing.T) {
 		{in: "out\r\nfailed\r", result: checkFailed, output: "out"},
 		{in: "out\nfailed", cut: true, result: checkFailed, output: checkCut + "\nout"},
 		{in: "failed\n", result: checkFailed},
-		{in: "Failed", failure: "the check result command's last line is not pending, passed or failed: Failed"},
+		{in: "closed", result: checkClosed},
+		{in: "a\nclosed\n", result: checkClosed},
+		{in: "Closed", failure: "the check result command's last line is not pending, passed, failed or closed: Closed"},
+		{in: "Failed", failure: "the check result command's last line is not pending, passed, failed or closed: Failed"},
 		{in: " \n", failure: "the check result command printed nothing"},
 		{in: "\xff\x1b\nfailed", result: checkFailed, output: "\uFFFD\uFFFD"},
 	} {

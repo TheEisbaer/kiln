@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -243,6 +244,28 @@ func TestMoves(t *testing.T) {
 		}
 		if got := Moves(from, Facts{}); !reflect.DeepEqual(got, want) {
 			t.Errorf("Moves(%v) = %v, want %v", from, got, want)
+		}
+	}
+}
+
+// TestMovesPullClosed offers publish from "needs you" after a closed pull
+// request only with a publish command, and no other move changes.
+func TestMovesPullClosed(t *testing.T) {
+	has := func(f Facts, a Action) bool {
+		return slices.ContainsFunc(Moves(State{Review, Developer}, f), func(m Allowed) bool { return m.Action == a })
+	}
+	if !has(Facts{Publishing: true, PullClosed: true}, Publish) {
+		t.Error("no publish after a closed pull request with a publish command")
+	}
+	if has(Facts{PullClosed: true}, Publish) {
+		t.Error("publish after a closed pull request without a publish command")
+	}
+	if has(Facts{Publishing: true}, Publish) {
+		t.Error("publish from needs you without a failure or a closed pull request")
+	}
+	for _, a := range []Action{Again, SendBack, ToSpec, Drop} {
+		if !has(Facts{Publishing: true, PullClosed: true}, a) {
+			t.Errorf("no %s after a closed pull request", a)
 		}
 	}
 }
