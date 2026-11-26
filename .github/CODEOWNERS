@@ -12,6 +12,13 @@
 /internal/seal/ @TheEisbaer
 /.claude/ @TheEisbaer
 /CLAUDE.md @TheEisbaer
+# The repo's Claude Code configuration at any depth, which every run works
+# under once it is merged (ADR 0025, rule 2).
+CLAUDE.md @TheEisbaer
+AGENTS.md @TheEisbaer
+CLAUDE.local.md @TheEisbaer
+.claude/ @TheEisbaer
+/.mcp.json @TheEisbaer
 /docs/adr/ @TheEisbaer
 /docs/phases.md @TheEisbaer
 /CONTEXT.md @TheEisbaer

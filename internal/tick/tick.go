@@ -1736,8 +1736,40 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 		}
 		write = !there
 	}
+	// The head of main, read once: a run that starts is laid over on it
+	// (ADR 0025, rule 2), and what it is told says how. An instruction of a
+	// run in flight that is written again is told from main as it is now; if
+	// its text differs, the run ends as failed.
+	var main string
+	if write || !inFlight {
+		if main, err = head(ctx, repo.Copy); err != nil {
+			return run.Inputs{}, "", err
+		}
+	}
+	// The baseline of the run's /work has a parent where the card's branch
+	// left main, whenever that is not the commit the run starts from.
+	// A repo with no common ancestor has none: the baseline is one commit.
+	// That is merge-base's exit status 1 alone; any other failure is an error,
+	// since a run without the parent would take HEAD for where the branch left
+	// main. Only a run that starts reads it: a run in flight takes the parent
+	// tree from its container's label, or is gone, so a copy that cannot be
+	// read fails it at the run's step 0, as it did before the parent.
+	var parent string
+	if !inFlight {
+		base, err := gitLine(ctx, repo.Copy, "merge-base", "HEAD", row.Commit)
+		var exit *exec.ExitError
+		switch {
+		case err == nil:
+			if base != row.Commit {
+				parent = base
+			}
+		case errors.As(err, &exit) && exit.ExitCode() == 1 && ctx.Err() == nil:
+		default:
+			return run.Inputs{}, "", err
+		}
+	}
 	if write {
-		text, held, err := c.told(ctx, repo, row, card)
+		text, held, err := c.told(ctx, repo, row, card, main)
 		if err != nil {
 			return run.Inputs{}, "", err
 		}
@@ -1767,26 +1799,8 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 		Memory:      repo.Memory,
 		CPUs:        repo.CPUs,
 	}
-	// The baseline of the run's /work has a parent where the card's branch
-	// left main, whenever that is not the commit the run starts from.
-	// A repo with no common ancestor has none: the baseline is one commit.
-	// That is merge-base's exit status 1 alone; any other failure is an error,
-	// since a run without the parent would take HEAD for where the branch left
-	// main. Only a run that starts reads it: a run in flight takes the parent
-	// tree from its container's label, or is gone, so a copy that cannot be
-	// read fails it at the run's step 0, as it did before the parent.
 	if !inFlight {
-		base, err := gitLine(ctx, repo.Copy, "merge-base", "HEAD", row.Commit)
-		var exit *exec.ExitError
-		switch {
-		case err == nil:
-			if base != row.Commit {
-				in.Parent = base
-			}
-		case errors.As(err, &exit) && exit.ExitCode() == 1 && ctx.Err() == nil:
-		default:
-			return run.Inputs{}, "", err
-		}
+		in.Main, in.Parent = main, parent
 	}
 	if card.Stage == store.Spec {
 		in.Hosts, in.WayOutImage, in.WayOutNetwork = repo.SpecHosts, c.WayOutImage, c.WayOutNetwork
@@ -1831,18 +1845,40 @@ const (
 // is newer than the newest spec and review, or else the last review if it sent
 // the change back, or if it passed and the developer sent the change back; for a review
 // run, the change as a diff from where the card's branch left main to the
-// run's commit; and last, the developer's note, if the entry that made the
-// card wait for this run has one (card 16). A change over maxDiff is held.
+// run's commit; for a laid-over run, whose commit differs from main in the
+// repo's Claude Code configuration, how it is laid over (configPart), before
+// the change of a review run and else after the other parts; and last, the
+// developer's note, if the entry that made the card wait for this run has one
+// (card 16). A change over maxDiff is held.
 //
 // A part that a run wrote, a spec, a report or a review, is told fenced as
 // markdown, as the change is fenced as a diff: nothing in it can then read as
 // a heading or open a block that runs past it, so only the tick's own
 // headings are headings. The card and the developer's note are the
 // developer's text and are told as they are.
-func (c *core) told(ctx context.Context, repo settings.Repo, row store.RunRow, card store.Card) (text, held string, err error) {
+func (c *core) told(ctx context.Context, repo settings.Repo, row store.RunRow, card store.Card, main string) (text, held string, err error) {
 	note, err := c.store.Note(card.ID)
 	if err != nil {
 		return "", "", err
+	}
+	// A laid-over run is told so before the developer's note, and a review
+	// run before the change.
+	var config []string
+	if main != "" {
+		changes, err := run.ConfigChanges(ctx, repo.Copy, main, row.Commit)
+		if err != nil {
+			return "", "", err
+		}
+		if len(changes) > 0 {
+			config = []string{configHeading, configPart(card.Stage, changes)}
+		}
+	}
+	// The package's withNote, with the configuration's part before the note.
+	withNote := func(parts []string, note string) []string {
+		if card.Stage != store.Review {
+			parts = append(parts, config...)
+		}
+		return withNote(parts, note)
 	}
 	parts := []string{"## The card", card.Text}
 	if card.Stage == store.Spec {
@@ -1923,7 +1959,39 @@ func (c *core) told(ctx context.Context, repo settings.Repo, row store.RunRow, c
 	if size > maxDiff {
 		return "", "the change is " + mebibytes(size) + " as a diff, more than 1 MiB; no review run is started", nil
 	}
+	parts = append(parts, config...)
 	return told(withNote(append(parts, "## The change", fenced(diff, "diff")), note)), "", nil
+}
+
+// configHeading begins the part of a laid-over run (ADR 0025, rule 2).
+const configHeading = "## The repo's Claude Code configuration"
+
+// configPart is what a laid-over run is told: that /work shows main's
+// configuration, the paths in which the card's branch differs from main,
+// fenced, since the names are the repo's, and where the branch's version is.
+// An implement run is told where to change it, and a review run that the
+// change holds it.
+func configPart(stage store.Stage, changes []run.ConfigChange) string {
+	var list []string
+	for _, ch := range changes {
+		list = append(list, ch.Status+"\t"+ch.Path)
+	}
+	text := "Kiln has laid main's version of the repo's Claude Code configuration over /work, so that this run works " +
+		"under the configuration as merged, not as the card changes it: every CLAUDE.md, CLAUDE.local.md and AGENTS.md, " +
+		"everything in a .claude directory, and .mcp.json at the top. The card's branch differs from main in these paths " +
+		"(A: only the branch has it; D: only main has it; M: both, differently):\n\n" +
+		fenced(strings.Join(list, "\n"), "text") + "\n" +
+		"The branch's version of the whole configuration is in /kiln/card-config, at the same paths. In /work, `HEAD` and " +
+		"`HEAD~1` both hold main's configuration, so `git diff HEAD~1` there shows the card's change without it."
+	switch stage {
+	case store.Implement:
+		text += " Make every change to the configuration in /kiln/card-config: when you end, Kiln saves the configuration " +
+			"from there and everything else from /work, and a change to the configuration in /work is not kept. " +
+			"A colliding file of the configuration, if the part on what changed in main lists one, is in /kiln/card-config."
+	case store.Review:
+		text += " The change below holds the card's changes to the configuration as well."
+	}
+	return text
 }
 
 // failedCheckHeading begins the part of an implement run after a failed check

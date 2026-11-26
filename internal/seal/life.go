@@ -23,6 +23,9 @@ import (
 const (
 	workDir         = "work"
 	instructionPath = "kiln/instruction.md"
+	// Where a laid-over run gets the card's own Claude Code configuration
+	// (ADR 0025).
+	cardConfigDir = "kiln/card-config"
 )
 
 // runUID is the run's user and group, kiln in the run image (ADR 0039).
@@ -63,14 +66,17 @@ func existingRun(ctx context.Context, id string) (*foundContainer, error) {
 // its permission bits, carries no extended attributes, and is a file, a
 // directory or a symlink. An absolute name, a name with "..", any other type, a
 // name given twice, and a name under one that is not a directory are refused
-// before anything is copied. The instruction goes to kiln/instruction.md, mode
-// 0644. A base that is not nil, a pack of the trees that the run's baseline
+// before anything is copied. cardConfig, when it is not nil, is a tar of the
+// same kind, the card's own Claude Code configuration of a laid-over run: it
+// goes under kiln/card-config/, checked and owned the same way, and that
+// directory is written even when the tar is empty. The instruction goes to
+// kiln/instruction.md, mode 0644. A base that is not nil, a pack of the trees that the run's baseline
 // commits are made of, goes to kiln/base.pack, mode 0644, likewise.
 //
 // Everything is copied with one `docker cp --archive`, so nothing else can be
 // placed. It can be repeated on a container that has not started: the same
 // files are written again.
-func PlaceRun(ctx context.Context, id string, files io.Reader, instruction, base []byte) error {
+func PlaceRun(ctx context.Context, id string, files, cardConfig io.Reader, instruction, base []byte) error {
 	c, err := existingRun(ctx, id)
 	if err != nil {
 		return err
@@ -78,7 +84,7 @@ func PlaceRun(ctx context.Context, id string, files io.Reader, instruction, base
 	if c.state != "created" {
 		return fmt.Errorf("the container %s has started (it is %s); nothing is placed in it", runName(id), c.state)
 	}
-	archive, err := placing(files, instruction, base)
+	archive, err := placing(files, cardConfig, instruction, base)
 	if err != nil {
 		return err
 	}
@@ -86,98 +92,22 @@ func PlaceRun(ctx context.Context, id string, files io.Reader, instruction, base
 	return dockerIO(ctx, bytes.NewReader(archive), nil, "cp", "--archive", "-", c.id+":/")
 }
 
-// placing reads the caller's tar and returns the tar that PlaceRun copies.
-func placing(files io.Reader, instruction, base []byte) ([]byte, error) {
+// placing reads the caller's tars and returns the tar that PlaceRun copies.
+func placing(files, cardConfig io.Reader, instruction, base []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	written := map[string]byte{} // a path under work/, "" for work/ itself, by type
-
-	header := func(name string, typ byte, mode int64, size int64, link string, mtime time.Time) error {
-		if mtime.Before(time.Unix(0, 0)) {
-			mtime = time.Unix(0, 0) // a time a plain tar header can hold
-		}
-		return tw.WriteHeader(&tar.Header{
-			Typeflag: typ,
-			Name:     name,
-			Linkname: link,
-			Mode:     mode & 0o777,
-			Uid:      runUID,
-			Gid:      runUID,
-			Size:     size,
-			ModTime:  mtime.Truncate(time.Second),
-			Format:   tar.FormatPAX, // for long names; no other record is written
-		})
-	}
-	dir := func(p string, mode int64, mtime time.Time) error {
-		if t, ok := written[p]; ok {
-			if t != tar.TypeDir {
-				return fmt.Errorf("refused: %q is a directory as well as a file or a symlink", p)
-			}
-			return nil
-		}
-		written[p] = tar.TypeDir
-		return header(path.Join(workDir, p)+"/", tar.TypeDir, mode, 0, "", mtime)
-	}
-
-	if err := dir("", 0o755, time.Unix(0, 0)); err != nil {
+	if err := placeUnder(tw, workDir, files); err != nil {
 		return nil, err
 	}
-	tr := tar.NewReader(files)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reading the files to place: %w", err)
-		}
-		name, err := placeName(hdr.Name)
-		if err != nil {
+	if cardConfig != nil {
+		if err := placeUnder(tw, cardConfigDir, cardConfig); err != nil {
 			return nil, err
-		}
-		switch hdr.Typeflag {
-		case tar.TypeReg, tar.TypeDir, tar.TypeSymlink:
-		default:
-			return nil, fmt.Errorf("refused: %q is of the tar type %q; only files, directories and symlinks are placed", hdr.Name, hdr.Typeflag)
-		}
-		// Every parent first, as a directory of the run's own.
-		parts := strings.Split(name, "/")
-		for i := 1; i < len(parts); i++ {
-			if err := dir(strings.Join(parts[:i], "/"), 0o755, hdr.ModTime); err != nil {
-				return nil, err
-			}
-		}
-		if hdr.Typeflag == tar.TypeDir {
-			if t, ok := written[name]; ok && t == tar.TypeDir {
-				// Named after a path under it: its own entry sets its mode.
-				if err := header(path.Join(workDir, name)+"/", tar.TypeDir, hdr.Mode, 0, "", hdr.ModTime); err != nil {
-					return nil, err
-				}
-				continue
-			}
-			if err := dir(name, hdr.Mode, hdr.ModTime); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		if _, ok := written[name]; ok {
-			return nil, fmt.Errorf("refused: %q is given twice", name)
-		}
-		written[name] = hdr.Typeflag
-		var size int64
-		if hdr.Typeflag == tar.TypeReg {
-			size = hdr.Size
-		}
-		if err := header(path.Join(workDir, name), hdr.Typeflag, hdr.Mode, size, hdr.Linkname, hdr.ModTime); err != nil {
-			return nil, err
-		}
-		if size > 0 {
-			if _, err := io.Copy(tw, tr); err != nil {
-				return nil, fmt.Errorf("reading %q: %w", name, err)
-			}
 		}
 	}
 
+	header := func(name string, typ byte, mode int64, size int64, link string, mtime time.Time) error {
+		return placeHeader(tw, name, typ, mode, size, link, mtime)
+	}
 	if err := header(instructionPath, tar.TypeReg, 0o644, int64(len(instruction)), "", time.Now()); err != nil {
 		return nil, err
 	}
@@ -196,6 +126,107 @@ func placing(files io.Reader, instruction, base []byte) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// placeHeader writes the header of one entry that PlaceRun places: owned by
+// the run's user, with only its permission bits.
+func placeHeader(tw *tar.Writer, name string, typ byte, mode int64, size int64, link string, mtime time.Time) error {
+	if mtime.Before(time.Unix(0, 0)) {
+		mtime = time.Unix(0, 0) // a time a plain tar header can hold
+	}
+	return tw.WriteHeader(&tar.Header{
+		Typeflag: typ,
+		Name:     name,
+		Linkname: link,
+		Mode:     mode & 0o777,
+		Uid:      runUID,
+		Gid:      runUID,
+		Size:     size,
+		ModTime:  mtime.Truncate(time.Second),
+		Format:   tar.FormatPAX, // for long names; no other record is written
+	})
+}
+
+// placeUnder writes the entries of the caller's tar files under the
+// directory dir0 of the run, with that directory first and a directory entry for every
+// parent, as PlaceRun says.
+func placeUnder(tw *tar.Writer, dir0 string, files io.Reader) error {
+	written := map[string]byte{} // a path under dir0, "" for dir0 itself, by type
+
+	header := func(name string, typ byte, mode int64, size int64, link string, mtime time.Time) error {
+		return placeHeader(tw, name, typ, mode, size, link, mtime)
+	}
+	dir := func(p string, mode int64, mtime time.Time) error {
+		if t, ok := written[p]; ok {
+			if t != tar.TypeDir {
+				return fmt.Errorf("refused: %q is a directory as well as a file or a symlink", p)
+			}
+			return nil
+		}
+		written[p] = tar.TypeDir
+		return header(path.Join(dir0, p)+"/", tar.TypeDir, mode, 0, "", mtime)
+	}
+
+	if err := dir("", 0o755, time.Unix(0, 0)); err != nil {
+		return err
+	}
+	tr := tar.NewReader(files)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("reading the files to place: %w", err)
+		}
+		name, err := placeName(hdr.Name)
+		if err != nil {
+			return err
+		}
+		switch hdr.Typeflag {
+		case tar.TypeReg, tar.TypeDir, tar.TypeSymlink:
+		default:
+			return fmt.Errorf("refused: %q is of the tar type %q; only files, directories and symlinks are placed", hdr.Name, hdr.Typeflag)
+		}
+		// Every parent first, as a directory of the run's own.
+		parts := strings.Split(name, "/")
+		for i := 1; i < len(parts); i++ {
+			if err := dir(strings.Join(parts[:i], "/"), 0o755, hdr.ModTime); err != nil {
+				return err
+			}
+		}
+		if hdr.Typeflag == tar.TypeDir {
+			if t, ok := written[name]; ok && t == tar.TypeDir {
+				// Named after a path under it: its own entry sets its mode.
+				if err := header(path.Join(dir0, name)+"/", tar.TypeDir, hdr.Mode, 0, "", hdr.ModTime); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := dir(name, hdr.Mode, hdr.ModTime); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, ok := written[name]; ok {
+			return fmt.Errorf("refused: %q is given twice", name)
+		}
+		written[name] = hdr.Typeflag
+		var size int64
+		if hdr.Typeflag == tar.TypeReg {
+			size = hdr.Size
+		}
+		if err := header(path.Join(dir0, name), hdr.Typeflag, hdr.Mode, size, hdr.Linkname, hdr.ModTime); err != nil {
+			return err
+		}
+		if size > 0 {
+			if _, err := io.Copy(tw, tr); err != nil {
+				return fmt.Errorf("reading %q: %w", name, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // placeName judges a name in the caller's tar and returns it cleaned.

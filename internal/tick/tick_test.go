@@ -595,6 +595,11 @@ func TestInputs(t *testing.T) {
 	if in.Parent != "" {
 		t.Errorf("a run from main has the parent %q", in.Parent)
 	}
+	// A run that starts is given the head of main, which a run in flight
+	// takes from its container (ADR 0025).
+	if in.Main != main {
+		t.Errorf("a run that starts has the main %q, want %s", in.Main, main)
+	}
 	unknown := row
 	unknown.ID, unknown.Commit = "ab12cd34-1-9", strings.Repeat("0", 40)
 	if _, _, err := c.inputs(t.Context(), unknown, card, false); err == nil || !strings.Contains(err.Error(), "merge-base") {
@@ -615,8 +620,10 @@ func TestInputs(t *testing.T) {
 	if got := string(readFile(t, again.Instruction)); got != other {
 		t.Errorf("the file of a run in flight was written again: %q", got)
 	}
-	if !reflect.DeepEqual(again, in) {
-		t.Errorf("the inputs differ: %+v, was %+v", again, in)
+	inFlight := in
+	inFlight.Main = ""
+	if !reflect.DeepEqual(again, inFlight) {
+		t.Errorf("the inputs differ: %+v, was %+v", again, inFlight)
 	}
 
 	// A run in flight whose file is missing has it written again.

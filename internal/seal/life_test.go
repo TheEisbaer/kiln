@@ -340,14 +340,14 @@ func testLife(t *testing.T, f fixture, probeID string) {
 		must(t, "create", "--name", runName(id), "--network", "none", f.upstreamImage)
 		container := containerID(t, runName(id))
 		for what, call := range map[string]func() error{
-			"PlaceRun":    func() error { return PlaceRun(t.Context(), id, bytes.NewReader(tarOf(t)), nil, nil) },
+			"PlaceRun":    func() error { return PlaceRun(t.Context(), id, bytes.NewReader(tarOf(t)), nil, nil, nil) },
 			"StartRun":    func() error { return StartRun(t.Context(), id) },
 			"ReadRun":     func() error { return ReadRun(t.Context(), id, false, io.Discard, io.Discard) },
 			"InspectRun":  func() error { _, err := InspectRun(t.Context(), id); return err },
 			"StopRun":     func() error { return StopRun(t.Context(), id) },
 			"CopyFromRun": func() error { return CopyFromRun(t.Context(), id, "/", io.Discard) },
 			"SaveRun": func() error {
-				_, _, err := SaveRun(t.Context(), id, f.runImage, strings.Repeat("0", 40), nil)
+				_, _, err := SaveRun(t.Context(), id, f.runImage, strings.Repeat("0", 40), nil, nil)
 				return err
 			},
 		} {
@@ -365,7 +365,7 @@ func testLife(t *testing.T, f fixture, probeID string) {
 // PlaceRun refuses into one that has not, after a file it accepts.
 func testPlaceRefusals(t *testing.T, f fixture, probeID string) {
 	late := tarOf(t, file("late.txt", 0o644, "late\n"))
-	if err := PlaceRun(t.Context(), probeID, bytes.NewReader(late), nil, nil); err == nil {
+	if err := PlaceRun(t.Context(), probeID, bytes.NewReader(late), nil, nil, nil); err == nil {
 		t.Error("on a started container: no error")
 	}
 	if diff := must(t, "diff", runName(probeID)); strings.Contains(diff, "late.txt") {
@@ -390,7 +390,7 @@ func testPlaceRefusals(t *testing.T, f fixture, probeID string) {
 		"a file under a file":     {ok, file("a.txt/x", 0o644, "x\n")},
 		"a directory over a file": {ok, {hdr: foreign(tar.Header{Typeflag: tar.TypeDir, Name: "a.txt/", Mode: 0o755})}},
 	} {
-		if err := PlaceRun(t.Context(), id, bytes.NewReader(tarOf(t, entries...)), []byte("instruction\n"), nil); err == nil {
+		if err := PlaceRun(t.Context(), id, bytes.NewReader(tarOf(t, entries...)), nil, []byte("instruction\n"), nil); err == nil {
 			t.Errorf("with %s: no error", what)
 		}
 		if diff := must(t, "diff", runName(id)); diff != "" {
@@ -455,12 +455,12 @@ func testSave(t *testing.T, f fixture) {
 
 	id := f.runID("save")
 	createRun(t, Run{ID: id, Image: f.runImage, Proxy: f.proxy.Name, Command: []string{"sh", "-c", saveRunScript}})
-	if err := PlaceRun(t.Context(), id, bytes.NewReader(tarOf(t, entries...)), []byte("save\n"), nil); err != nil {
+	if err := PlaceRun(t.Context(), id, bytes.NewReader(tarOf(t, entries...)), nil, []byte("save\n"), nil); err != nil {
 		t.Fatal(err)
 	}
 	startAndWait(t, id)
 
-	newTree, pack, err := SaveRun(t.Context(), id, f.runImage, tree, []byte(base))
+	newTree, pack, err := SaveRun(t.Context(), id, f.runImage, tree, []byte(base), nil)
 	if err != nil {
 		t.Fatalf("SaveRun (the mode-000 case and the read-only .git need chmod first): %v", err)
 	}
@@ -519,7 +519,7 @@ func testSave(t *testing.T, f fixture) {
 	assertNoSave(t, id)
 
 	t.Run("saved twice", func(t *testing.T) {
-		again, _, err := SaveRun(t.Context(), id, f.runImage, tree, []byte(base))
+		again, _, err := SaveRun(t.Context(), id, f.runImage, tree, []byte(base), nil)
 		if err != nil || again != newTree {
 			t.Errorf("the second save gave %s (%v), the first %s", again, err, newTree)
 		}
@@ -529,7 +529,7 @@ func testSave(t *testing.T, f fixture) {
 	t.Run("after a save container left behind", func(t *testing.T) {
 		must(t, "create", "--name", saveName(id), "--label", runLabel+"="+id, "--network", "none", f.runImage, "true")
 		left := containerID(t, saveName(id))
-		again, _, err := SaveRun(t.Context(), id, f.runImage, tree, []byte(base))
+		again, _, err := SaveRun(t.Context(), id, f.runImage, tree, []byte(base), nil)
 		if err != nil || again != newTree {
 			t.Errorf("the save gave %s (%v), the first %s", again, err, newTree)
 		}
@@ -542,7 +542,7 @@ func testSave(t *testing.T, f fixture) {
 		must(t, "create", "--name", saveName(id), "--network", "none", f.upstreamImage)
 		foreign := containerID(t, saveName(id))
 		cleanup(t, "rm", "--force", foreign)
-		if _, _, err := SaveRun(t.Context(), id, f.runImage, tree, []byte(base)); err == nil {
+		if _, _, err := SaveRun(t.Context(), id, f.runImage, tree, []byte(base), nil); err == nil {
 			t.Error("SaveRun: no error")
 		}
 		if err := RemoveRun(t.Context(), id, f.proxy.Name); err == nil {

@@ -25,7 +25,16 @@
 # kiln-stand-in-escape one with ESC, CSI, OSC, a carriage return and a byte
 # that is not UTF-8; kiln-stand-in-nochange makes an implement run change
 # nothing; and kiln-stand-in-fail makes it exit 1 with no result, after the
-# spec.
+# spec. kiln-stand-in-config makes a first implement run change CLAUDE.md,
+# pkg/AGENTS.md and .claude/hooks/check.sh, add .claude/skills/new/SKILL.md and
+# remove .claude/hooks/gone.sh in /work, and an implement run told a last
+# review append "A fix of the configuration." to /kiln/card-config/CLAUDE.md
+# and "dropped" to /work/CLAUDE.md, besides its line in NOTES.md.
+#
+# Every run first writes /kiln/out/seen.txt, what it sees of the repo's Claude
+# Code configuration (ADR 0025): CLAUDE.md, pkg/AGENTS.md and
+# .claude/hooks/check.sh in /work, the list of /work/.claude, and whether
+# /kiln/card-config exists.
 #
 # The card that changes the pin in images/run/Dockerfile updates it. The tick
 # test's run of the real Claude Code fails when an event or a field printed
@@ -47,12 +56,33 @@ case "$instruction" in
         while [ ! -e /tmp/gate ]; do sleep 0.05; done ;;
 esac
 word=$(printf '%s\n' "$instruction" | grep -o 'kiln-case-[a-z0-9-]*' | head -n 1 || true)
+{
+    for f in CLAUDE.md pkg/AGENTS.md .claude/hooks/check.sh; do
+        printf '== %s\n' "$f"
+        cat "$f" 2>/dev/null || printf '(none)\n'
+    done
+    printf '== .claude\n'
+    find .claude 2>/dev/null | sort
+    if [ -d /kiln/card-config ]; then printf '== card-config present\n'; else printf '== card-config absent\n'; fi
+} > /kiln/out/seen.txt
 case "$instruction" in
     "# Implement a card"*)
         case "$instruction" in
             *kiln-stand-in-nochange*) ;;
             *"## The last review"*) printf 'A fix after the review.\n' >> NOTES.md ;;
             *) printf 'A line from the implement run.\n' >> NOTES.md ;;
+        esac
+        case "$instruction" in
+            *kiln-stand-in-config*"## The last review"*)
+                printf 'A fix of the configuration.\n' >> /kiln/card-config/CLAUDE.md
+                printf 'dropped\n' >> CLAUDE.md ;;
+            *kiln-stand-in-config*)
+                printf 'The card'"'"'s CLAUDE.md.\n' > CLAUDE.md
+                printf 'The card'"'"'s AGENTS.md.\n' > pkg/AGENTS.md
+                printf 'The card'"'"'s hook.\n' > .claude/hooks/check.sh
+                mkdir -p .claude/skills/new
+                printf 'The card'"'"'s skill.\n' > .claude/skills/new/SKILL.md
+                rm .claude/hooks/gone.sh ;;
         esac
         printf '# Report %s\n\nAppended a line to NOTES.md.\n' "$word" > /kiln/out/report.md
         printf 'Adds a line to NOTES.md (%s).\n\nChecked by reading NOTES.md.\n' "$word" > /kiln/out/pull-request.md ;;

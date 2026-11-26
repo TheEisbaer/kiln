@@ -467,6 +467,10 @@ func TestSteps(t *testing.T) {
 			t.Parallel()
 			testWeb(t, f)
 		})
+		t.Run("laid over, killed, then started again", func(t *testing.T) {
+			t.Parallel()
+			testLaidOver(t, f)
+		})
 	})
 
 	// The baseline only reads the instance's copy: it holds main and the cases'
@@ -525,6 +529,8 @@ func (f *fixture) makeRepo(t *testing.T) {
 			"  printf 'extra\\n' > .git/extra ;;\n" +
 			"*kiln-case-git-gone*) rm -rf .git ;;\n" +
 			"*kiln-case-git-link*) rm -rf .git && ln -s / .git ;;\n" +
+			// What a laid-over run sees, read by the case "laid over".
+			"*kiln-case-config*) cat CLAUDE.md && cat /kiln/card-config/CLAUDE.md ;;\n" +
 			"esac\n" +
 			"printf 'A note from the run.\\n' > /kiln/out/note.md\n" +
 			// To the container's own standard error, which kiln run shows.
