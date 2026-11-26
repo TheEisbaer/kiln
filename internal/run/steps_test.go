@@ -3,6 +3,7 @@ package run
 import (
 	"archive/tar"
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -505,12 +506,230 @@ func TestCheckFlags(t *testing.T) {
 }
 
 func TestCommand(t *testing.T) {
-	r := &run{Inputs: Inputs{Model: "claude-haiku-5-5", Effort: "low"}}
-	got := strings.Join(r.command(), " ")
-	want := `sh -c exec claude "$@" < /kiln/instruction.md sh -p --output-format stream-json --verbose --permission-mode bypassPermissions --model claude-haiku-5-5 --effort low`
-	if got != want {
-		t.Errorf("the command is\n%s\nwant\n%s", got, want)
+	r := &run{Inputs: Inputs{Model: "claude-haiku-5-5", Effort: "low"}, tree: "aaa", parentTree: "bbb"}
+	got := r.command()
+	if len(got) < 3 || got[0] != "sh" || got[1] != "-c" || got[2] != baselineScript+"exec claude \"$@\" < /kiln/instruction.md\n" {
+		t.Fatalf("the command is %q", got)
 	}
+	want := `sh /work /kiln/base.pack aaa bbb -p --output-format stream-json --verbose --permission-mode bypassPermissions --model claude-haiku-5-5 --effort low`
+	if g := strings.Join(got[3:], " "); g != want {
+		t.Errorf("the command's arguments are\n%s\nwant\n%s", g, want)
+	}
+	r.parentTree = ""
+	if g := strings.Join(r.command()[3:], " "); !strings.HasPrefix(g, "sh /work /kiln/base.pack aaa  -p ") {
+		t.Errorf("without a parent the fourth argument is empty: %q", g)
+	}
+}
+
+// TestBaseline runs the baseline script on a placed tree, with a global
+// configuration whose core.hooksPath holds hooks that leave a marker, to see
+// that none runs.
+func TestBaseline(t *testing.T) {
+	repo, commit := bareRepo(t, map[string]string{
+		".gitignore":        "build/\n",
+		"build/tracked.txt": "tracked under an ignored path\n",
+		".gitattributes":    "kept.md export-ignore\n",
+		"kept.md":           "kept\n",
+		"link":              "->NOTES.md",
+		"bin/tool.sh":       "echo hi\n",
+		"NOTES.md":          "# Notes\n",
+	}, "bin/tool.sh")
+	// A parent: main as it was, with the start commit on top of it.
+	tree := gitIn(t, repo, "rev-parse", commit+"^{tree}")
+	entries, err := listTree(t.Context(), repo, commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarData, err := placingTar(t.Context(), repo, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The other tree of the parent: the start's with one file less.
+	idx := filepath.Join(t.TempDir(), "index")
+	gitEnvIdx := func(args ...string) string {
+		cmd := exec.Command("git", append([]string{"--git-dir=" + repo}, args...)...)
+		cmd.Env = append(gitEnv(), "GIT_INDEX_FILE="+idx, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	gitEnvIdx("read-tree", tree)
+	gitEnvIdx("rm", "--cached", "--quiet", "kept.md")
+	parentTree := gitEnvIdx("write-tree")
+
+	hooks := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+	for _, h := range []string{"reference-transaction", "post-index-change"} {
+		writeIn(t, hooks, h, "#!/bin/sh\ntouch "+marker+"\n", 0o755)
+	}
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	writeIn(t, filepath.Dir(global), filepath.Base(global), "[core]\n\thooksPath = "+hooks+"\n", 0o644)
+
+	// baseline places the tree in a fresh directory and runs the script there.
+	baseline := func(t *testing.T, parent string, pre func(dir string)) (dir string, stdout string, err error) {
+		t.Helper()
+		dir = t.TempDir()
+		untar := exec.Command("tar", "-x", "-C", dir)
+		untar.Stdin = bytes.NewReader(tarData)
+		if out, err := untar.CombinedOutput(); err != nil {
+			t.Fatalf("tar: %v\n%s", err, out)
+		}
+		trees := []string{tree}
+		if parent != "" {
+			trees = append(trees, parent)
+		}
+		pack, err := basePack(t.Context(), repo, trees...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		packFile := filepath.Join(t.TempDir(), "base.pack")
+		if err := os.WriteFile(packFile, pack, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if pre != nil {
+			pre(dir)
+		}
+		cmd := exec.Command("sh", "-c", baselineScript, "sh", dir, packFile, tree, parent)
+		cmd.Env = append(gitEnv(), "GIT_CONFIG_GLOBAL="+global, "GIT_CONFIG_NOSYSTEM=1")
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		var errOut bytes.Buffer
+		cmd.Stderr = &errOut
+		err = cmd.Run()
+		if err != nil {
+			err = fmt.Errorf("%w: %s", err, errOut.String())
+		}
+		return dir, out.String(), err
+	}
+	// in runs git in the placed directory, with the same global configuration.
+	in := func(t *testing.T, dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(gitEnv(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimRight(string(out), "\n")
+	}
+	// The commit that commit-tree gives on the host, with the same identity.
+	hostCommit := func(t *testing.T, tree, message string, parent string) string {
+		t.Helper()
+		args := []string{"commit-tree"}
+		if parent != "" {
+			args = append(args, "-p", parent)
+		}
+		cmd := gitCommand(t.Context(), repo, append(args, "-m", message, tree)...)
+		cmd.Env = append(gitEnv(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+			"GIT_AUTHOR_NAME=kiln", "GIT_AUTHOR_EMAIL=kiln@invalid", "GIT_AUTHOR_DATE=@0 +0000",
+			"GIT_COMMITTER_NAME=kiln", "GIT_COMMITTER_EMAIL=kiln@invalid", "GIT_COMMITTER_DATE=@0 +0000")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	t.Run("one commit holding exactly the tree given", func(t *testing.T) {
+		dir, stdout, err := baseline(t, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stdout != "" {
+			t.Errorf("the script wrote to standard output: %q", stdout)
+		}
+		if got := in(t, dir, "rev-parse", "HEAD^{tree}"); got != tree {
+			t.Errorf("the tree is %s, want %s", got, tree)
+		}
+		want := hostCommit(t, tree, "Where the work stood when this run began", "")
+		if got := in(t, dir, "rev-parse", "HEAD"); got != want {
+			t.Errorf("HEAD is %s, want %s", got, want)
+		}
+		if got := in(t, dir, "symbolic-ref", "HEAD"); got != "refs/heads/start" {
+			t.Errorf("HEAD names %s", got)
+		}
+		if got := in(t, dir, "rev-list", "--count", "HEAD"); got != "1" {
+			t.Errorf("%s commits, want 1", got)
+		}
+		if got := in(t, dir, "remote"); got != "" {
+			t.Errorf("remotes: %q", got)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".git", "hooks")); err == nil {
+			t.Error(".git/hooks exists")
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Error("a hook ran")
+		}
+		if got := in(t, dir, "status", "--porcelain"); got != "" {
+			t.Errorf("git status after the baseline: %q", got)
+		}
+
+		writeIn(t, dir, "NOTES.md", "# Notes\nmore\n", 0o644)
+		writeIn(t, dir, "build/new.txt", "ignored\n", 0o644)
+		if got := in(t, dir, "status", "--porcelain"); got != " M NOTES.md" {
+			t.Errorf("git status after a change: %q", got)
+		}
+		if got := in(t, dir, "diff", "--numstat"); got != "1\t0\tNOTES.md" {
+			t.Errorf("git diff --numstat: %q", got)
+		}
+		if got := in(t, dir, "show", "HEAD:NOTES.md"); got != "# Notes" {
+			t.Errorf("git show HEAD:NOTES.md: %q", got)
+		}
+
+		dir2, _, err := baseline(t, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a, b := in(t, dir, "rev-parse", "HEAD"), in(t, dir2, "rev-parse", "HEAD"); a != b {
+			t.Errorf("two baselines of the same tree: %s and %s", a, b)
+		}
+	})
+
+	t.Run("a parent where the card's branch left main", func(t *testing.T) {
+		dir, stdout, err := baseline(t, parentTree, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stdout != "" {
+			t.Errorf("the script wrote to standard output: %q", stdout)
+		}
+		parent := hostCommit(t, parentTree, "Where the card branch left main", "")
+		want := hostCommit(t, tree, "Where the work stood when this run began", parent)
+		if got := in(t, dir, "rev-parse", "HEAD"); got != want {
+			t.Errorf("HEAD is %s, want %s", got, want)
+		}
+		if got := in(t, dir, "rev-parse", "HEAD~1"); got != parent {
+			t.Errorf("HEAD~1 is %s, want %s", got, parent)
+		}
+		if got := in(t, dir, "rev-list", "--count", "HEAD"); got != "2" {
+			t.Errorf("%s commits, want 2", got)
+		}
+		if got := in(t, dir, "status", "--porcelain"); got != "" {
+			t.Errorf("git status after the baseline: %q", got)
+		}
+		if got := in(t, dir, "diff", "--name-status", "HEAD~1"); got != "A\tkept.md" {
+			t.Errorf("git diff HEAD~1 of an untouched tree: %q", got)
+		}
+		if got := in(t, dir, "show", "HEAD~1:NOTES.md"); got != "# Notes" {
+			t.Errorf("git show HEAD~1:NOTES.md: %q", got)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Error("a hook ran")
+		}
+	})
+
+	t.Run("a directory that has a .git fails", func(t *testing.T) {
+		_, _, err := baseline(t, "", func(dir string) {
+			in(t, dir, "init", "--quiet")
+			in(t, dir, "-c", "user.name=x", "-c", "user.email=x@invalid", "commit", "--quiet", "--allow-empty", "--message", "x", "--no-gpg-sign")
+		})
+		if err == nil {
+			t.Error("the script succeeded")
+		}
+	})
 }
 
 func TestPrintable(t *testing.T) {
@@ -553,6 +772,27 @@ func TestPrintable(t *testing.T) {
 
 // A repo given by a relative path, as `kiln run --repo` allows, is found from
 // the directory the caller is in.
+// TestParentTreeOf: a repeat takes the parent tree from the container's
+// label, which must be empty or the full ID of a tree of the repo.
+func TestParentTreeOf(t *testing.T) {
+	repo, commit := bareRepo(t, map[string]string{"NOTES.md": "notes\n"})
+	tree, err := gitLine(t.Context(), repo, "rev-parse", commit+"^{tree}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := parentTreeOf(t.Context(), repo, ""); got != "" || err != nil {
+		t.Errorf("no label: want \"\", got %q, %v", got, err)
+	}
+	if got, err := parentTreeOf(t.Context(), repo, tree); got != tree || err != nil {
+		t.Errorf("the tree: want %s, got %q, %v", tree, got, err)
+	}
+	for _, label := range []string{commit, tree[:12], "HEAD", "--all", strings.Repeat("0", 40)} {
+		if got, err := parentTreeOf(t.Context(), repo, label); err == nil {
+			t.Errorf("the label %q: want an error, got %q", label, got)
+		}
+	}
+}
+
 func TestRelativeRepo(t *testing.T) {
 	repo, _ := bareRepo(t, map[string]string{"NOTES.md": "notes\n"})
 	t.Chdir(filepath.Dir(repo))

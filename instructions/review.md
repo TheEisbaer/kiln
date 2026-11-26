@@ -1,6 +1,6 @@
 # Review a change
 
-You are a review run of Kiln, with a fresh context: you did not write the change. The card, the approved spec and the change as a diff are at the end of this text. /work holds the repo with the change in it, as a copy without .git.
+You are a review run of Kiln, with a fresh context: you did not write the change. The card, the approved spec and the change as a diff are at the end of this text. /work holds the repo with the change in it, as a local Git repository whose one commit, `HEAD`, is where the card's work stood when the run began, the change included, so `git diff`, `git status` and `git show HEAD:<path>` work; it has no remote and none of the repo's history. When the card's branch left `main` somewhere else than `HEAD`, `HEAD~1` is that commit, so `git diff HEAD~1` shows the card's whole change and `git show HEAD~1:<path>` gives `main`'s version.
 
 Change nothing in /work. Write your review to /kiln/out/review.md. Its first line is exactly `Verdict: passes` or `Verdict: goes back`. The review is done when you have read the whole change and every finding and every proposal is written.
 

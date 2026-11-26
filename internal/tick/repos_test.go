@@ -110,7 +110,7 @@ func TestCardRunsOnItsRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if in.Repo != r.second.Copy || !slices.Equal(in.Hosts, []string{"example.org"}) || in.Commit != r.secondMain {
+	if in.Repo != r.second.Copy || !slices.Equal(in.Hosts, []string{"example.org"}) || in.Commit != r.secondMain || in.Parent != "" {
 		t.Errorf("the spec run's inputs have the repo %s, the hosts %v and the commit %s, want %s, [example.org] and %s",
 			in.Repo, in.Hosts, in.Commit, r.second.Copy, r.secondMain)
 	}
@@ -121,8 +121,8 @@ func TestCardRunsOnItsRepo(t *testing.T) {
 	if commit, held, err := c.startsFrom(ctx, card); err != nil || held != "" || commit != tip {
 		t.Fatalf("the implement run starts from %q (%q, %v), want the branch's tip %s", commit, held, err, tip)
 	}
-	if in, _, err := c.inputs(ctx, row(card, tip), card, false); err != nil || in.Repo != r.second.Copy || in.Hosts != nil {
-		t.Errorf("the implement run's inputs: %+v, %v", in, err)
+	if in, _, err := c.inputs(ctx, row(card, tip), card, false); err != nil || in.Repo != r.second.Copy || in.Hosts != nil || in.Parent != r.secondMain {
+		t.Errorf("the implement run's inputs: %+v, %v; want the parent %s, where the branch left main", in, err, r.secondMain)
 	}
 
 	// The review run: told the diff made in the second repo's copy.

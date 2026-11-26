@@ -6,7 +6,7 @@ Work in three steps: judge the card's size, research to that size, and write the
 
 ## Where you are
 
-- The repo is in /work, at the commit the card starts from, as a copy without .git. Change nothing in /work: nothing changed there is kept or reaches the repo. Experiments with files run in a directory of their own under /tmp.
+- The repo is in /work, at the commit the card starts from, as a local Git repository whose one commit, `HEAD`, is where the card's work stood when the run began, so `git diff`, `git status` and `git show HEAD:<path>` work; it has no remote and none of the repo's history. When the card's branch left `main` somewhere else than `HEAD`, `HEAD~1` is that commit, so `git diff HEAD~1` shows the card's whole change and `git show HEAD~1:<path>` gives `main`'s version. Change nothing in /work: nothing changed there is kept or reaches the repo. Experiments with files run in a directory of their own under /tmp.
 - Write the spec to /kiln/out/spec.md. It is the only thing of this run that the developer reads. Write it as often as you like; the last version counts. It must be shorter than 256 KiB.
 - Nobody answers during the run: what only the developer can decide goes into the spec's questions.
 - You hold no credential and there is no container engine, so pushing, opening a pull request and reaching the repo's Git host are out of reach. Leave them untried.

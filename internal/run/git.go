@@ -207,10 +207,11 @@ func readObject(r *bufio.Reader, object string) ([]byte, error) {
 	return data[:size], nil
 }
 
-// basePack is a pack of a tree's objects, as `git rev-list --objects <tree> |
-// git pack-objects --stdout` makes it: what the save container starts from.
-func basePack(ctx context.Context, repo, tree string) ([]byte, error) {
-	list, err := git(ctx, repo, nil, nil, "rev-list", "--objects", tree)
+// basePack is a pack of the objects of one or more trees, as `git rev-list
+// --objects <tree>... | git pack-objects --stdout` makes it: what the save
+// container starts from, and what the baseline is made of.
+func basePack(ctx context.Context, repo string, trees ...string) ([]byte, error) {
+	list, err := git(ctx, repo, nil, nil, append([]string{"rev-list", "--objects"}, trees...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -341,3 +342,43 @@ func savedAs(ctx context.Context, repo, commit, parent, id, tree string) (bool, 
 	}
 	return at == tree, nil
 }
+
+// baselineScript makes /work a local Git repository with the run's baseline,
+// run as `sh -c <baselineScript> sh <work> <pack> <tree> <parent-tree> ...`.
+// <pack> holds the objects of <tree> and, when it is not empty, of
+// <parent-tree>. The commit at <tree> is the baseline, which HEAD names on the
+// branch start; with a parent tree it has one parent, a commit of that tree,
+// where the card's branch left main. Both are by kiln <kiln@invalid>, dated
+// @0 +0000, so the same trees always give the same commits. It is made from
+// the tree and not by `git add`, so that .gitignore and .gitattributes decide
+// nothing in it. No hook runs, whatever the system's configuration says, no
+// remote or reflog is made, and nothing goes to standard output, which is
+// Claude Code's event stream. It shifts four arguments away.
+const baselineScript = `set -eu
+work=$1 pack=$2 tree=$3 parent=$4
+shift 4
+{
+g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.logAllRefUpdates=false "$@"; }
+c() {
+	(
+		export GIT_AUTHOR_NAME=kiln GIT_AUTHOR_EMAIL=kiln@invalid GIT_AUTHOR_DATE='@0 +0000'
+		export GIT_COMMITTER_NAME=kiln GIT_COMMITTER_EMAIL=kiln@invalid GIT_COMMITTER_DATE='@0 +0000'
+		g commit-tree --no-gpg-sign "$@"
+	)
+}
+cd "$work"
+if [ -e .git ] || [ -L .git ]; then echo "$work/.git exists already" ; exit 1; fi
+g init --quiet --template= .
+g symbolic-ref HEAD refs/heads/start
+g index-pack --stdin < "$pack" > /dev/null
+if [ -n "$parent" ]; then
+	before=$(c -m 'Where the card branch left main' "$parent")
+	commit=$(c -p "$before" -m 'Where the work stood when this run began' "$tree")
+else
+	commit=$(c -m 'Where the work stood when this run began' "$tree")
+fi
+g update-ref HEAD "$commit" ''
+g read-tree HEAD
+g update-index -q --refresh
+} >&2
+`

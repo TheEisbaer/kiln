@@ -83,6 +83,8 @@ type fixture struct {
 	repo       string // the instance's copy
 	commit     string // the commit every run starts from
 	other      string // another commit, on top of it
+	startTree  string // the tree of commit
+	wantTree   string // the tree that the run's change gives, made without a baseline
 	runs       string
 	runImage   string
 	proxy      seal.Proxy
@@ -181,6 +183,22 @@ func TestSteps(t *testing.T) {
 			if got := toolResultsIn(t, filepath.Join(dir, "output.jsonl"))["toolu_kiln_1"]; !strings.Contains(got, "go version go1.") ||
 				!strings.Contains(got, "checked") {
 				t.Errorf("the Bash result is %q, want go's version and checked", got)
+			}
+
+			// The baseline, seen from inside the run: git works there.
+			got := toolResultsIn(t, filepath.Join(dir, "output.jsonl"))["toolu_kiln_1"]
+			for what, want := range map[string]string{
+				"the start commit's tree": f.startTree,
+				"the start's NOTES.md":    "# Notes\n",
+				"git status":              " M NOTES.md\n",
+				"git diff":                "1\t0\tNOTES.md",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("the Bash result has no %s (%q): %q", what, want, got)
+				}
+			}
+			if strings.Contains(got, "build/") {
+				t.Errorf("git status in the run shows an ignored path: %q", got)
 			}
 
 			// Started again after it is done: a repeat, not a retry.
@@ -432,10 +450,33 @@ func TestSteps(t *testing.T) {
 			})
 		})
 
+		// A run that writes into its .git, deletes it or replaces it with a
+		// symlink saves the same tree (assertDone).
+		for _, name := range []string{"git-junk", "git-gone", "git-link"} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				c := f.newCase(t, name)
+				if code, out, errOut := f.kiln(t, c, "", true); code != 0 {
+					t.Fatalf("exit status %d\n%s\n%s", code, out, errOut)
+				}
+				f.assertDone(t, c)
+			})
+		}
+
 		t.Run("a run with a list", func(t *testing.T) {
 			t.Parallel()
 			testWeb(t, f)
 		})
+	})
+
+	// The baseline only reads the instance's copy: it holds main and the cases'
+	// branches, and nothing else.
+	t.Run("the copy has no other ref", func(t *testing.T) {
+		for _, ref := range strings.Fields(gitIn(t, f.repo, "for-each-ref", "--format=%(refname)")) {
+			if ref != "refs/heads/main" && !strings.HasPrefix(ref, "refs/heads/try/") {
+				t.Errorf("the copy has the ref %s", ref)
+			}
+		}
 	})
 
 	// After every case, whose runs attached the proxy to their networks.
@@ -467,6 +508,24 @@ func (f *fixture) makeRepo(t *testing.T) {
 		"run.sh": "set -eu\n" +
 			"printf 'A line from the run.\\n' >> NOTES.md\n" +
 			"printf 'ignored\\n' > build/new.txt\n" +
+			// What the baseline gives (item 2 of the spec), read by the happy path.
+			"git rev-parse 'HEAD^{tree}'\n" +
+			"git show HEAD:NOTES.md\n" +
+			"git status --porcelain\n" +
+			"git diff --numstat\n" +
+			// What a run may do to its .git, which the save never reads.
+			"case \"$(cat /kiln/instruction.md)\" in\n" +
+			"*kiln-case-git-junk*)\n" +
+			"  mkdir -p .git/info .git/hooks\n" +
+			"  printf '*\\n' > .git/info/exclude\n" +
+			"  printf 'NOTES.md filter=evil\\n' > .git/info/attributes\n" +
+			"  printf '[filter \"evil\"]\\n\\tclean = echo EVIL\\n[core]\\n\\tworktree = /\\n' >> .git/config\n" +
+			"  printf '#!/bin/sh\\nexit 1\\n' > .git/hooks/pre-commit\n" +
+			"  chmod +x .git/hooks/pre-commit\n" +
+			"  printf 'extra\\n' > .git/extra ;;\n" +
+			"*kiln-case-git-gone*) rm -rf .git ;;\n" +
+			"*kiln-case-git-link*) rm -rf .git && ln -s / .git ;;\n" +
+			"esac\n" +
 			"printf 'A note from the run.\\n' > /kiln/out/note.md\n" +
 			// To the container's own standard error, which kiln run shows.
 			"printf 'run stderr \\033]0;kiln-title\\007\\n' > /proc/1/fd/2\n" +
@@ -479,6 +538,17 @@ func (f *fixture) makeRepo(t *testing.T) {
 	})
 	tree := gitIn(t, f.repo, "rev-parse", f.commit+"^{tree}")
 	f.other = gitIn(t, f.repo, "commit-tree", "-p", f.commit, "-m", "other", tree)
+	f.startTree = tree
+
+	// The tree that the run's change gives with no baseline: a clone with the
+	// line appended and everything added, as the save does.
+	clone := filepath.Join(f.dir, "want")
+	gitIn(t, f.dir, "clone", "--quiet", f.repo, clone)
+	if err := os.WriteFile(filepath.Join(clone, "NOTES.md"), []byte("# Notes\nA line from the run.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, clone, "add", "--all", "--force")
+	f.wantTree = gitIn(t, clone, "write-tree")
 }
 
 // testCase is one run of the test, by its case name.
@@ -609,6 +679,11 @@ func (f *fixture) assertDone(t *testing.T, c testCase) {
 	}
 	if got := gitIn(t, f.repo, "show", save+":NOTES.md"); got != "# Notes\nA line from the run." {
 		t.Errorf("NOTES.md is %q", got)
+	}
+
+	// The same tree as without a baseline for the same change.
+	if got := gitIn(t, f.repo, "rev-parse", save+"^{tree}"); got != f.wantTree {
+		t.Errorf("the save's tree is %s, want %s, the tree of the change without a baseline", got, f.wantTree)
 	}
 
 	// The record.
