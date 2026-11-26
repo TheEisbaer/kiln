@@ -1,10 +1,13 @@
 package run
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 )
 
@@ -25,6 +28,21 @@ var ConfigPathspecs = []string{
 
 // cardConfigPath is where a laid-over run finds the card's configuration.
 const cardConfigPath = "/kiln/card-config"
+
+// workPath is where a run finds its work tree.
+const workPath = "/work"
+
+// kilnPath is the directory of the card's configuration in a laid-over run,
+// and of everything else Kiln places there.
+var kilnPath = path.Dir(cardConfigPath)
+
+// maxLinks is how many symlinks the kernel follows in one lookup (Linux's
+// limit), after which the lookup fails.
+const maxLinks = 40
+
+// errTooManyLinks is the walk's answer to a lookup that takes more than
+// maxLinks symlinks.
+var errTooManyLinks = errors.New("too many symlinks")
 
 // excludes are the pathspecs as excludes: everything outside them.
 func excludes(pathspecs []string) []string {
@@ -213,4 +231,111 @@ func (r *run) mainTreeOf(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return gitLine(ctx, r.Repo, "rev-parse", "--verify", main+"^{tree}")
+}
+
+// reachesKiln tells whether the absolute path p of a run, followed the way
+// the run's kernel follows it, reaches /kiln. links maps each symlink of the
+// work tree, by its path under /work, to its target as Git stores it; every
+// other path counts as a plain directory. The walk goes component by
+// component from /, follows a link before what comes after it, and so takes
+// .. after the link is resolved. It reports true as soon as it stands at or
+// under /kiln, and when it ends at /, from where /kiln is one step away. After
+// maxLinks symlinks it returns errTooManyLinks.
+func reachesKiln(links map[string]string, p string) (bool, error) {
+	rest := strings.Split(p, "/")
+	at, hops := "/", 0
+	for len(rest) > 0 {
+		c := rest[0]
+		rest = rest[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			at = path.Dir(at) // the parent of / is /
+		default:
+			next := path.Join(at, c)
+			if rel, ok := strings.CutPrefix(next, workPath+"/"); ok {
+				if target, ok := links[rel]; ok {
+					if hops++; hops > maxLinks {
+						return false, errTooManyLinks
+					}
+					// An absolute target starts again from /; a relative one
+					// goes on from the link's directory, which at is.
+					if strings.HasPrefix(target, "/") {
+						at = "/"
+					}
+					rest = append(strings.Split(target, "/"), rest...)
+					continue
+				}
+			}
+			at = next
+		}
+		if at == kilnPath || strings.HasPrefix(at, kilnPath+"/") {
+			return true, nil
+		}
+	}
+	return at == "/", nil
+}
+
+// linkTargets reads the targets of the symlinks among entries, by their path,
+// in one `git cat-file --batch`. It only reads.
+func linkTargets(ctx context.Context, repo string, entries []treeEntry) (map[string]string, error) {
+	var objects bytes.Buffer
+	var links []treeEntry
+	for _, e := range entries {
+		if e.mode == "120000" {
+			links = append(links, e)
+			fmt.Fprintln(&objects, e.object)
+		}
+	}
+	targets := map[string]string{}
+	if len(links) == 0 {
+		return targets, nil
+	}
+	out, err := git(ctx, repo, &objects, nil, "cat-file", "--batch")
+	if err != nil {
+		return nil, err
+	}
+	r := bufio.NewReader(bytes.NewReader(out))
+	for _, e := range links {
+		data, err := readObject(r, e.object)
+		if err != nil {
+			return nil, err
+		}
+		targets[e.path] = string(data)
+	}
+	return targets, nil
+}
+
+// refuseLinksIntoKiln refuses a laid-over run in which a symlink of the work
+// tree, followed as the run's kernel follows it, reaches /kiln, where the
+// card's own configuration is (ADR 0025, rule 2): Claude Code would load the
+// card's CLAUDE.md and skills through it. It names the first such link in
+// the tree's order. A run that is not laid over is not checked: it has no
+// card configuration under /kiln. It only reads.
+func (r *run) refuseLinksIntoKiln(ctx context.Context) error {
+	if r.mainTree == "" {
+		return nil
+	}
+	links, err := linkTargets(ctx, r.Repo, r.workEntries)
+	if err != nil {
+		return err
+	}
+	for _, e := range r.workEntries {
+		target, ok := links[e.path]
+		if !ok {
+			continue
+		}
+		reaches, err := reachesKiln(links, path.Join(workPath, e.path))
+		if errors.Is(err, errTooManyLinks) {
+			return fmt.Errorf("the symlink %s -> %s is not followed to its end within %d symlinks; the run is not started", e.path, target, maxLinks)
+		}
+		if err != nil {
+			return err
+		}
+		if reaches {
+			return fmt.Errorf("the symlink %s -> %s leads into %s, where a laid-over run has the card's own Claude Code configuration; the run is not started", e.path, target, kilnPath)
+		}
+	}
+	return nil
 }
