@@ -94,3 +94,35 @@ func TestFillArgs(t *testing.T) {
 		}
 	}
 }
+
+// TestOldCaches keeps from a listing exactly the old volumes of the repo, and
+// RemoveOldCaches refuses a repo and a digest before running docker.
+func TestOldCaches(t *testing.T) {
+	cur, d1, d2, d3 := strings.Repeat("c", 64), strings.Repeat("1", 64), strings.Repeat("2", 64), strings.Repeat("3", 64)
+	listing := strings.Join([]string{
+		"kiln-cache-work-" + d1 + "\twork",
+		"kiln-cache-work-" + d2 + "\twork",
+		"kiln-cache-work-" + cur + "\twork",
+		"kiln-cache-work-2-" + d3 + "\twork-2",
+		"kiln-cache-work-2-" + d3 + "\twork",
+		"kiln-cache-work-" + d3 + "\t",
+		"kiln-cache-work\twork",
+		"other-" + d3 + "\twork",
+		"",
+	}, "\n")
+	want := []string{"kiln-cache-work-" + d1, "kiln-cache-work-" + d2}
+	if got := oldCaches(listing, "work", cur); !slices.Equal(got, want) {
+		t.Errorf("oldCaches = %q, want %q", got, want)
+	}
+
+	t.Setenv("PATH", t.TempDir())
+	for _, c := range []struct{ repo, digest, want string }{
+		{"Work", cur, `the repo "Work"`},
+		{"work", strings.Repeat("c", 63), `digest "` + strings.Repeat("c", 63) + `"`},
+	} {
+		_, err := RemoveOldCaches(t.Context(), c.repo, c.digest)
+		if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), "not found") {
+			t.Errorf("RemoveOldCaches(%q, %q) = %v, want a refusal naming %s", c.repo, c.digest, err, c.want)
+		}
+	}
+}

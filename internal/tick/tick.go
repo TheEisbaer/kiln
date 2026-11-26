@@ -572,6 +572,7 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 	}
 	// The followers end with the context, and the store is closed after them.
 	defer c.followers.Wait()
+	c.removeOldCachesAtStart(acting)
 	c.followers.Add(1)
 	go func() {
 		defer c.followers.Done()
@@ -703,6 +704,7 @@ type engine interface {
 	ImageTags(ctx context.Context, name string) ([]string, error)
 	FillCache(ctx context.Context, f seal.Fill) error
 	CacheFilled(ctx context.Context, repo, digest string) (bool, error)
+	RemoveOldCaches(ctx context.Context, repo, digest string) ([]seal.CacheRemoval, error)
 }
 
 // sealed is the engine of a core: the seal and internal/run.
@@ -748,6 +750,10 @@ func (sealed) FillCache(ctx context.Context, f seal.Fill) error { return seal.Fi
 
 func (sealed) CacheFilled(ctx context.Context, repo, digest string) (bool, error) {
 	return seal.CacheFilled(ctx, repo, digest)
+}
+
+func (sealed) RemoveOldCaches(ctx context.Context, repo, digest string) ([]seal.CacheRemoval, error) {
+	return seal.RemoveOldCaches(ctx, repo, digest)
 }
 
 func (sealed) ListRuns(ctx context.Context, instance string) ([]string, error) {

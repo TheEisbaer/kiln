@@ -1338,6 +1338,16 @@ func testToolchain(t *testing.T, f *fixture) {
 	if id := imageIDs(); id != firstImage {
 		t.Errorf("a commit of a file that is not an input made a new run image, %s after %s", id, firstImage)
 	}
+	// An unlabelled volume of the cache's name pattern, and a container that
+	// was never started and mounts the first volume: neither is removed.
+	unlabelled := seal.CacheVolume(repo, strings.Repeat("0", 64))
+	hold := "kiln-hold-" + f.id
+	must(t, "volume", "create", unlabelled)
+	t.Cleanup(func() {
+		dockerQuiet("rm", "--force", hold)
+		dockerQuiet("volume", "rm", unlabelled)
+	})
+	must(t, "create", "--name", hold, "--mount", "type=volume,source="+first+",target=/x", toolchain, "true")
 	commitMain(t, c.repo, map[string]string{"lock.txt": "lock two\n"})
 	if image, cache, volume := cardRuns(3); image != runImage || cache != "lock two" || volume == first || volume == "" {
 		t.Errorf("the third run is on %q with %s and reads %q, want %s with a new volume and lock two", image, volume, cache, runImage)
@@ -1345,11 +1355,49 @@ func testToolchain(t *testing.T, f *fixture) {
 	if id := imageIDs(); id != firstImage {
 		t.Errorf("a commit of lock.txt, the cache's input alone, made a new run image, %s after %s", id, firstImage)
 	}
+	// The first volume is held by the created container, the unlabelled one
+	// is not Kiln's: both stay after the fill of the second volume.
+	cacheVolumes := func() []string {
+		t.Helper()
+		return strings.Fields(must(t, "volume", "ls", "--filter", "label=kiln.cache="+repo, "--format", "{{.Name}}"))
+	}
+	second := ""
+	for _, v := range cacheVolumes() {
+		if v != first {
+			second = v
+		}
+	}
+	if got := cacheVolumes(); len(got) != 2 || second == "" {
+		t.Errorf("the cache volumes are %v after the fill of the second, want the first and the second", got)
+	}
+	if got := must(t, "volume", "ls", "--quiet", "--filter", "name="+unlabelled); got != unlabelled {
+		t.Errorf("the unlabelled volume %s is not there: %q", unlabelled, got)
+	}
 	f.stop(t, core, done)
 	out := core.Stdout.(*bytes.Buffer).String()
 	if strings.Count(out, "kiln core: repo "+repo+": built "+runImage+"\n") != 1 ||
 		strings.Count(out, "kiln core: repo "+repo+": filled kiln-cache-"+repo+"-") != 2 {
 		t.Errorf("the core did not build %s once and fill the cache twice:\n%s", runImage, out)
+	}
+	if strings.Contains(out, "removed the old cache volume") {
+		t.Errorf("the core removed a volume while a container held it:\n%s", out)
+	}
+	// With the container gone, a second core's start removes the first
+	// volume and nothing else.
+	must(t, "rm", hold)
+	core, done = f.start(t, child{Command: "core", Config: cfg})
+	waitUntil(t, "the first volume is removed", func() bool {
+		return slices.Equal(cacheVolumes(), []string{second})
+	})
+	f.stop(t, core, done)
+	if out := core.Stdout.(*bytes.Buffer).String(); !strings.Contains(out, "kiln core: repo "+repo+": removed the old cache volume "+first+"\n") {
+		t.Errorf("the second core did not say it removed %s:\n%s", first, out)
+	}
+	if got := must(t, "volume", "ls", "--quiet", "--filter", "name="+unlabelled); got != unlabelled {
+		t.Errorf("the unlabelled volume %s was removed: %q", unlabelled, got)
+	}
+	if got := must(t, "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}} {{range .Mounts}}{{.Name}}{{end}}", fill); got != "exited 0 "+second {
+		t.Errorf("the fill %s is %q, want exited 0 mounting %s", fill, got, second)
 	}
 }
 

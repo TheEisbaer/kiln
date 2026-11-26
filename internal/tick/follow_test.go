@@ -90,6 +90,20 @@ type fakeEngine struct {
 	volumes   map[string]bool
 	fillFails bool
 	fillGate  chan struct{}
+	// The cache volume of each run's container, by the run's ID, set by
+	// Carry; stand-ins for other containers that use a volume, by volume;
+	// volumes the test made by name, with their kiln.cache label, "" for
+	// none; the error text of a volume whose removal fails; the calls of
+	// removal by name; and rmGate, which, when not nil, holds
+	// RemoveOldCaches. lastFill is the volume that the fill container
+	// mounts.
+	mounts      map[string]string
+	volumeUsers map[string]int
+	foreign     map[string]string
+	rmFails     map[string]string
+	removals    []string
+	rmGate      chan struct{}
+	lastFill    string
 	// The next starts of a card's created container that fail, also after
 	// starting has returned: the container stays created, as when the engine
 	// refuses a start.
@@ -205,7 +219,8 @@ func newFakeEngine() *fakeEngine {
 		reviews: map[int64][]string{}, reviewed: map[string]string{}, saves: map[int64]bool{}, models: map[string]string{},
 		outcomes: map[int64][]string{}, outcome: map[string]string{}, inspected: map[string]int{},
 		startFails: map[int64]int{}, otherInstruction: map[int64]bool{}, docsFail: map[int64]error{},
-		removeFails: map[string]bool{}, breakOff: map[int64]bool{}, proposals: map[int64]string{}, volumes: map[string]bool{}}
+		removeFails: map[string]bool{}, breakOff: map[int64]bool{}, proposals: map[int64]string{}, volumes: map[string]bool{},
+		mounts: map[string]string{}, volumeUsers: map[string]int{}, foreign: map[string]string{}, rmFails: map[string]string{}}
 }
 
 // FillCache records the fill, makes its volume afresh, unproven, as the
@@ -222,6 +237,7 @@ func (e *fakeEngine) FillCache(ctx context.Context, f seal.Fill) error {
 		}
 	}
 	e.volumes[volume] = false
+	e.lastFill = volume
 	gate := e.fillGate
 	e.mu.Unlock()
 	if gate != nil {
@@ -238,6 +254,62 @@ func (e *fakeEngine) FillCache(ctx context.Context, f seal.Fill) error {
 	}
 	e.volumes[volume] = true
 	return nil
+}
+
+// RemoveOldCaches models seal.RemoveOldCaches: it removes the repo's volumes,
+// the made ones and the foreign ones labelled with the repo, whose digest is
+// not the given one and that no container, no volumeUsers entry and no last
+// fill mounts. It waits at rmGate first.
+func (e *fakeEngine) RemoveOldCaches(ctx context.Context, repo, digest string) ([]seal.CacheRemoval, error) {
+	e.mu.Lock()
+	gate := e.rmGate
+	e.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	prefix := seal.CacheVolume(repo, "")
+	var names []string
+	for v := range e.volumes {
+		names = append(names, v)
+	}
+	for v, label := range e.foreign {
+		if label == repo {
+			names = append(names, v)
+		}
+	}
+	slices.Sort(names)
+	names = slices.Compact(names)
+	var done []seal.CacheRemoval
+	for _, v := range names {
+		if !strings.HasPrefix(v, prefix) || len(v) != len(prefix)+64 || v == seal.CacheVolume(repo, digest) {
+			continue
+		}
+		if e.volumeUsers[v] > 0 || e.lastFill == v {
+			continue
+		}
+		used := false
+		for id := range e.containers {
+			used = used || e.mounts[id] == v
+		}
+		if used {
+			continue
+		}
+		e.removals = append(e.removals, v)
+		if text := e.rmFails[v]; text != "" {
+			done = append(done, seal.CacheRemoval{Volume: v, Err: errors.New(text)})
+			continue
+		}
+		delete(e.volumes, v)
+		delete(e.foreign, v)
+		done = append(done, seal.CacheRemoval{Volume: v})
+	}
+	return done, nil
 }
 
 // CacheFilled is true for a volume filled with its proof.
@@ -515,6 +587,11 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 		return run.Verdict{}, fmt.Errorf("the run asks for 6 CPUs and the engine has 4, as the test has it: %w", seal.ErrCPUs)
 	}
 	if !there {
+		if in.Cache != nil {
+			e.mu.Lock()
+			e.mounts[in.ID] = in.Cache.Volume
+			e.mu.Unlock()
+		}
 		e.set(in.ID, "created")
 		status = "created"
 		if err := e.wait(ctx, card, "add"); err != nil {

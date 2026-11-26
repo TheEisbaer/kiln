@@ -56,7 +56,10 @@ import (
 // under its guard, and a run of the repo starts only once the volume of this
 // moment's digest is filled (seal.CacheFilled); it mounts that volume
 // read-only. A failed cache image build or fill holds the repo's runs, and is
-// tried again as a failed toolchain build is.
+// tried again as a failed toolchain build is. After each fill and once at the
+// start, under the repo's guard, the core removes the repo's other cache
+// volumes that no container uses (seal.RemoveOldCaches); a failure is printed
+// once per volume and text and tried again on the next pass.
 
 // toolchainDockerfile and cacheDockerfile are the names of the instance's
 // Dockerfiles in the toolchain's and the cache's image's context, paths main
@@ -313,7 +316,71 @@ func (c *core) fillCache(ctx context.Context, repo settings.Repo, im repoImages)
 		return volume, err
 	}
 	fmt.Fprintf(c.out, "kiln core: repo %s: filled %s\n", repo.Name, volume)
+	c.removeOldCaches(ctx, repo, im.cache)
 	return "", nil
+}
+
+// removeOldCaches removes the repo's cache volumes other than the one of
+// digest that no container uses, and prints what it did: a removal on the
+// output, a failure once per volume and text. It never changes what the
+// caller does next. The caller holds the repo's build guard.
+func (c *core) removeOldCaches(ctx context.Context, repo settings.Repo, digest string) {
+	const ending = "; it is tried again after the repo's next fill and at the core's next start"
+	removals, err := c.engine.RemoveOldCaches(ctx, repo.Name, digest)
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		text := run.Printable(err.Error())
+		c.sayOnceAs(c.errOut, "old caches\x00"+repo.Name+"\x00"+text,
+			fmt.Sprintf("kiln core: repo %s: its old cache volumes were not looked at: %s%s", repo.Name, text, ending))
+		return
+	}
+	for _, r := range removals {
+		if r.Err == nil {
+			fmt.Fprintf(c.out, "kiln core: repo %s: removed the old cache volume %s\n", repo.Name, r.Volume)
+			continue
+		}
+		text := run.Printable(r.Err.Error())
+		c.sayOnceAs(c.errOut, "old cache\x00"+r.Volume+"\x00"+text,
+			fmt.Sprintf("kiln core: repo %s: the old cache volume %s was not removed: %s%s", repo.Name, r.Volume, text, ending))
+	}
+}
+
+// removeOldCachesAtStart runs the pass once for each repo with a cache, at
+// the core's start. Each repo's build guard is taken here, before the first
+// tick, so that no fill of the repo starts beside its pass; the pass itself
+// runs in a follower, with the digest of this moment. A repo whose digests
+// cannot be worked out has no pass: the tick says why.
+func (c *core) removeOldCachesAtStart(ctx context.Context) {
+	for _, repo := range c.repos() {
+		if repo.Toolchain == nil || repo.Toolchain.Cache == nil {
+			continue
+		}
+		c.mu.Lock()
+		if c.toolchains == nil {
+			c.toolchains = map[string]*toolchainState{}
+		}
+		st := c.toolchains[repo.Name]
+		if st == nil {
+			st = &toolchainState{}
+			c.toolchains[repo.Name] = st
+		}
+		st.building = true
+		c.mu.Unlock()
+		c.followers.Add(1)
+		go func() {
+			defer c.followers.Done()
+			defer func() {
+				c.mu.Lock()
+				st.building = false
+				c.mu.Unlock()
+			}()
+			if im, reason := c.repoImages(ctx, repo); reason == "" && ctx.Err() == nil {
+				c.removeOldCaches(ctx, repo, im.cache)
+			}
+		}()
+	}
 }
 
 // buildFromMain builds an image with `git archive` of main's head as the
