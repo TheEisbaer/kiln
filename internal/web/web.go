@@ -801,13 +801,31 @@ func (h *handler) card(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out, err := h.cardJSON(c)
+	out, err := h.cardJSON(r.Context(), c)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	out.Change = h.change(r.Context(), c.ID)
 	reply(w, http.StatusOK, out)
+}
+
+// hasChange says whether the card's branch holds a change to review, which only
+// a card in implement, needing you, asks. A change that cannot be read is
+// an error.
+func (h *handler) hasChange(ctx context.Context, c store.Card) (bool, error) {
+	if c.State != (store.State{Stage: store.Implement, WaitsFor: store.Developer}) || h.info.Change == nil {
+		return false, nil
+	}
+	ch, err := h.info.Change(ctx, c.ID)
+	return ch != nil && ch.Size > 0, err
+}
+
+// options are the facts of a card that the core says, for its moves; a change
+// that cannot be read says none, and the card's page shows its error.
+func (h *handler) options(ctx context.Context, c store.Card) store.Options {
+	has, err := h.hasChange(ctx, c)
+	return store.Options{Publishing: h.info.Publishing[c.Repo], HasChange: has && err == nil}
 }
 
 // change is the change of a card's branch, nil when it has none. A change that
@@ -855,7 +873,7 @@ func (h *handler) reached(id string) ([]reachedJSON, string) {
 }
 
 // cardJSON is everything the card's page shows.
-func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
+func (h *handler) cardJSON(ctx context.Context, c store.Card) (cardJSON, error) {
 	history, err := h.store.History(c.ID)
 	if err != nil {
 		return cardJSON{}, err
@@ -872,7 +890,7 @@ func (h *handler) cardJSON(c store.Card) (cardJSON, error) {
 	if err != nil {
 		return cardJSON{}, err
 	}
-	moves, err := h.store.Moves(c, h.info.Publishing[c.Repo])
+	moves, err := h.store.MovesWith(c, h.options(ctx, c))
 	if err != nil {
 		return cardJSON{}, err
 	}
@@ -1005,7 +1023,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out, err := h.cardJSON(c)
+	out, err := h.cardJSON(r.Context(), c)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1098,6 +1116,15 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 	}
 	opts := store.Options{Publishing: h.info.Publishing[card.Repo], Limits: h.info.Limits,
 		WorkItem: workItem, NeedsWorkItem: h.info.NeedsWorkItem[card.Repo]}
+	if body.Action == store.ToReview {
+		// A review run is started only on a change that was read.
+		has, err := h.hasChange(r.Context(), card)
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "the change cannot be read, so no review run is started: "+err.Error())
+			return
+		}
+		opts.HasChange = has
+	}
 	if body.Action == store.Publish {
 		// A change to the workflow files is published only after the
 		// developer has seen them and said yes, for this very change, which
@@ -1114,11 +1141,11 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		if ch != nil && len(ch.Workflows) > 0 {
 			switch {
 			case !body.WorkflowYes:
-				h.refuse(w, id, "this change touches workflow files, which the Git host runs as soon as it is published; "+
+				h.refuse(r.Context(), w, id, "this change touches workflow files, which the Git host runs as soon as it is published; "+
 					`publish it with {"action": "publish", "workflow_yes": true, "tip": …} once you have read them`, ch.Workflows, ch.Tip)
 				return
 			case body.Tip != ch.Tip:
-				h.refuse(w, id, "the change is no longer the one you said yes to; read its workflow files again", ch.Workflows, ch.Tip)
+				h.refuse(r.Context(), w, id, "the change is no longer the one you said yes to; read its workflow files again", ch.Workflows, ch.Tip)
 				return
 			}
 			opts.WorkflowYes = ch.Tip
@@ -1139,13 +1166,13 @@ func (h *handler) decide(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), store.ErrNote.Error()+": "))
 		return
 	case errors.Is(err, store.ErrRefused):
-		h.refuse(w, c.ID, err.Error(), nil, "")
+		h.refuse(r.Context(), w, c.ID, err.Error(), nil, "")
 		return
 	case err != nil:
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out, err := h.cardJSON(c)
+	out, err := h.cardJSON(r.Context(), c)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1236,7 +1263,7 @@ func (h *handler) decideProposal(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, map[string]any{"proposal": out})
 		return
 	}
-	card, err := h.cardJSON(c)
+	card, err := h.cardJSON(r.Context(), c)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1296,13 +1323,13 @@ func (h *handler) decideInstance(w http.ResponseWriter, r *http.Request) {
 // refuse answers a move that is refused with 409: the sentence, the card's
 // state and the moves it allows, and the workflow files that need the
 // developer's yes and the tip of the change they are in, if that is why.
-func (h *handler) refuse(w http.ResponseWriter, id int64, msg string, workflows []string, tip string) {
+func (h *handler) refuse(ctx context.Context, w http.ResponseWriter, id int64, msg string, workflows []string, tip string) {
 	c, err := h.store.Card(id)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	moves, err := h.store.Moves(c, h.info.Publishing[c.Repo])
+	moves, err := h.store.MovesWith(c, h.options(ctx, c))
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1687,5 +1688,165 @@ func TestAtHostAndCheckMoveOnce(t *testing.T) {
 	})
 	if s := e.snapshot(); !slices.Equal(s.started, []int64{card}) {
 		t.Errorf("runs started for %v, want one for %d", s.started, card)
+	}
+}
+
+// approvedNoBranch writes a card with a spec run and the developer's approval, so
+// that it waits for its first implement run; the spec run is run 1. It is
+// called while no core runs.
+func (p *publishing) approvedNoBranch(t *testing.T, s *store.Store) int64 {
+	t.Helper()
+	c, err := s.CreateWithWorkItem(cmp.Or(p.repo, store.KilnRepo), "Add a line to the notes.\n\nThe second paragraph.", 0, p.workItem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Move(c.ID, waiting, store.CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf("%s-%d-1", p.instance, c.ID)
+	if err := s.AddRun(store.RunRow{ID: id, Card: c.ID, Commit: p.commit, Model: "m", Effort: "high"}, MaxRuns); err != nil {
+		t.Fatal(err)
+	}
+	spec := &store.Doc{Kind: store.KindSpec, Text: "# Spec\n\nModel for implement: `claude-haiku-5-5`\n\nPull request title: `" + publishTitle + "`\n\n## 1. What\n"}
+	if _, err := s.EndRun(id, store.Finished, "staged", finished, store.Cost{}, spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(c.ID, store.Approve, ""); err != nil {
+		t.Fatal(err)
+	}
+	return c.ID
+}
+
+// moves is the actions of the moves a running core's page lists for a card,
+// and its number of interventions.
+func (p *publishing) moves(t *testing.T, card int64) ([]store.Action, int) {
+	t.Helper()
+	var page struct {
+		Moves         []struct{ Action store.Action }
+		Interventions int
+	}
+	getJSON(t, fmt.Sprintf("http://%s/api/cards/%d", p.cfg.Listen, card), &page)
+	var out []store.Action
+	for _, m := range page.Moves {
+		out = append(out, m.Action)
+	}
+	return out, page.Interventions
+}
+
+// decide posts a move of the developer's to a running core, and returns the
+// status.
+func (p *publishing) decide(t *testing.T, card int64, body string) int {
+	t.Helper()
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/api/cards/%d/decide", p.cfg.Listen, card), strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://"+p.cfg.Listen)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// TestToReviewAfterNoChange follows the card that an implement run built and
+// saved, whose end was an API error: the rule's retry changes nothing, the
+// card needs the developer, who sends it to review as its branch is; the
+// review run starts on the saved tip, is told the note, and passes, and the
+// card is published.
+func TestToReviewAfterNoChange(t *testing.T) {
+	p := newPublishing(t)
+	p.cfg.Listen = freeAddress(t)
+	var card int64
+	var saved string
+	p.with(t, func(s *store.Store) {
+		card = p.approvedNoBranch(t, s)
+		id := fmt.Sprintf("%s-%d-2", p.instance, card)
+		if err := s.AddRun(store.RunRow{ID: id, Card: card, Commit: p.commit, Model: "m", Effort: "high"}, MaxRuns); err != nil {
+			t.Fatal(err)
+		}
+		saved = p.save(t, card, "refs/heads/main", map[string]string{"NOTES.md": "# Notes\nA line.\n"}, id)
+		reason := "exit 1, the upstream answered 502, saved"
+		if _, err := s.EndRunByRule(id, store.Failed, reason, implementNeedsYou,
+			store.Rule{To: implementWaits, Reason: store.RetryPrefix + reason}, store.Cost{}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	e := newFakeEngine()
+	e.open(card, "exit")
+	core := p.start(t, e, 3)
+	p.waitFor(t, card, implementNeedsYou, store.UnchangedReason)
+	moves, n := p.moves(t, card)
+	if want := []store.Action{store.Again, store.ToReview, store.ToSpec, store.Drop}; !slices.Equal(moves, want) {
+		t.Fatalf("the moves are %v, want %v", moves, want)
+	}
+	if code := p.decide(t, card, `{"action":"to-review","note":"Built already; review the branch."}`); code != 200 {
+		t.Fatalf("to-review answered %d", code)
+	}
+	p.waitFor(t, card, atHost, "published as ")
+	core.stop(t)
+
+	review := fmt.Sprintf("%s-%d-4", p.instance, card)
+	p.look(t, func(s *store.Store) {
+		if r, err := s.Run(review); err != nil || r.Commit != saved {
+			t.Errorf("the review run is %+v (%v), want it on %s", r, err, saved)
+		}
+	})
+	if tip := gitIn(t, p.cfg.Repo, "rev-parse", fmt.Sprintf("refs/heads/kiln/card-%d", card)); tip != saved {
+		t.Errorf("the branch is at %s, want the saved %s", tip, saved)
+	}
+	told := string(readFile(t, filepath.Join(p.cfg.Data, "instructions", review+".md")))
+	for _, want := range []string{"## The developer's notes since the approval", "sent to review as the branch is, from implement needing you", "Built already; review the branch."} {
+		if !strings.Contains(told, want) {
+			t.Errorf("the review run is not told %q:\n%s", want, told)
+		}
+	}
+	if m := p.calls(t); m != 1 {
+		t.Errorf("the publish command ran %d times", m)
+	}
+	// The core is stopped, so its page is read from the store: the move is one
+	// intervention more.
+	p.look(t, func(s *store.Store) {
+		h, err := s.History(card)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := store.Interventions(h); got != n+1 {
+			t.Errorf("interventions %d, want %d", got, n+1)
+		}
+	})
+}
+
+// TestNoToReviewWithoutChange offers no move to review after a run that
+// changed nothing on a card whose branch does not exist, or is main's.
+func TestNoToReviewWithoutChange(t *testing.T) {
+	p := newPublishing(t)
+	p.cfg.Listen = freeAddress(t)
+	var none, atMain int64
+	p.with(t, func(s *store.Store) {
+		none = p.approvedNoBranch(t, s)
+		atMain = p.approvedNoBranch(t, s)
+	})
+	gitIn(t, p.cfg.Repo, "update-ref", fmt.Sprintf("refs/heads/kiln/card-%d", atMain), gitIn(t, p.cfg.Repo, "rev-parse", "refs/heads/main"))
+	e := newFakeEngine()
+	e.open(none, "exit")
+	e.open(atMain, "exit")
+	core := p.start(t, e, 3)
+	defer core.stop(t)
+	for name, card := range map[string]int64{"no branch": none, "a branch at main": atMain} {
+		p.waitFor(t, card, implementNeedsYou, store.UnchangedReason)
+		if moves, _ := p.moves(t, card); !slices.Equal(moves, []store.Action{store.Again, store.ToSpec, store.Drop}) {
+			t.Errorf("%s: the moves are %v", name, moves)
+		}
+		if code := p.decide(t, card, `{"action":"to-review"}`); code != 409 {
+			t.Errorf("%s: to-review answered %d, want 409", name, code)
+		}
+		p.look(t, func(s *store.Store) {
+			if c, _ := s.Card(card); c.State != implementNeedsYou {
+				t.Errorf("%s: the card is in %v", name, c.State)
+			}
+		})
 	}
 }

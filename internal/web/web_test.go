@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1237,5 +1238,122 @@ func TestHistoryStep(t *testing.T) {
 		if !strings.Contains(string(page), want) {
 			t.Errorf("the page lacks %s", want)
 		}
+	}
+}
+
+// TestToReview offers "to-review" on a card in implement, needing you, after a
+// run that changed nothing, only while its branch holds a change, and says why
+// when it cannot be read.
+func TestToReview(t *testing.T) {
+	f := newFixture(t)
+	var change func(card int64) (*Change, error)
+	h, err := Handler(f.store, Info{Instance: "ab12cd34", Repo: "/data/repo.git", Model: "m",
+		Change: func(_ context.Context, card int64) (*Change, error) { return change(card) }}, f.act, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h = h
+	// unchanged makes a card whose approved spec's implement run changed nothing.
+	unchanged := func(n int) int64 {
+		t.Helper()
+		c, err := f.store.Create(fmt.Sprintf("Card %d", n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		end := func(id string, from, to store.State, reason string, docs ...*store.Doc) {
+			t.Helper()
+			if _, err := f.store.Move(c.ID, from, store.CauseDeveloper); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.AddRun(store.RunRow{ID: id, Card: c.ID, Commit: "abc123", Model: "m", Effort: "high"}, 3); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.EndRun(id, store.Finished, reason, to, store.Cost{}, docs...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		end(fmt.Sprintf("s%d", c.ID), store.State{Stage: store.Spec, WaitsFor: store.Run}, store.State{Stage: store.Spec, WaitsFor: store.Approval}, "",
+			&store.Doc{Kind: store.KindSpec, Text: "# Spec\n"})
+		if _, err := f.store.Decide(c.ID, store.Approve, ""); err != nil {
+			t.Fatal(err)
+		}
+		end(fmt.Sprintf("i%d", c.ID), store.State{Stage: store.Implement, WaitsFor: store.Run}, store.State{Stage: store.Implement, WaitsFor: store.Developer},
+			store.UnchangedReason+"; exit 0, no commit")
+		return c.ID
+	}
+	actions := func(moves []moveJSON) []store.Action {
+		var out []store.Action
+		for _, m := range moves {
+			out = append(out, m.Action)
+		}
+		return out
+	}
+	page := func(id int64) cardJSON {
+		t.Helper()
+		w := f.do(t, "GET", fmt.Sprintf("/api/cards/%d", id), "")
+		if w.Code != 200 {
+			t.Fatalf("GET card %d: %d %s", id, w.Code, w.Body)
+		}
+		return decode[cardJSON](t, w)
+	}
+	post := func(id int64, body string) *httptest.ResponseRecorder {
+		return f.do(t, "POST", fmt.Sprintf("/api/cards/%d/decide", id), body)
+	}
+	entries := func(id int64) int {
+		h, err := f.store.History(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(h)
+	}
+	with := []store.Action{store.Again, store.ToReview, store.ToSpec, store.Drop}
+	without := []store.Action{store.Again, store.ToSpec, store.Drop}
+
+	id := unchanged(1)
+	change = func(int64) (*Change, error) { return &Change{Branch: "kiln/card-1", Size: 41}, nil }
+	if got := actions(page(id).Moves); !slices.Equal(got, with) {
+		t.Errorf("with a change the moves are %v, want %v", got, with)
+	}
+	// Another refused move lists to-review, as the card's page does.
+	w := post(id, `{"action":"send-back"}`)
+	if got := actions(decode[struct{ Moves []moveJSON }](t, w).Moves); w.Code != 409 || !slices.Equal(got, with) {
+		t.Errorf("a refused move: %d, moves %v, want 409 and %v", w.Code, got, with)
+	}
+	w = post(id, `{"action":"to-review","note":"Review it."}`)
+	if c := decode[cardJSON](t, w); w.Code != 200 || c.Stage != store.Review || c.WaitsFor != store.Run {
+		t.Errorf("to-review: %d %s", w.Code, w.Body)
+	}
+
+	for name, c := range map[string]func(int64) (*Change, error){
+		"no branch":        func(int64) (*Change, error) { return nil, nil },
+		"a branch at main": func(int64) (*Change, error) { return &Change{Branch: "kiln/card-2", Size: 0}, nil },
+	} {
+		change = c
+		id := unchanged(2)
+		before := entries(id)
+		if got := actions(page(id).Moves); !slices.Equal(got, without) {
+			t.Errorf("%s: the moves are %v, want %v", name, got, without)
+		}
+		w := post(id, `{"action":"to-review"}`)
+		if got := actions(decode[struct{ Moves []moveJSON }](t, w).Moves); w.Code != 409 || !slices.Equal(got, without) || entries(id) != before {
+			t.Errorf("%s: to-review answers %d with moves %v", name, w.Code, got)
+		}
+		f.store.Decide(id, store.Drop, "")
+	}
+
+	change = func(int64) (*Change, error) { return nil, errors.New("git log: broken") }
+	id = unchanged(3)
+	before := entries(id)
+	p := page(id)
+	if got := actions(p.Moves); !slices.Equal(got, without) || p.Change == nil || !strings.Contains(p.Change.Error, "broken") {
+		t.Errorf("an unreadable change: moves %v, change %+v", got, p.Change)
+	}
+	w = post(id, `{"action":"to-review"}`)
+	if w.Code != 500 || !strings.Contains(w.Body.String(), "the change cannot be read, so no review run is started:") || entries(id) != before {
+		t.Errorf("an unreadable change: to-review answers %d %s", w.Code, w.Body)
+	}
+
+	if w := f.do(t, "GET", "/", ""); !strings.Contains(w.Body.String(), `"to-review": "Review the branch as it is"`) {
+		t.Errorf("the page does not name the move")
 	}
 }

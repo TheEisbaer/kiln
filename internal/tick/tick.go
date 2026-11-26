@@ -1698,7 +1698,7 @@ func laterDestination(s store.Stage, v run.Verdict, doc run.Document) end {
 			reason = doc.Problem + "; " + reason
 		}
 		if !v.Changed() {
-			return end{store.Finished, implementNeedsYou, "the run changed nothing; " + reason, report}
+			return end{store.Finished, implementNeedsYou, store.UnchangedReason + "; " + reason, report}
 		}
 		return end{store.Finished, reviewWaits, reason, report}
 	}
@@ -2123,6 +2123,8 @@ func moveName(c store.Correction) string {
 		return "implement run again, from implement needing you"
 	case c.Action == store.Again && from == store.State{Stage: store.Review, WaitsFor: store.Developer}:
 		return "review run again, from review needing you"
+	case c.Action == store.ToReview && from == store.State{Stage: store.Implement, WaitsFor: store.Developer}:
+		return "sent to review as the branch is, from implement needing you"
 	}
 	return fmt.Sprintf("%s from %s waiting for %s", c.Action, from.Stage, from.WaitsFor)
 }

@@ -21,6 +21,7 @@ const (
 	Publish  Action = "publish"   // publish a card whose review passed
 	Start    Action = "start"     // start a card in the backlog: to a spec run, or queued for its predecessors
 	ToHost   Action = "to-host"   // put a card that needs you for a reviewer's feedback back to the Git host (ADR 0028)
+	ToReview Action = "to-review" // review the branch as it is, after an implement run that changed nothing
 )
 
 // Note is what a move takes of the developer's note: none, one that may be
@@ -49,11 +50,15 @@ const MaxNote = 16 << 10
 // progress, InProgress; the instance's cards that count against its limit,
 // InInstance; whether the card is queued and waits for room, ForRoom; and the
 // cards of every repo that wait for room before it, with their repos' cards
-// in progress (see readRoom). The store reads all but Publishing; the core
-// says that.
+// in progress (see readRoom); whether the card's last entry says its implement
+// run changed nothing, Unchanged; and whether its branch holds a change to
+// review, HasChange. The store reads all but Publishing and HasChange; the core
+// says those.
 type Facts struct {
 	InFlight      bool
 	Publishing    bool
+	Unchanged     bool
+	HasChange     bool
 	PublishFailed bool
 	PullClosed    bool
 	Feedback      bool
@@ -100,6 +105,10 @@ func retried(f Facts) bool { return f.Publishing && (f.PublishFailed || f.PullCl
 // way. While the core publishes, a card has no move, as with a run in flight.
 func settled(f Facts) bool { return f.Published || !f.Publishing }
 
+// reviewable is the condition of to-review: the card's implement run changed
+// nothing, and its branch holds a change to review.
+func reviewable(f Facts) bool { return f.Unchanged && f.HasChange }
+
 // feedback is the condition of to-host: the card needs you because a reviewer
 // commented on its pull request.
 func feedback(f Facts) bool { return f.Feedback }
@@ -131,6 +140,7 @@ var moves = append([]move{
 	{Again, State{Spec, Approval}, State{Spec, Run}, RequiredNote, nil},
 	{Again, State{Spec, Developer}, State{Spec, Run}, OptionalNote, nil},
 	{Again, State{Implement, Developer}, State{Implement, Run}, OptionalNote, nil},
+	{ToReview, State{Implement, Developer}, State{Review, Run}, OptionalNote, reviewable},
 	{Again, State{Review, Developer}, State{Review, Run}, OptionalNote, notFeedback},
 	{SendBack, State{Review, Developer}, State{Implement, Run}, OptionalNote, nil},
 	{Publish, State{Review, Developer}, atHost, NoNote, retried},
@@ -197,11 +207,18 @@ func Moves(from State, f Facts) []Allowed {
 // Moves are the moves the table allows a card as it is now, for a core that
 // has a publish command when publishing is set.
 func (s *Store) Moves(c Card, publishing bool) ([]Allowed, error) {
+	return s.MovesWith(c, Options{Publishing: publishing})
+}
+
+// MovesWith is Moves with the facts the core says, Publishing and HasChange,
+// taken from o.
+func (s *Store) MovesWith(c Card, o Options) ([]Allowed, error) {
 	f, err := readFacts(s.db, c.ID)
 	if err != nil {
 		return nil, err
 	}
-	f.Publishing = publishing
+	f.Publishing = o.Publishing
+	f.HasChange = o.HasChange
 	return Moves(c.State, f), nil
 }
 
@@ -244,6 +261,7 @@ func (e Entry) Note() string {
 // a card with a number, as the core knows it, as it knows Publishing.
 type Options struct {
 	Publishing    bool
+	HasChange     bool // the card's branch holds a change to review, as the core knows it, as it knows Publishing
 	WorkflowYes   string
 	Limits        Limits
 	WorkItem      int64
@@ -306,6 +324,7 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 	e.next = func(from State, f Facts) (State, error) {
 		movedFrom = from
 		f.Publishing = o.Publishing
+		f.HasChange = o.HasChange
 		for _, m := range moves {
 			if m.action != action || !m.allows(from, f) {
 				continue
@@ -358,7 +377,7 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 			return nil
 		}
 	}
-	if (action == SendBack || action == Again) && note != "" {
+	if (action == SendBack || action == Again || action == ToReview) && note != "" {
 		e.write = func(tx *sql.Tx, card int64) error {
 			if movedFrom.Stage != Implement && movedFrom.Stage != Review {
 				return nil

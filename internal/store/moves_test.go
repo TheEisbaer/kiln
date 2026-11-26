@@ -61,7 +61,7 @@ func TestDecide(t *testing.T) {
 	s := open(t)
 	// Without a publish command the table has no publish, and a card at the
 	// Git host, which a core with one left there, has its moves.
-	actions := []Action{"approve", "again", "send-back", "done", "to-spec", "drop", "publish", "start", ""}
+	actions := []Action{"approve", "again", "send-back", "done", "to-spec", "drop", "publish", "start", "to-review", ""}
 	for from := range validPairings {
 		for _, action := range actions {
 			for _, note := range []string{"", " \n ", "  Use the store's words.\n"} {
@@ -523,4 +523,89 @@ func TestCorrectionsSpec(t *testing.T) {
 	if l, err := s.Corrections(card.ID); err != nil || len(l) != 0 {
 		t.Errorf("after a new spec: %+v, %v", l, err)
 	}
+}
+
+// TestMovesToReview offers to-review, between again and to-spec, from
+// implement needing you only with both facts, and from no other state.
+func TestMovesToReview(t *testing.T) {
+	from := State{Implement, Developer}
+	for _, f := range []Facts{{}, {Unchanged: true}, {HasChange: true}} {
+		for _, m := range Moves(from, f) {
+			if m.Action == ToReview {
+				t.Errorf("Moves(%v, %+v) lists to-review", from, f)
+			}
+		}
+	}
+	want := []Allowed{{Again, OptionalNote}, {ToReview, OptionalNote}, {ToSpec, OptionalNote}, {Drop, OptionalNote}}
+	if got := Moves(from, Facts{Unchanged: true, HasChange: true}); !reflect.DeepEqual(got, want) {
+		t.Errorf("Moves with both facts = %v, want %v", got, want)
+	}
+	for st := range validPairings {
+		if st == from {
+			continue
+		}
+		for _, m := range Moves(st, Facts{Unchanged: true, HasChange: true}) {
+			if m.Action == ToReview {
+				t.Errorf("Moves(%v) lists to-review", st)
+			}
+		}
+	}
+}
+
+// TestToReviewDecide makes the move after a run that changed nothing, with the
+// change's fact, and keeps the note as a correction; without the fact, or after
+// a failed run or the rule's entry, it is refused and writes nothing.
+func TestToReviewDecide(t *testing.T) {
+	s := open(t)
+	// ended makes an approved card whose implement run ended in implement,
+	// needing you, with the reason.
+	ended := func(id string, ending Ending, reason string) Card {
+		t.Helper()
+		card := approvedCard(t, s, id, State{Implement, Run})
+		mustAddRun(t, s, theRun(card.ID, id+"-i"))
+		if _, err := s.EndRun(id+"-i", ending, reason, State{Implement, Developer}, Cost{}); err != nil {
+			t.Fatal(err)
+		}
+		return card
+	}
+	refused := func(card Card, o Options) {
+		t.Helper()
+		before := len(mustHistory(t, s, card.ID))
+		if _, err := s.DecideWith(card.ID, ToReview, "A note.", o); !errors.Is(err, ErrRefused) {
+			t.Errorf("to-review with %+v: %v, want ErrRefused", o, err)
+		}
+		if c, _ := s.Card(card.ID); c.State != (State{Implement, Developer}) || len(mustHistory(t, s, card.ID)) != before {
+			t.Errorf("a refused to-review changed the card to %+v", c)
+		}
+		if l, _ := s.Corrections(card.ID); len(l) != 0 {
+			t.Errorf("a refused to-review wrote %+v", l)
+		}
+	}
+
+	card := ended("u1", Finished, UnchangedReason+"; exit 0, no commit")
+	refused(card, Options{})
+	before := len(mustHistory(t, s, card.ID))
+	interventions := Interventions(mustHistory(t, s, card.ID))
+	got, err := s.DecideWith(card.ID, ToReview, "  Built already; review it.\n", Options{HasChange: true})
+	if err != nil || got.State != (State{Review, Run}) {
+		t.Fatalf("to-review: %+v, %v", got, err)
+	}
+	h := mustHistory(t, s, card.ID)
+	if e := h[len(h)-1]; len(h) != before+1 || e.Cause != CauseDeveloper || e.Reason != "Built already; review it." {
+		t.Errorf("the entry is %+v", e)
+	}
+	want := []Correction{{ToReview, State{Implement, Developer}, "Built already; review it."}}
+	if l, err := s.Corrections(card.ID); err != nil || !reflect.DeepEqual(l, want) {
+		t.Errorf("Corrections = %+v, %v, want %+v", l, err, want)
+	}
+	if n := Interventions(h); n != interventions+1 {
+		t.Errorf("interventions %d, want %d", n, interventions+1)
+	}
+
+	refused(ended("u2", Failed, "exit 1, no result, saved"), Options{HasChange: true})
+	rule := approvedCard(t, s, "u3", State{Implement, Developer})
+	if _, err := s.Move(rule.ID, State{Implement, Developer}, CauseRule); err != nil {
+		t.Fatal(err)
+	}
+	refused(rule, Options{HasChange: true})
 }
