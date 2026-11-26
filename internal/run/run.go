@@ -473,6 +473,13 @@ func carry(ctx context.Context, in Inputs, out, errOut, notes io.Writer, startin
 		if err := r.layOver(ctx, mainTree); err != nil {
 			return nil, err
 		}
+		// A run that starts is checked before anything is created; one whose
+		// container is there already passed the check when it was created.
+		if state == nil {
+			if err := r.refuseLinksIntoKiln(ctx); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// Where the branch is matters only to the save, which moves it. A run
