@@ -671,6 +671,7 @@ const MOVES = {
   drop: "Drop the card",
   start: "Start",
   "to-host": "Back to the Git host",
+  "to-review": "Review the branch as it is",
 };
 const AGAIN = { spec: "Run the spec again", implement: "Run implement again", review: "Run the review again" };
 function moveLabel(c, action) {
@@ -1519,6 +1520,7 @@ function sentBack(c) {
 function first(c) {
   if (c.moves.some((m) => m.action === "start")) return "start";
   if (canPublish(c)) return "publish";
+  if (c.moves.some((m) => m.action === "to-review")) return "to-review";
   if (c.waits_for === "host") return null;
   if (feedbackCard(c)) return "send-back";
   if (c.waits_for === "approval") return c.stage === "review" ? "done" : "approve";
@@ -1725,6 +1727,10 @@ function noteText(c, m) {
         what: "It goes to done as dropped, and no run is started for it." + branch + waitersOf(c),
         label: "Why? Optional; the history keeps it.", go: "Drop the card" };
     }
+    case "to-review":
+      return { title: "Review the branch as it is",
+        what: "A review run starts on the card's branch as it is, as after an implement run that saved a change. It is told your note, if any, among your notes since the approval, and so are later runs.",
+        label: "A note for the review (optional)", go: "Review the branch as it is" };
     case "to-spec":
       return { title: "Send back to spec", what: "The card waits for a new spec run. It is told the spec it replaces and the last report or review." + optional,
         label: "What should change?", go: "Send back to spec" };

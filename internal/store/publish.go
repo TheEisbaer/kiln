@@ -75,6 +75,17 @@ func Feedback(s State, cause Cause, reason string) bool {
 	return s == (State{Review, Developer}) && cause == CauseHost && strings.HasPrefix(reason, ReviewReason)
 }
 
+// UnchangedReason begins the reason of a card whose implement run finished and
+// changed nothing, followed by "; " and the run's own words.
+const UnchangedReason = "the run changed nothing"
+
+// Unchanged says whether a card's last entry, of the state, the cause and the
+// reason, left it under "needs you" in implement because its run changed
+// nothing. It is told by the cause run and the reason's start.
+func Unchanged(s State, cause Cause, reason string) bool {
+	return s == (State{Implement, Developer}) && cause == CauseRun && strings.HasPrefix(reason, UnchangedReason+"; ")
+}
+
 // readFacts reads the facts of a card that the store keeps (see Facts).
 func readFacts(q querier, card int64) (Facts, error) {
 	var f Facts
@@ -91,6 +102,7 @@ func readFacts(q querier, card int64) (Facts, error) {
 		f.PublishFailed = PublishFailed(e.State, e.Cause, reason.String)
 		f.PullClosed = PullClosed(e.State, e.Cause, reason.String)
 		f.Feedback = Feedback(e.State, e.Cause, reason.String)
+		f.Unchanged = Unchanged(e.State, e.Cause, reason.String)
 	case !errors.Is(err, sql.ErrNoRows):
 		return Facts{}, err
 	}
