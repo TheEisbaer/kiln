@@ -91,7 +91,7 @@ func webNetwork(ctx context.Context, name string) error {
 		"--label", webLabel+"=1", name)
 	if err != nil {
 		// Runs that start at once may each find it missing: one that is
-		// refused finds it made by another (card 17).
+		// refused finds it made by another.
 		if n, findErr := findNetwork(ctx, name, webLabel); findErr == nil && n != nil && n.label != "" {
 			return nil
 		}

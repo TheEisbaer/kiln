@@ -94,7 +94,7 @@ type Config struct {
 	// The most runs of this instance in flight at once, from 1 to MaxRuns.
 	Runs int
 	// The developer's publish command, run with sh -c to publish a card
-	// (card 19, see runPublish); empty, no card is published.
+	// (see runPublish); empty, no card is published.
 	PublishCommand string
 	// The developer's check result command, run with sh -c to read the
 	// check of a card at the Git host (see checkresult.go); empty, no check
@@ -117,7 +117,7 @@ type Config struct {
 // The limit of runs in flight: DefaultRuns unless `kiln core --runs` says
 // otherwise, and at most MaxRuns, since every run takes a network, and a
 // container engine has about thirty address ranges for networks by default,
-// which other work shares (card 17).
+// which other work shares.
 const (
 	DefaultRuns = 3
 	MaxRuns     = 8
@@ -423,7 +423,7 @@ func runUpdatedCore(ctx context.Context, cfg Config, out, errOut io.Writer, eng 
 	// Nothing the core does depends on the directory it was started in, which
 	// may be removed while it runs: its paths are made absolute while that
 	// directory is there, and every command it runs, through the seal, runs in
-	// the data directory, and git in the instance's copy of the repo (card 16).
+	// the data directory, and git in the instance's copy of the repo.
 	cfg.Repos = slices.Clone(cfg.Repos) // the caller's list is not changed
 	paths := []*string{&cfg.Data, &cfg.Repo, &cfg.Page}
 	for i := range cfg.Repos {
@@ -867,7 +867,7 @@ func (c *core) tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Runs start from main as their repo's origin has it (card 19).
+	// Runs start from main as their repo's origin has it.
 	if err := c.atHostRound(ctx, c.fetchFor(cards, inFlight, paused)); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -1582,7 +1582,7 @@ type end struct {
 // withText is an implement run's end with the pull request's text it wrote,
 // /kiln/out/pull-request.md, which is kept as its report is: whenever it can
 // be read, a missing one no problem, and another problem said in the reason
-// without stopping the card (card 19).
+// without stopping the card.
 func (d end) withText(text run.Document) (end, *store.Doc) {
 	switch {
 	case text.Problem == "":
@@ -1854,8 +1854,8 @@ const (
 // run's commit; for a laid-over run, whose commit differs from main in the
 // repo's Claude Code configuration, how it is laid over (configPart), before
 // the change of a review run and else after the other parts; and last, the
-// developer's note, if the entry that made the card wait for this run has one
-// (card 16). A change over maxDiff is held.
+// developer's note, if the entry that made the card wait for this run has one.
+// A change over maxDiff is held.
 //
 // A part that a run wrote, a spec, a report or a review, is told fenced as
 // markdown, as the change is fenced as a diff: nothing in it can then read as
@@ -1931,7 +1931,7 @@ func (c *core) told(ctx context.Context, repo settings.Repo, row store.RunRow, c
 		}
 		// A run that starts from a commit that still holds Kiln's conflict
 		// markers, from its merge of main into the card's branch, is told
-		// which files they are in (card 19).
+		// which files they are in.
 		collide, err := markedFiles(ctx, repo.Copy, row.Commit, card.ID)
 		if err != nil {
 			return "", "", err

@@ -488,8 +488,8 @@ func TestDestination(t *testing.T) {
 		want    end
 		wantErr error
 	}{
-		// The spec stage's table, as card 11 has it.
-		{"spec: failed, by card 8's rule", store.Spec, run.Verdict{Reason: "exit 1, no result, not saved", Hosts: []string{"*"}}, run.Document{}, nil,
+		// The spec stage's table.
+		{"spec: failed, as any failed run", store.Spec, run.Verdict{Reason: "exit 1, no result, not saved", Hosts: []string{"*"}}, run.Document{}, nil,
 			end{store.Failed, failed, "exit 1, no result, not saved", nil}, nil},
 		{"spec: finished, a problem of the spec", store.Spec, web, run.Document{Problem: "the run wrote no spec (/kiln/out/spec.md)", Missing: true}, nil,
 			end{store.Finished, failed, "the run wrote no spec (/kiln/out/spec.md); " + reason, nil}, nil},
@@ -860,7 +860,7 @@ func TestStageInputs(t *testing.T) {
 		}{
 			{"Verdict: goes back\n\n1. NOTES.md lacks a line.\n", true},
 			// Only the developer's send-back puts a card in implement after a
-			// review that passed (card 16).
+			// review that passed.
 			{"Verdict: passes\n", true},
 			{"No verdict here.\n", false},
 		} {
@@ -1100,7 +1100,7 @@ func TestStageInputs(t *testing.T) {
 	})
 
 	// After the developer's move with a note, the run is told the note last;
-	// a spec run is told the spec it revises before it (card 16).
+	// a spec run is told the spec it revises before it.
 	t.Run("spec, sent back with a note", func(t *testing.T) {
 		c, main := stagedCore(t)
 		if _, err := c.store.Decide(1, store.Again, "  Name the table moves.\n"); err != nil {
@@ -1277,7 +1277,7 @@ func TestStageInputs(t *testing.T) {
 
 // TestStartedInAGoneDirectory runs the git commands of a tick from a working
 // directory that has been removed, as a core started in a directory removed
-// later does: each runs in the instance's copy of the repo (card 16).
+// later does: each runs in the instance's copy of the repo.
 func TestStartedInAGoneDirectory(t *testing.T) {
 	ctx := t.Context()
 	c, main := stagedCore(t)

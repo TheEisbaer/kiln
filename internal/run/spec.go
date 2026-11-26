@@ -14,7 +14,7 @@ import (
 )
 
 // maxSpec is the largest document that is read: 256 KiB, 7.6 times the
-// largest spec written by hand so far (34,160 bytes, card 12). A review and a
+// largest spec written by hand so far (34,160 bytes). A review and a
 // report have the same limit.
 const maxSpec = 256 << 10
 

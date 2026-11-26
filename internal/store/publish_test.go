@@ -246,7 +246,7 @@ func TestTwoDocuments(t *testing.T) {
 	}
 }
 
-// schemaV6 is the store of version 6 as card 17's code makes it: a card with a
+// schemaV6 is the store of version 6 as the code of its version makes it: a card with a
 // spec and a report, one document per run.
 const schemaV6 = `
 CREATE TABLE cards (id INTEGER PRIMARY KEY, text TEXT NOT NULL, stage TEXT NOT NULL, waits_for TEXT NOT NULL, since TEXT) STRICT;

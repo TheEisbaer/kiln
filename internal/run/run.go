@@ -485,7 +485,7 @@ func carry(ctx context.Context, in Inputs, out, errOut, notes io.Writer, startin
 	// Where the branch is matters only to the save, which moves it. A run
 	// that saves nothing, a spec run or a review run, never touches it: a
 	// spec run after a send-back to spec starts from main while the card's
-	// branch stays where it is for the implement run that follows (card 17).
+	// branch stays where it is for the implement run that follows.
 	var at string
 	if !r.SkipSave {
 		if at, err = branchAt(ctx, r.Repo, r.ref); err != nil {

@@ -26,7 +26,7 @@ import (
 	"github.com/TheEisbaer/kiln/internal/store"
 )
 
-// Publishing (card 19). A card the developer publishes waits in review for the
+// Publishing. A card the developer publishes waits in review for the
 // Git host. While it has no pull request's address, a publisher beside the
 // tick, like a run's follower and counted in no limit, brings main up to date,
 // puts the change onto it as one commit, and runs the developer's publish
@@ -981,7 +981,7 @@ func workflowFiles(ctx context.Context, repo, commit string) ([]string, error) {
 	return files, nil
 }
 
-// runPublish runs command, the publish command of a card's repo (card 19):
+// runPublish runs command, the publish command of a card's repo:
 // with sh -c, in the data directory, with no standard input, for at most
 // publishLimit, its process group ended with it, and with the environment of
 // the core, from which the command's variables are taken out, and env. It

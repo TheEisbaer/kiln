@@ -191,7 +191,7 @@ func TestTick(t *testing.T) {
 	})
 
 	// A core whose working directory is removed runs every command in a
-	// directory it owns, and its card's run ends as it would (card 16).
+	// directory it owns, and its card's run ends as it would.
 	t.Run("a core started in a directory that is gone", func(t *testing.T) {
 		t.Parallel()
 		c := f.newCase(t, f.standIn)
@@ -995,7 +995,7 @@ echo "https://git.example/pull/$KILN_CARD"`
 		}
 	})
 
-	// The rule of card 8 in the later stages: a kill between a run's save and
+	// The rule for a kill, in the later stages: a kill between a run's save and
 	// its record, and one between its review read and EndRun, leave the run
 	// in flight; a later core ends it where the table says, with one commit
 	// on the branch and one document of the run.
@@ -1084,7 +1084,7 @@ echo "https://git.example/pull/$KILN_CARD"`
 	// through a spec run and then an implement run and a review run. The core
 	// is killed while three runs are followed, in spec and in implement, and
 	// started again: every run ends once, with its document, every save is
-	// made once, and no card stays in flight (card 17).
+	// made once, and no card stays in flight.
 	t.Run("three runs at once, killed and started again", func(t *testing.T) {
 		t.Parallel()
 		c := f.newCase(t, f.standIn)

@@ -179,7 +179,7 @@ func assertLimits(t *testing.T, report probeReport, pinned bool) {
 		r := resultFor(report.Files, "/sys/fs/cgroup/"+f)
 		if r == nil || r.Error != "" {
 			// Whether the runner has these files is a question for the
-			// developer (spec of card 3): fail and name it, never drop it.
+			// developer: fail and name it, never drop it.
 			t.Errorf("/sys/fs/cgroup/%s cannot be read: %v", f, r)
 			continue
 		}
