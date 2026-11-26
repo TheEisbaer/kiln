@@ -2,7 +2,7 @@
 
 What cards have settled under a decision, by the decision's number. A card adds its lines here, in the pull request that settles them, and never changes a file in `docs/adr/`. The decisions themselves change only by the developer (ADR 0058).
 
-A line says what was settled and ends with the date in brackets, for example (2026-11-20). It names no card: the pull request that added a line is found with `git blame`. The lines already there stay as they are, except that a line whose "until" or "yet" a later change ends is replaced in that change's pull request. The spec that a line comes from is the text of that card's pull request.
+A line says what was settled and ends with the date in brackets, for example (2026-11-20). It names no card: the pull request that added a line is found with `git blame`. The lines already there stay as they are, with two exceptions, both made in the pull request of the change concerned. A line whose "until" or "yet" a later change ends is replaced. A line that a later change makes false in any other way keeps its text and gets a mark at its start: `*No longer holds since <date>: <what holds now, in a few words>; see ADR <number>.*`, with the date of the change and the decision under which the change's own line says what holds now. A mark on a line that is only partly false names the part. The spec of such a change lists the lines it marks, as it lists the lines it adds. The spec that a line comes from is the text of that card's pull request.
 
 ## ADR 0005: Kiln's work ends at "ready to merge"; merging belongs to the target repo's Git host
 
@@ -473,6 +473,10 @@ A line says what was settled and ends with the date in brackets, for example (20
 ## ADR 0057: The store is SQLite, through ncruces/go-sqlite3, and the modules come in the toolchain image
 
 - A card that changes the version of a Go module gets `go.mod` and `go.sum` from its spec run, which has the network: the spec gives both files whole, as `go mod tidy` wrote them, and the implement run writes them as given, since it cannot fetch a module. The check on the Git host builds the toolchain image from them, with the network, and is the first to compile against them (2026-11-25).
+
+## ADR 0058: Cards record what they settle in one file, and only the developer changes a decision
+
+- A line that a later change makes false is marked, not deleted, as the header of this file says (2026-11-26).
 
 ## ADR 0059: A run reaches the hosts on its stage's list, through a way out that holds no credential
 
