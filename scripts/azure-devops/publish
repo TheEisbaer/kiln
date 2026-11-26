@@ -85,13 +85,21 @@ if [ ! -d "$clone/.git" ]; then
   tmp="$clone.tmp.$$"
   rm -rf "$tmp"
   git clone --quiet --no-checkout "$KILN_REPO" "$tmp" || fail "cannot clone the copy $KILN_REPO for publishing."
-  git -C "$tmp" remote set-url origin "$origin" || fail "cannot set the clone's origin."
+  git -C "$tmp" remote set-url origin "$origin" 2>/dev/null || fail "cannot set the clone's origin."
   [ -e "$clone" ] || mv "$tmp" "$clone" || fail "cannot move the clone into place."
-  rm -rf "$tmp"
+  # A clone made between the check and the move makes mv put this one inside it.
+  rm -rf "$tmp" "$clone/${tmp##*/}"
   [ -d "$clone/.git" ] || fail "$clone is in the way of the clone."
 fi
 cd "$clone"
-git remote set-url origin "$origin" || fail "cannot set the clone's origin."
+# The origin is written only when it differs: a write takes .git/config.lock and fails at once
+# while another card's publish holds it. Git's message is not passed on, since it holds the origin.
+set_origin() {
+  [ "$(git config --get remote.origin.url)" = "$origin" ] ||
+    git remote set-url origin "$origin" 2>/dev/null
+}
+set_origin || { sleep 1; set_origin; } ||
+  fail "cannot set the clone's origin; if no git runs in $clone, a left-over .git/config.lock there can be removed."
 
 # The card's commit, from the copy, into a ref of the card's own. Nothing is fetched from the
 # host, so two cards publishing at once share no ref.

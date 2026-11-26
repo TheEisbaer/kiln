@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -781,6 +782,87 @@ func TestAzureDevOpsPublish(t *testing.T) {
 		if got := e.git(e.host, "", "rev-parse", "refs/heads/feat/42-add-a-thing"); got != commit {
 			t.Errorf("the branch is %s, want %s", got, commit)
 		}
+	})
+
+	t.Run("at once with another card", func(t *testing.T) {
+		const otherURL = "https://dev.azure.com/org/My%20Project/_git/other"
+		world := func(t *testing.T) (*ado, string, string) {
+			e := newADO(t)
+			commit := e.card("hello\nthing\n", adoTitle)
+			e.answer("list-branch", "")
+			e.answer("create", "17\n")
+			published(t, e.publish(e.pa, commit, adoTitle, adoText))
+			return e, commit, filepath.Join(e.data, "azure-devops", "org", "My%20Project", "repo")
+		}
+		lock := func(t *testing.T, clone string) string {
+			path := filepath.Join(clone, ".git", "config.lock")
+			if err := os.WriteFile(path, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}
+		stays := func(t *testing.T, path string) {
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("the lock is gone: %v", err)
+			}
+		}
+
+		t.Run("a held lock, the same origin", func(t *testing.T) {
+			e, commit, clone := world(t)
+			l := lock(t, clone)
+			published(t, e.publish(e.pa, commit, adoTitle, adoText))
+			stays(t, l)
+		})
+		t.Run("a held lock, another origin", func(t *testing.T) {
+			e, commit, clone := world(t)
+			e.git(clone, "", "config", "remote.origin.url", otherURL)
+			l := lock(t, clone)
+			start := time.Now()
+			r := e.publish(e.pa, commit, adoTitle, adoText)
+			refused(t, r, "cannot set the clone's origin", ".git/config.lock")
+			if strings.Contains(r.stderr, "_git/") {
+				t.Errorf("standard error %q holds the origin", r.stderr)
+			}
+			if time.Since(start) < time.Second {
+				t.Errorf("the run took %v, want the retry's second", time.Since(start))
+			}
+			stays(t, l)
+		})
+		t.Run("another origin", func(t *testing.T) {
+			e, commit, clone := world(t)
+			e.git(clone, "", "config", "remote.origin.url", otherURL)
+			published(t, e.publish(e.pa, commit, adoTitle, adoText))
+			if got := e.git(clone, "", "config", "--get", "remote.origin.url"); got != adoURL {
+				t.Errorf("the clone's origin is %q, want %q", got, adoURL)
+			}
+			if got := e.git(e.host, "", "rev-parse", "refs/heads/feat/42-add-a-thing"); got != commit {
+				t.Errorf("the branch is %s, want %s", got, commit)
+			}
+		})
+		t.Run("a clone made between the check and the move", func(t *testing.T) {
+			e := newADO(t)
+			commit := e.card("hello\nthing\n", adoTitle)
+			e.answer("list-branch", "")
+			e.answer("create", "17\n")
+			realMv, err := exec.LookPath("mv")
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.write(filepath.Join(e.bin, "mv"), "#!/bin/sh\ncp -R \"$1\" \"$2\" || exit 1\nexec "+quote(realMv)+" \"$@\"\n", 0o755)
+			published(t, e.publish(e.pa, commit, adoTitle, adoText))
+			clone := filepath.Join(e.data, "azure-devops", "org", "My%20Project", "repo")
+			entries, err := os.ReadDir(clone)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, d := range entries {
+				names = append(names, d.Name())
+			}
+			if strings.Join(names, " ") != ".git" {
+				t.Errorf("the clone holds %v, want only .git", names)
+			}
+		})
 	})
 
 	t.Run("failures", func(t *testing.T) {
