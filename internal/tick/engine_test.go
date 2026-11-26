@@ -1184,35 +1184,50 @@ echo "https://git.example/pull/$KILN_CARD"`
 	})
 }
 
-// testToolchain runs runs of a repo with its own toolchain (toolchain.go): a
-// toy Dockerfile outside the repo that fills a cache from the repo's lock.txt,
-// with a .dockerignore that lets only lock.txt into the context, and the
-// stand-in layer, testdata/layer, with the stand-in for Claude Code. The
-// first card's run is on kiln-run-<repo> and reads the cache as uid 1000; a
-// commit of a file that is not an input leaves the image as it is for the
-// second card; a commit of lock.txt makes a new one for the third, which
-// reads the new text.
+// testToolchain runs runs of a repo with its own toolchain and a cache
+// (toolchain.go): a toy toolchain Dockerfile outside the repo that holds no
+// cache, a toy cache Dockerfile whose command fills /opt/toy-cache from the
+// repo's lock.txt, with a .dockerignore that lets only lock.txt into the
+// context, and the stand-in layer, testdata/layer, with the stand-in for
+// Claude Code. The first card's run is on kiln-run-<repo>, reads the cache as
+// uid 1000 and cannot write into it, and has the cache's volume as its one
+// mount, read-only; the fill had the repo's memory and the default network.
+// A commit of a file that is not an input leaves the image and the volume as
+// they are for the second card; a commit of lock.txt keeps the image and
+// fills a new volume for the third, which reads the new text. A run of Kiln's
+// own repo has no mount.
 func testToolchain(t *testing.T, f *fixture) {
 	c := f.newCase(t, f.standIn)
 	repo := "ticktest-" + f.id
-	toolchain, runImage := toolchainImageOf(repo), runImageOf(repo)
+	toolchain, runImage, cacheImage, fill := toolchainImageOf(repo), runImageOf(repo), seal.CacheImage(repo), "kiln-fill-"+repo
 	var ids []string
 	t.Cleanup(func() {
 		removeInstance(f.proxy.Name, c.instance)
-		dockerQuiet("rmi", runImage, toolchain)
+		dockerQuiet("rm", "--force", fill)
+		if volumes, err := docker(context.Background(), "volume", "ls", "--quiet", "--filter", "label=kiln.cache="+repo); err == nil {
+			for _, v := range strings.Fields(volumes) {
+				dockerQuiet("volume", "rm", v)
+			}
+		}
+		dockerQuiet("rmi", runImage, toolchain, cacheImage)
 		for _, id := range ids {
 			dockerQuiet("rmi", id)
 		}
 	})
 	imageIDs := func() string {
 		t.Helper()
-		run, tc := must(t, "image", "inspect", "--format", "{{.Id}}", runImage), must(t, "image", "inspect", "--format", "{{.Id}}", toolchain)
-		ids = append(ids, run, tc)
+		run := must(t, "image", "inspect", "--format", "{{.Id}}", runImage)
+		ids = append(ids, run, must(t, "image", "inspect", "--format", "{{.Id}}", toolchain),
+			must(t, "image", "inspect", "--format", "{{.Id}}", cacheImage))
 		return run
 	}
 	dir := t.TempDir()
-	dockerfile := filepath.Join(dir, "toy.Dockerfile")
-	if err := os.WriteFile(dockerfile, []byte("FROM kiln-toolchain\nCOPY lock.txt /opt/toy-cache/\nRUN chmod -R a+rX /opt/toy-cache\n"), 0o644); err != nil {
+	dockerfile, cacheFile := filepath.Join(dir, "toy.Dockerfile"), filepath.Join(dir, "toy-cache.Dockerfile")
+	if err := os.WriteFile(dockerfile, []byte("FROM kiln-toolchain\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cacheFile, []byte("ARG TOOLCHAIN\nFROM ${TOOLCHAIN}\nCOPY lock.txt /opt/lock.txt\n"+
+		`CMD ["sh", "-c", "set -eu; cp /opt/lock.txt /opt/toy-cache/lock.txt; chmod -R a+rX /opt/toy-cache"]`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	layer := filepath.Join(dir, "layer")
@@ -1229,7 +1244,8 @@ func testToolchain(t *testing.T, f *fixture) {
 	cfg := f.config(c)
 	cfg.Repo, cfg.Hosts = "", nil
 	cfg.Repos = []settings.Repo{{Name: store.KilnRepo, Copy: kilnCopy, Own: true},
-		{Name: repo, Copy: c.repo, Toolchain: &settings.Toolchain{Dockerfile: dockerfile, Inputs: []string{"lock.txt"}},
+		{Name: repo, Copy: c.repo, Toolchain: &settings.Toolchain{Dockerfile: dockerfile,
+			Cache: &settings.Cache{Dockerfile: cacheFile, Inputs: []string{"lock.txt"}, Path: "/opt/toy-cache"}},
 			Memory: "6g", CPUs: 1}}
 	cfg.Layer = layer
 	core, done := f.start(t, child{Command: "core", Config: cfg})
@@ -1264,45 +1280,76 @@ func testToolchain(t *testing.T, f *fixture) {
 			return err == nil && cd.WaitsFor != store.Run && instanceLeft(t, c.instance) == ""
 		})
 	}
+	volumeName := regexp.MustCompile(`^kiln-cache-` + regexp.QuoteMeta(repo) + `-[0-9a-f]{64}$`)
 	// cardRuns writes card n of the repo, waits until its run waits at its
-	// gate, and returns its container's image and what uid 1000 reads of the
-	// cache; then it lets the run end. The repo's run has its memory, 6g,
-	// and its 1 CPU.
-	cardRuns := func(n int) (string, string) {
+	// gate, and returns its container's image, what uid 1000 reads of the
+	// cache, and the cache's volume, its one mount, read-only, which uid 1000
+	// cannot write into; then it lets the run end. The repo's run has its
+	// memory, 6g, and its 1 CPU.
+	cardRuns := func(n int) (string, string, string) {
 		t.Helper()
 		container, card := atGate(repo, fmt.Sprintf("kiln-case-toolchain-%d", n))
 		assertRunLimits(t, container, "6442450944", 1)
 		image := must(t, "inspect", "--format", "{{.Config.Image}}", container)
 		cache := must(t, "exec", "--user", "1000", container, "cat", "/opt/toy-cache/lock.txt")
+		if _, err := docker(t.Context(), "exec", "--user", "1000", container, "touch", "/opt/toy-cache/x"); err == nil ||
+			!strings.Contains(err.Error(), "Read-only file system") {
+			t.Errorf("run %d: a write into the cache gave %v, want Read-only file system", n, err)
+		}
+		var mounts []struct {
+			Type, Name, Destination string
+			RW                      bool
+		}
+		if err := json.Unmarshal([]byte(must(t, "inspect", "--format", "{{json .Mounts}}", container)), &mounts); err != nil {
+			t.Fatal(err)
+		}
+		volume := ""
+		if len(mounts) != 1 || mounts[0].Type != "volume" || !volumeName.MatchString(mounts[0].Name) ||
+			mounts[0].Destination != "/opt/toy-cache" || mounts[0].RW {
+			t.Errorf("run %d has the mounts %+v, want the cache's volume alone, read-only, at /opt/toy-cache", n, mounts)
+		} else {
+			volume = mounts[0].Name
+		}
 		end(container, card)
-		return image, cache
+		return image, cache, volume
 	}
 
-	if image, cache := cardRuns(1); image != runImage || cache != "lock one" {
+	image, cache, first := cardRuns(1)
+	if image != runImage || cache != "lock one" {
 		t.Errorf("the first run is on %q and reads %q, want %s and lock one", image, cache, runImage)
 	}
-	first := imageIDs()
-	// A run of Kiln's own repo in the same core has the defaults.
+	if got := must(t, "inspect", "--format", "{{.HostConfig.Memory}} {{.HostConfig.NetworkMode}} {{.State.Status}} {{.State.ExitCode}} "+
+		"{{range .Mounts}}{{.Name}} {{.RW}}{{end}}", fill); got != "6442450944 bridge exited 0 "+first+" true" {
+		t.Errorf("the fill %s is %q, want 6g, bridge, exited 0 and the volume %s read-write", fill, got, first)
+	}
+	firstImage := imageIDs()
+	// A run of Kiln's own repo in the same core has the defaults, and no
+	// mount.
 	container, card := atGate(store.KilnRepo, "kiln-case-toolchain-kiln")
 	assertRunLimits(t, container, "4294967296", 2)
+	if mounts := must(t, "inspect", "--format", "{{json .Mounts}}", container); mounts != "[]" {
+		t.Errorf("Kiln's own run has the mounts %s, want none", mounts)
+	}
 	end(container, card)
 	commitMain(t, c.repo, map[string]string{"NOTES.md": "# Notes\nA line on main.\n"})
-	if image, cache := cardRuns(2); image != runImage || cache != "lock one" {
-		t.Errorf("the second run is on %q and reads %q, want %s and lock one", image, cache, runImage)
+	if image, cache, volume := cardRuns(2); image != runImage || cache != "lock one" || volume != first {
+		t.Errorf("the second run is on %q with %s and reads %q, want %s with %s and lock one", image, volume, cache, runImage, first)
 	}
-	if id := imageIDs(); id != first {
-		t.Errorf("a commit of a file that is not an input made a new run image, %s after %s", id, first)
+	if id := imageIDs(); id != firstImage {
+		t.Errorf("a commit of a file that is not an input made a new run image, %s after %s", id, firstImage)
 	}
 	commitMain(t, c.repo, map[string]string{"lock.txt": "lock two\n"})
-	if image, cache := cardRuns(3); image != runImage || cache != "lock two" {
-		t.Errorf("the third run is on %q and reads %q, want %s and lock two", image, cache, runImage)
+	if image, cache, volume := cardRuns(3); image != runImage || cache != "lock two" || volume == first || volume == "" {
+		t.Errorf("the third run is on %q with %s and reads %q, want %s with a new volume and lock two", image, volume, cache, runImage)
 	}
-	if id := imageIDs(); id == first {
-		t.Errorf("a commit of lock.txt left the run image %s as it was", id)
+	if id := imageIDs(); id != firstImage {
+		t.Errorf("a commit of lock.txt, the cache's input alone, made a new run image, %s after %s", id, firstImage)
 	}
 	f.stop(t, core, done)
-	if out := core.Stdout.(*bytes.Buffer).String(); strings.Count(out, "kiln core: repo "+repo+": built "+runImage+"\n") != 2 {
-		t.Errorf("the core did not build %s twice:\n%s", runImage, out)
+	out := core.Stdout.(*bytes.Buffer).String()
+	if strings.Count(out, "kiln core: repo "+repo+": built "+runImage+"\n") != 1 ||
+		strings.Count(out, "kiln core: repo "+repo+": filled kiln-cache-"+repo+"-") != 2 {
+		t.Errorf("the core did not build %s once and fill the cache twice:\n%s", runImage, out)
 	}
 }
 

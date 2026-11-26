@@ -701,6 +701,8 @@ type engine interface {
 	TagImage(ctx context.Context, src, dst string) error
 	RemoveImageTag(ctx context.Context, ref string) error
 	ImageTags(ctx context.Context, name string) ([]string, error)
+	FillCache(ctx context.Context, f seal.Fill) error
+	CacheFilled(ctx context.Context, repo, digest string) (bool, error)
 }
 
 // sealed is the engine of a core: the seal and internal/run.
@@ -740,6 +742,12 @@ func (sealed) RemoveImageTag(ctx context.Context, ref string) error {
 
 func (sealed) ImageTags(ctx context.Context, name string) ([]string, error) {
 	return seal.ImageTags(ctx, name)
+}
+
+func (sealed) FillCache(ctx context.Context, f seal.Fill) error { return seal.FillCache(ctx, f) }
+
+func (sealed) CacheFilled(ctx context.Context, repo, digest string) (bool, error) {
+	return seal.CacheFilled(ctx, repo, digest)
 }
 
 func (sealed) ListRuns(ctx context.Context, instance string) ([]string, error) {
@@ -1181,6 +1189,7 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 		return nil, err
 	}
 	inFlight := row != nil
+	var cache *seal.RunCache // the cache a run that starts mounts
 	if !inFlight {
 		if !mayStart {
 			return nil, nil
@@ -1198,9 +1207,10 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 			return nil, c.hold(card, held)
 		}
 		// A repo with a toolchain starts no run until its run image is built
-		// from what it is built from now; the card waits for a run as it is
-		// (toolchain.go).
-		if !c.runImageReady(ctx, repo) {
+		// from what it is built from now, and its cache, if it has one, is
+		// filled; the card waits for a run as it is (toolchain.go).
+		var ready bool
+		if cache, ready = c.runImageReady(ctx, repo); !ready {
 			return nil, nil
 		}
 		model, err := c.modelOf(card)
@@ -1224,6 +1234,9 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 	if held != "" {
 		return nil, c.hold(card, held)
 	}
+	// The volume runImageReady found filled; a run in flight keeps the mount
+	// its container was created with.
+	in.Cache = cache
 	if !inFlight {
 		mark("after-instruction")
 	}

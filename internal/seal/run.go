@@ -9,10 +9,11 @@ import (
 	"strings"
 )
 
-// Run is what the caller says about a run's container. Its network, mounts,
-// environment and user are the seal's and cannot be given. Its memory and
-// CPUs are the caller's, checked by the seal; its other limits and its cpuset
-// are the seal's.
+// Run is what the caller says about a run's container. Its network,
+// environment and user are the seal's and cannot be given, and so are its
+// mounts, but for one: the repo's cache, which the caller names and the seal
+// checks and mounts read-only. Its memory and CPUs are the caller's, checked
+// by the seal; its other limits and its cpuset are the seal's.
 type Run struct {
 	ID      string            // names the run's network and container, kiln-run-<ID>
 	Image   string            // the run image (ADR 0039)
@@ -34,6 +35,9 @@ type Run struct {
 	// CPUs, a whole number; "" and 0 are 4g and 2 (CheckLimits).
 	Memory string
 	CPUs   int
+	// Cache is the repo's filled cache volume and the path the run sees it
+	// at, mounted read-only (ADR 0038); nil, the run has no mount.
+	Cache *RunCache
 }
 
 // runLabel carries a run's ID on its container (ADR 0035, point 2), and marks
@@ -110,6 +114,13 @@ func runName(id string) string { return "kiln-run-" + id }
 //     behind is never reused, since its options cannot be trusted. One without
 //     the label kiln.run=<ID> is refused, and nothing is touched.
 //
+// With a cache, the container gets one mount: the cache's volume at its path,
+// read-only and without the engine's copy into it. A volume name not of the
+// form kiln-cache-<repo>-<64 hex digits>, a path CheckCachePath refuses, and
+// a volume that is not there or lacks the label kiln.cache=<repo> are refused
+// before anything is created or removed. Without a cache the container has no
+// mount.
+//
 // The proxy must carry the label kiln.proxy; one without it, or none, is
 // refused first, and nothing is touched. The image is never pulled: one that is
 // not there locally is an error. When a step fails, everything this call made
@@ -141,8 +152,20 @@ func CreateRun(ctx context.Context, r Run) error {
 			return fmt.Errorf("a run with a list of hosts needs the way out's image and network")
 		}
 	}
+	cacheRepo := ""
+	if r.Cache != nil {
+		var err error
+		if cacheRepo, err = checkRunCache(*r.Cache); err != nil {
+			return err
+		}
+	}
 	if _, err := kilnProxy(ctx, r.Proxy); err != nil {
 		return err
+	}
+	if r.Cache != nil {
+		if err := cacheThere(ctx, r.Cache.Volume, cacheRepo); err != nil {
+			return err
+		}
 	}
 	keys := make([]string, 0, len(r.Labels))
 	for k := range r.Labels {
@@ -216,6 +239,7 @@ func CreateRun(ctx context.Context, r Run) error {
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--init")
+	args = append(args, cacheMount(r.Cache)...)
 	// The limits come in createPinned, between these and the rest.
 	rest := []string{
 		"--log-driver", "json-file",

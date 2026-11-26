@@ -26,12 +26,15 @@ type toolchainBench struct {
 	kiln, work  settings.Repo
 	dockerfile  string
 	clock       *fakeClock
+	data        string
+	cancel      context.CancelFunc
 }
 
 // The toolchain's Dockerfile of the bench, and the files of work's main.
 const benchDockerfile = "FROM kiln-toolchain\nCOPY lock.json /opt/cache/\n"
 
-var benchFiles = map[string]string{"NOTES.md": "# Notes\n", "lock.json": "{}\n", "deps/a.txt": "a\n", "other.txt": "other\n"}
+var benchFiles = map[string]string{"NOTES.md": "# Notes\n", "lock.json": "{}\n", "deps/a.txt": "a\n", "other.txt": "other\n",
+	"packages.lock": "one\n"}
 
 func newToolchainBench(t *testing.T, inputs ...string) *toolchainBench {
 	t.Helper()
@@ -43,7 +46,7 @@ func newToolchainBench(t *testing.T, inputs ...string) *toolchainBench {
 	t.Cleanup(func() { s.Close() })
 	kilnCopy, _ := bareRepo(t, map[string]string{"NOTES.md": "# Notes of kiln\n"})
 	workCopy, _ := bareRepo(t, benchFiles)
-	b := &toolchainBench{e: newFakeEngine(), out: &syncBuilder{}, errOut: &syncBuilder{}, clock: newFakeClock()}
+	b := &toolchainBench{e: newFakeEngine(), out: &syncBuilder{}, errOut: &syncBuilder{}, clock: newFakeClock(), data: data}
 	b.dockerfile = filepath.Join(t.TempDir(), "work.Dockerfile")
 	if err := os.WriteFile(b.dockerfile, []byte(benchDockerfile), 0o644); err != nil {
 		t.Fatal(err)
@@ -53,15 +56,54 @@ func newToolchainBench(t *testing.T, inputs ...string) *toolchainBench {
 	}
 	b.kiln = settings.Repo{Name: store.KilnRepo, Copy: kilnCopy, Own: true}
 	b.work = settings.Repo{Name: "work", Copy: workCopy, Toolchain: &settings.Toolchain{Dockerfile: b.dockerfile, Inputs: inputs}}
-	b.c = &core{Config: Config{Data: data, Repos: []settings.Repo{b.kiln, b.work}, Image: "kiln-run", Proxy: "kiln-proxy",
+	b.newCore(t, s)
+	t.Cleanup(func() { b.cancel(); b.c.followers.Wait() })
+	return b
+}
+
+// newCore makes the bench's core afresh, on the bench's engine and store, with
+// a context of its own, as a core started again is.
+func (b *toolchainBench) newCore(t *testing.T, s *store.Store) {
+	b.c = &core{Config: Config{Data: b.data, Repos: []settings.Repo{b.kiln, b.work}, Image: "kiln-run", Proxy: "kiln-proxy",
 		Model: "claude-opus-5-5", Runs: 3}, store: s, instance: "ab12cd34", out: b.out, errOut: b.errOut,
 		engine: b.e, followed: map[int64]string{}, refused: map[int64]bool{}, stuck: map[string]stuckNote{},
 		publishing: map[int64]bool{}, checking: map[int64]*checkState{}, tested: map[int64]hostTest{},
 		activity: web.NewActivity(), clock: b.clock}
-	ctx, cancel := context.WithCancel(t.Context())
-	b.ctx = ctx
-	t.Cleanup(func() { cancel(); b.c.followers.Wait() })
+	b.ctx, b.cancel = context.WithCancel(t.Context())
+}
+
+// The cache's Dockerfile of a bench with a cache, and the cache's path.
+const (
+	benchCacheDockerfile = "ARG TOOLCHAIN\nFROM ${TOOLCHAIN}\nCOPY packages.lock /\nCMD [\"restore\"]\n"
+	benchCachePath       = "/opt/cache"
+)
+
+// newCacheBench is a toolchainBench whose work has a cache, with the input
+// packages.lock, and its Dockerfile beside the toolchain's.
+func newCacheBench(t *testing.T) *toolchainBench {
+	t.Helper()
+	b := newToolchainBench(t)
+	cache := filepath.Join(filepath.Dir(b.dockerfile), "work-cache.Dockerfile")
+	if err := os.WriteFile(cache, []byte(benchCacheDockerfile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b.work.Toolchain.Cache = &settings.Cache{Dockerfile: cache, Inputs: []string{"packages.lock"}, Path: benchCachePath}
+	b.c.Repos[1] = b.work
 	return b
+}
+
+// fills are the calls of FillCache so far.
+func (b *toolchainBench) fills() []seal.Fill {
+	b.e.mu.Lock()
+	defer b.e.mu.Unlock()
+	return slices.Clone(b.e.fills)
+}
+
+// cacheOf is the cache in the inputs of a card's last Carry.
+func (b *toolchainBench) cacheOf(card int64) *seal.RunCache {
+	b.e.mu.Lock()
+	defer b.e.mu.Unlock()
+	return b.e.inputs[card].Cache
 }
 
 // card writes a card of the repo waiting for a spec run.

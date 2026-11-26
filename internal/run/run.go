@@ -58,6 +58,11 @@ type Inputs struct {
 	// container was created with. `kiln run` by hand has no flags for them.
 	Memory string
 	CPUs   int
+	// Cache is the repo's filled cache volume and its path in the run, which
+	// the seal mounts read-only (ADR 0038); nil for none. It is not among the
+	// labels a repeat must match: a run keeps the mount its container was
+	// created with, and a run in the store is never created again.
+	Cache *seal.RunCache
 	// SkipSave leaves step 6 out: no save container, nothing taken into the
 	// instance's copy, and the branch neither created nor moved. The record's
 	// save is "not saved". The tick sets it for a spec run; `kiln run` by hand
@@ -553,7 +558,7 @@ func (r *run) create(ctx context.Context, starting func() error, stored bool, st
 		if err := seal.CreateRun(ctx, seal.Run{ID: r.ID, Image: r.Image, Proxy: r.Proxy,
 			Command: r.command(), Labels: labels, Instance: r.Instance,
 			Hosts: r.Hosts, WayOutImage: r.WayOutImage, WayOutNetwork: r.WayOutNetwork,
-			Memory: r.Memory, CPUs: r.CPUs}); err != nil {
+			Memory: r.Memory, CPUs: r.CPUs, Cache: r.Cache}); err != nil {
 			return err
 		}
 		if err := after("create"); err != nil {

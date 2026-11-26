@@ -120,8 +120,12 @@ func (noEngine) ReadDocument(string, string, string) (run.Document, error) {
 func (noEngine) Carry(context.Context, run.Inputs, func() error, io.Writer) (run.Verdict, error) {
 	return run.Verdict{}, errors.New("no engine in this test")
 }
-func (noEngine) PushCredential(context.Context, string, string) error { return nil }
-func (noEngine) ProxyUp(context.Context, string) error                { return nil }
+func (noEngine) FillCache(context.Context, seal.Fill) error {
+	return errors.New("no engine in this test")
+}
+func (noEngine) CacheFilled(context.Context, string, string) (bool, error) { return false, nil }
+func (noEngine) PushCredential(context.Context, string, string) error      { return nil }
+func (noEngine) ProxyUp(context.Context, string) error                     { return nil }
 
 // KeepProxy keeps the proxy, and records the ID of its image's name.
 func (e noEngine) KeepProxy(_ context.Context, p seal.Proxy) (bool, error) {

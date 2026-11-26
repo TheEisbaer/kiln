@@ -245,3 +245,53 @@ func TestLoadWorkItem(t *testing.T) {
 		t.Error("a number was taken as the work item")
 	}
 }
+
+// TestLoadCache takes a toolchain's cache, and refuses an unknown member, a
+// relative Dockerfile, an input not in clean form and a path the seal
+// refuses, each with the repo's name.
+func TestLoadCache(t *testing.T) {
+	load := func(t *testing.T, cache string) (Settings, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "settings.json")
+		body := `{"repos":[{"name":"kiln","copy":"/a/kiln.git","own":true},` +
+			`{"name":"work","copy":"/a/w.git","toolchain":{"dockerfile":"/d/work.Dockerfile"` + cache + `}}]}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path)
+	}
+	s, err := load(t, `,"cache":{"dockerfile":"/d/cache.Dockerfile","inputs":["package-lock.json","nuget"],"path":"/opt/cache"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &Cache{Dockerfile: "/d/cache.Dockerfile", Inputs: []string{"package-lock.json", "nuget"}, Path: "/opt/cache"}
+	if got := s.Repos[1].Toolchain.Cache; !reflect.DeepEqual(got, want) {
+		t.Errorf("the cache is %+v, want %+v", got, want)
+	}
+	for _, cache := range []string{``, `,"cache":null`} {
+		if s, err := load(t, cache); err != nil || s.Repos[1].Toolchain.Cache != nil {
+			t.Errorf("%q: %v, %+v; want no cache", cache, err, s)
+		}
+	}
+	if s, err := load(t, `,"cache":{"dockerfile":"/d/c","path":"/var/cache/nuget"}`); err != nil || s.Repos[1].Toolchain.Cache.Inputs != nil {
+		t.Errorf("a cache without inputs: %v, %+v", err, s)
+	}
+	for _, tc := range []struct{ cache, want string }{
+		{`,"cache":{"dockerfile":"/d/c","path":"/opt/cache","size":1}`, `the cache of the repo "work": json: unknown field "size"`},
+		{`,"cache":{"dockerfile":"c.Dockerfile","path":"/opt/cache"}`, `the cache's Dockerfile of the repo "work" is not an absolute path`},
+		{`,"cache":{"path":"/opt/cache"}`, `the cache's Dockerfile of the repo "work" is not an absolute path`},
+		{`,"cache":{"dockerfile":"/d/c","inputs":["./lock.json"],"path":"/opt/cache"}`, `the cache's input "./lock.json" of the repo "work"`},
+		{`,"cache":{"dockerfile":"/d/c","inputs":["../x"],"path":"/opt/cache"}`, `the cache's input "../x" of the repo "work"`},
+		{`,"cache":{"dockerfile":"/d/c","path":"/kiln/cache"}`, `the repo "work": the cache's path "/kiln/cache"`},
+		{`,"cache":{"dockerfile":"/d/c","path":"opt/cache"}`, `the repo "work": the cache's path "opt/cache"`},
+		{`,"cache":{"dockerfile":"/d/c"}`, `the repo "work": the cache's path ""`},
+		{`,"cache":{"dockerfile":"/d/c","path":3}`, `the cache of the repo "work": json: cannot unmarshal`},
+		{`,"cache":[]`, `the cache of the repo "work": json: cannot unmarshal`},
+	} {
+		t.Run("refused "+tc.cache, func(t *testing.T) {
+			if _, err := load(t, tc.cache); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Load error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
