@@ -210,3 +210,176 @@ func TestCacheFillRepeat(t *testing.T) {
 		t.Errorf("the builds are %q; the second core should build nothing again", names)
 	}
 }
+
+// removals are the calls of removal so far, by name.
+func (b *toolchainBench) removals() []string {
+	b.e.mu.Lock()
+	defer b.e.mu.Unlock()
+	return slices.Clone(b.e.removals)
+}
+
+// hasVolume reports whether the engine has a volume of the name, made by a
+// fill or by the test.
+func (b *toolchainBench) hasVolume(name string) bool {
+	b.e.mu.Lock()
+	defer b.e.mu.Unlock()
+	_, made := b.e.volumes[name]
+	_, foreign := b.e.foreign[name]
+	return made || foreign
+}
+
+// fillTo commits a new content of work's cache input, writes a card of work,
+// (none when content is empty), and ticks until its fill is done and its run is carried. It returns the
+// card and the filled volume.
+func (b *toolchainBench) fillTo(t *testing.T, content string) (int64, string) {
+	t.Helper()
+	if content != "" {
+		commitMain(t, b.work.Copy, map[string]string{"packages.lock": content})
+	}
+	n := len(b.fills())
+	w := b.card(t, "work")
+	b.tick(t)
+	waitUntil(t, "the fill is made", func() bool { return len(b.fills()) > n })
+	b.buildDone(t)
+	b.tick(t)
+	b.waitImage(t, w, "kiln-run-work")
+	fills := b.fills()
+	return w, seal.CacheVolume("work", fills[len(fills)-1].Digest)
+}
+
+// restart makes a core afresh and runs its start pass to its end.
+func (b *toolchainBench) restart(t *testing.T) {
+	t.Helper()
+	b.cancel()
+	b.c.followers.Wait()
+	b.newCore(t, b.c.store)
+	b.startPass(t)
+}
+
+// startPass runs the core's start pass to its end.
+func (b *toolchainBench) startPass(t *testing.T) {
+	t.Helper()
+	b.c.removeOldCachesAtStart(b.ctx)
+	b.buildDone(t)
+}
+
+// TestOldCachesRemoved removes an old volume once no container uses it, at
+// the next pass, never the current one, and never one without the label.
+func TestOldCachesRemoved(t *testing.T) {
+	b := newCacheBench(t)
+	w1, v1 := b.fillTo(t, "")
+	zeros := seal.CacheVolume("work", strings.Repeat("0", 64))
+	ones := seal.CacheVolume("work", strings.Repeat("1", 64))
+	b.e.mu.Lock()
+	b.e.foreign[zeros], b.e.foreign[ones] = "", "other"
+	b.e.mu.Unlock()
+
+	w2, v2 := b.fillTo(t, "two\n")
+	if got := b.removals(); len(got) != 0 {
+		t.Errorf("after the fill of %s the removals are %q, want none: card %d's container uses %s", v2, got, w1, v1)
+	}
+	for _, v := range []string{v1, v2, zeros, ones} {
+		if !b.hasVolume(v) {
+			t.Errorf("%s is gone after the fill of the second volume", v)
+		}
+	}
+	b.finish(t, w1)
+	b.finish(t, w2)
+	if !b.hasVolume(v1) || len(b.removals()) != 0 {
+		t.Errorf("%s was removed without a pass: %q", v1, b.removals())
+	}
+
+	b.restart(t)
+	if got := b.removals(); !slices.Equal(got, []string{v1}) {
+		t.Errorf("the start pass removed %q, want %s", got, v1)
+	}
+	if want := "kiln core: repo work: removed the old cache volume " + v1 + "\n"; !strings.Contains(b.out.String(), want) {
+		t.Errorf("the core did not print %q:\n%s", want, b.out)
+	}
+	if b.hasVolume(v1) || !b.hasVolume(v2) || !b.hasVolume(zeros) || !b.hasVolume(ones) {
+		t.Errorf("after the start pass: first there %v, second there %v, unlabelled there %v, other's there %v",
+			b.hasVolume(v1), b.hasVolume(v2), b.hasVolume(zeros), b.hasVolume(ones))
+	}
+
+	_, v3 := b.fillTo(t, "three\n")
+	waitUntil(t, "the fill of the third volume removes the second", func() bool { return slices.Contains(b.removals(), v2) })
+	if b.hasVolume(v2) || !b.hasVolume(v3) || !b.hasVolume(zeros) || !b.hasVolume(ones) {
+		t.Errorf("after the third fill: second there %v, third there %v, unlabelled there %v, other's there %v",
+			b.hasVolume(v2), b.hasVolume(v3), b.hasVolume(zeros), b.hasVolume(ones))
+	}
+	if got := b.errOut.String(); got != "" {
+		t.Errorf("the core printed errors:\n%s", got)
+	}
+}
+
+// TestOldCachesRemoveFails prints a failed removal once, tries it again at
+// each pass, holds no run, and removes the volume at the first pass after
+// the failure is gone.
+func TestOldCachesRemoveFails(t *testing.T) {
+	b := newCacheBench(t)
+	w1, v1 := b.fillTo(t, "")
+	b.finish(t, w1)
+	b.e.mu.Lock()
+	b.e.rmFails[v1] = "volume is busy, as the test has it"
+	b.e.mu.Unlock()
+
+	w2, v2 := b.fillTo(t, "two\n")
+	waitUntil(t, "the fill's pass tries the volume", func() bool { return len(b.removals()) == 1 })
+	b.startPass(t)
+	b.startPass(t)
+	if got := b.removals(); !slices.Equal(got, []string{v1, v1, v1}) {
+		t.Errorf("the removals are %q, want three tries of %s", got, v1)
+	}
+	line := "kiln core: repo work: the old cache volume " + v1 + " was not removed: volume is busy, as the test has it; " +
+		"it is tried again after the repo's next fill and at the core's next start\n"
+	if n := strings.Count(b.errOut.String(), line); n != 1 || strings.Count(b.errOut.String(), "\n") != 1 {
+		t.Errorf("the failure was printed %d times, want once:\n%s", n, b.errOut)
+	}
+	if got := b.cacheOf(w2); got == nil || got.Volume != v2 {
+		t.Errorf("card %d's run mounts %+v, want %s", w2, got, v2)
+	}
+	if strings.Contains(b.errOut.String(), "was not filled") {
+		t.Errorf("the failure held the fill:\n%s", b.errOut)
+	}
+
+	b.e.mu.Lock()
+	b.e.rmFails = map[string]string{}
+	b.e.mu.Unlock()
+	b.finish(t, w2)
+	b.startPass(t)
+	if b.hasVolume(v1) {
+		t.Errorf("%s stays after the failure is gone", v1)
+	}
+}
+
+// TestOldCachesStartGuard holds the start pass: no fill of the repo starts
+// beside it, and one starts once it is done.
+func TestOldCachesStartGuard(t *testing.T) {
+	b := newCacheBench(t)
+	gate := make(chan struct{})
+	b.e.mu.Lock()
+	b.e.rmGate = gate
+	b.e.mu.Unlock()
+	b.c.removeOldCachesAtStart(b.ctx)
+	// The guard is taken before the call returns, so the first tick of Run
+	// already sees it, and not later in the pass's goroutine.
+	if !b.building() {
+		t.Fatal("the start pass returned before it took work's build guard")
+	}
+	w := b.card(t, "work")
+	for range 3 {
+		b.tick(t)
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := len(b.fills()); n != 0 {
+		t.Errorf("%d fills ran while the start pass was held, want none", n)
+	}
+	b.assertWaits(t, w)
+	close(gate)
+	b.buildDone(t)
+	b.tick(t)
+	waitUntil(t, "the fill starts once the pass is done", func() bool { return len(b.fills()) == 1 })
+	b.buildDone(t)
+	b.tick(t)
+	b.waitImage(t, w, "kiln-run-work")
+}

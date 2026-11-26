@@ -313,3 +313,71 @@ func CacheFilled(ctx context.Context, repo, digest string) (bool, error) {
 		return m.Type == "volume" && m.Name == volume
 	}), nil
 }
+
+// CacheRemoval is the outcome of the removal of one old cache volume: Err is
+// nil when it was removed.
+type CacheRemoval struct {
+	Volume string
+	Err    error
+}
+
+// oldCaches are the names of a listing of `docker volume ls --format
+// '{{.Name}}\t{{.Label "kiln.cache"}}'` that are old cache volumes of the
+// repo: the label is exactly repo, and the name is
+// kiln-cache-<repo>-<digest> with that repo and a digest other than digest.
+func oldCaches(listing, repo, digest string) []string {
+	var old []string
+	for _, line := range strings.Split(listing, "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) != 2 || f[1] != repo {
+			continue
+		}
+		m := cacheVolume.FindStringSubmatch(f[0])
+		if m == nil || m[1] != repo || m[2] == digest {
+			continue
+		}
+		old = append(old, f[0])
+	}
+	return old
+}
+
+// RemoveOldCaches removes the repo's cache volumes other than the one of
+// digest, by name, and returns the outcome of each removal. Its rules:
+//
+//  1. repo and digest are checked before any docker command.
+//  2. Only volumes that `docker volume ls --filter label=kiln.cache=<repo>`
+//     lists, with exactly that label and named kiln-cache-<repo>-<digest>
+//     with that repo, are candidates; the volume of digest never is.
+//  3. A volume that `docker ps --all --filter volume=<name>` names a
+//     container for is skipped, and does not appear in the result: a run in
+//     flight, a stopped container and kiln-fill-<repo> keep theirs. A failure
+//     of ps is the volume's error, and it is not removed.
+//  4. Each other volume is removed with `docker volume rm`, without force,
+//     so the engine refuses one that a container took since.
+//  5. A failure of the listing is returned, and nothing is removed.
+//
+// It never touches a container or an image.
+func RemoveOldCaches(ctx context.Context, repo, digest string) ([]CacheRemoval, error) {
+	if !cacheRepo.MatchString(repo) || !cacheDigest.MatchString(digest) {
+		return nil, fmt.Errorf("the repo %q and digest %q name no cache", repo, digest)
+	}
+	out, err := docker(ctx, nil, "volume", "ls", "--filter", "label="+cacheLabel+"="+repo,
+		"--format", "{{.Name}}\t{{.Label \""+cacheLabel+"\"}}")
+	if err != nil {
+		return nil, err
+	}
+	var done []CacheRemoval
+	for _, name := range oldCaches(out, repo, digest) {
+		users, err := docker(ctx, nil, "ps", "--all", "--quiet", "--filter", "volume="+name)
+		if err != nil {
+			done = append(done, CacheRemoval{Volume: name, Err: err})
+			continue
+		}
+		if strings.TrimSpace(users) != "" {
+			continue
+		}
+		_, err = docker(ctx, nil, "volume", "rm", name)
+		done = append(done, CacheRemoval{Volume: name, Err: err})
+	}
+	return done, nil
+}
