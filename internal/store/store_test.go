@@ -628,7 +628,7 @@ func TestSpec(t *testing.T) {
 	}
 }
 
-// schemaV2 is the store of version 2 as card 8's code on main makes it, with
+// schemaV2 is the store of version 2 as the code of its version makes it, with
 // two cards, their entries and three runs, one of them in flight.
 const schemaV2 = `
 CREATE TABLE cards (
@@ -888,9 +888,9 @@ func TestMigrateV2(t *testing.T) {
 	}
 }
 
-// schemaV3 is the store of version 3 as card 11's code makes it, with a card
+// schemaV3 is the store of version 3 as the code of its version makes it, with a card
 // and its spec, a card whose run is in flight, and the spec of a run that
-// failed after it, which card 11 never keeps but the shape allows.
+// failed after it, which that code never keeps but the shape allows.
 const schemaV3 = `
 CREATE TABLE cards (
 	id INTEGER PRIMARY KEY,
@@ -950,7 +950,7 @@ func TestMigrateV3(t *testing.T) {
 	}
 	db.Close()
 
-	// schemaV3 is what card 11's code makes: the shape of a store made by the
+	// schemaV3 is what the code of version 3 makes: the shape of a store made by the
 	// first three migrations, which are unchanged.
 	made := filepath.Join(t.TempDir(), "made.db")
 	db, err = sql.Open("sqlite3", made)
@@ -980,7 +980,7 @@ func TestMigrateV3(t *testing.T) {
 		return strings.Join(out, "\n")
 	}
 	if got, want := schemaOf(dump(t, path)), schemaOf(dump(t, made)); got != want {
-		t.Fatalf("schemaV3 differs from what card 11's migrations make:\n%s\n%s", got, want)
+		t.Fatalf("schemaV3 differs from what the first three migrations make:\n%s\n%s", got, want)
 	}
 
 	before := dump(t, path)
@@ -1127,7 +1127,7 @@ func TestMoveWithReason(t *testing.T) {
 	}
 }
 
-// schemaV1 is the store of version 1 as card 6's code on main makes it. The
+// schemaV1 is the store of version 1 as the code of its version makes it. The
 // migration test makes a store of that shape and fills it.
 const schemaV1 = `
 CREATE TABLE cards (

@@ -11,7 +11,7 @@ import (
 const (
 	KindSpec        = "spec"         // spec.md of a spec run
 	KindReport      = "report"       // report.md of an implement run
-	KindPullRequest = "pull-request" // pull-request.md of an implement run, the pull request's text (card 19)
+	KindPullRequest = "pull-request" // pull-request.md of an implement run, the pull request's text
 	KindReview      = "review"       // review.md of a review run
 	// KindProposals is proposals.md of a review run, kept as rows of the
 	// table proposals, never in specs (ADR 0033).

@@ -72,7 +72,7 @@ type State struct {
 
 // valid are the 11 pairings of ADR 0043 that can be written, and review
 // waiting for the developer's approval: a review that passed, until the core
-// publishes (card 14).
+// publishes.
 var valid = map[State]bool{
 	{Backlog, Developer}: true, {Backlog, Room}: true,
 	{Spec, Run}: true, {Spec, Approval}: true, {Spec, Developer}: true,
@@ -249,7 +249,7 @@ UPDATE cards SET since = (SELECT at FROM entries WHERE entries.card = cards.id O
 		// request's text, so a document is kept by its run and its kind; the
 		// rows keep their rowids, which give their order. And a card's
 		// publication, one row per card the developer has published, written
-		// with the moves of publishing (card 19).
+		// with the moves of publishing.
 		_, err := tx.Exec(`
 ALTER TABLE specs RENAME TO old_specs;
 CREATE TABLE specs (
@@ -891,8 +891,8 @@ func (s *Store) Run(id string) (RunRow, error) {
 // The same row written again writes nothing; anything else under the same ID
 // is refused, and so is a second run in flight for the card, which the store's
 // unique index refuses, a run of a card that does not wait for one, such as a
-// card the developer dropped after the tick read it (card 16), and a run that
-// would make more than limit runs in flight (card 17). The tick counts before
+// card the developer dropped after the tick read it, and a run that
+// would make more than limit runs in flight. The tick counts before
 // it starts a run, and the store refuses as well, as it does a second run in
 // flight per card.
 func (s *Store) AddRun(r RunRow, limit int) error {

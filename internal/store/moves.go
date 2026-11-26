@@ -18,7 +18,7 @@ const (
 	MarkDone Action = "done"      // mark a card whose review passed done, or close one at the Git host
 	ToSpec   Action = "to-spec"   // send a stage that needs you back to a spec run
 	Drop     Action = "drop"      // drop a card that will not produce a change
-	Publish  Action = "publish"   // publish a card whose review passed (card 19)
+	Publish  Action = "publish"   // publish a card whose review passed
 	Start    Action = "start"     // start a card in the backlog: to a spec run, or queued for its predecessors
 )
 
@@ -98,16 +98,16 @@ func retried(f Facts) bool { return f.Publishing && (f.PublishFailed || f.PullCl
 func settled(f Facts) bool { return f.Published || !f.Publishing }
 
 // moves is the table of the developer's moves, the only ones Decide makes. A
-// card whose review passed waits in review for the developer's approval
-// (card 14): with a publish command the developer publishes it, and in any
+// card whose review passed waits in review for the developer's approval:
+// with a publish command the developer publishes it, and in any
 // case can close it without publishing. A card that needs you because its
 // publishing failed, or its pull request was closed without a merge, can be
 // published again. A card at the Git host is sent back
-// to implement with a note, or closed (card 19). A spec that waits for
+// to implement with a note, or closed. A spec that waits for
 // approval, or a review that passed, is sent back only with a note that says
 // what should change; a stage that needs you is run again or sent back with
 // one or without, to implement or to a new spec, when the approved spec no
-// longer fits (card 16). Drop is in the table from every state but done, and
+// longer fits. Drop is in the table from every state but done, and
 // only for a card without a run in flight (see Decide), and at the Git host
 // only as the moves from there. Start takes a card in the backlog to a spec
 // run, or queues it while a predecessor is not done (see DecideWith).

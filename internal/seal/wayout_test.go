@@ -30,7 +30,7 @@ type connectWant struct {
 }
 
 // testWayOut runs the probe in runs with a list of hosts and asserts what the
-// way out lets through and refuses (spec of card 12, section 2). The test's
+// way out lets through and refuses (ADR 0059). The test's
 // "public" host sits on an IPv6 network in 3ffe::/16, the 6bone's block,
 // which no special-purpose registry names, so that the way out's own rule
 // calls it public; nothing outside is routed there. The trick is in the
@@ -525,7 +525,7 @@ func testCreateWithList(t *testing.T, f fixture) {
 	})
 
 	// Runs that start at once each make the outward network if it is
-	// missing; every one of them goes on with the one network (card 17).
+	// missing; every one of them goes on with the one network.
 	t.Run("the outward network made by several runs at once", func(t *testing.T) {
 		name := f.name("web-at-once")
 		cleanup(t, "network", "rm", "--force", name)

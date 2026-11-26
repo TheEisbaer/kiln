@@ -217,7 +217,7 @@ type dirKey struct{}
 
 // InDir is a context under which every docker command the seal runs runs in
 // dir, a directory its caller owns, and not in the directory the process was
-// started in, which may have been removed since (card 16).
+// started in, which may have been removed since.
 func InDir(ctx context.Context, dir string) context.Context {
 	return context.WithValue(ctx, dirKey{}, dir)
 }

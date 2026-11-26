@@ -287,7 +287,7 @@ func TestDocuments(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A report and a review, each under its kind (card 14).
+	// A report and a review, each under its kind.
 	if _, err := s.Move(card.ID, State{Implement, Run}, CauseDeveloper); err != nil {
 		t.Fatal(err)
 	}

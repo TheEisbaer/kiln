@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Publication is what the store keeps of a card's publishing (card 19): the
+// Publication is what the store keeps of a card's publishing: the
 // commit of the card's branch whose workflow files the developer said yes to
 // with the move publish, if any; once the core has published it, the commit it
 // published and the pull request's address; and the branch on the Git host it

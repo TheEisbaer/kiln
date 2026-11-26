@@ -152,7 +152,7 @@ type Info struct {
 	// embedded page is served.
 	Page string
 	// Publishing is true for the name of each repo that has a publish
-	// command: the table of moves of its cards then has publish (card 19).
+	// command: the table of moves of its cards then has publish.
 	// A nil map publishes no card.
 	Publishing map[string]bool
 	// NeedsWorkItem is true for the name of each repo whose cards are not
@@ -474,7 +474,7 @@ type (
 		WorkItemNeeded bool `json:"work_item_needed"`
 		// The card's pull request, once it has an address, and whether the
 		// core is publishing it, from when the developer publishes until it
-		// has one (card 19).
+		// has one.
 		PullRequest *pullJSON `json:"pull_request"`
 		Publishing  bool      `json:"publishing"`
 		// FromProposal is the proposal the card was made from, null when
