@@ -68,3 +68,17 @@ not read by the check command.
 - **Looked at:** The engine's Go client library, a Go module with many dependencies of its own; the engine's HTTP API over its socket directly, which would be Kiln's own client to write and keep up.
 - **Why this one:** It is there wherever the engine is, on the developer's machine and on the Git host's runner, adds no Go module, and is the interface every measurement in the ADRs was made with. Kiln does not pin it; the engine's stable API is what the seal relies on.
 - **Licence:** Apache-2.0. It is not part of Kiln's programs; they run it.
+
+### The az command with its azure-devops extension
+
+- **For:** The shipped Azure DevOps commands, `scripts/azure-devops/publish` and `scripts/azure-devops/check-result`: listing, opening and updating pull requests, linking the work item, and reading a pull request's threads, policies and failed builds' logs. They run on the developer's machine, with the developer's own sign-in.
+- **Looked at:** Calling the Azure DevOps REST API with `curl`, which would leave the sign-in and its renewal to Kiln's commands and a token in a file of their own.
+- **Why this one:** It is Microsoft's own command line, which the developer already uses and signs in to, so the commands hold no token. Kiln does not pin it; the commands check that the extension is there and never install it.
+- **Licence:** MIT. It is not part of Kiln's programs; the commands run it and Kiln does not ship it.
+
+### The gitleaks command
+
+- **For:** The scan of the shipped Azure DevOps publish command, before anything leaves the machine: the change, its commit message, the pull request's title and text, through `gitleaks stdin` (ADR 0050).
+- **Looked at:** A list of patterns of Kiln's own, which would have to be kept up as gitleaks' rules are.
+- **Why this one:** ADR 0050 chose it: it is the common secret scanner, it reads standard input, exits 1 on a hit, and takes the developer's own rules from `GITLEAKS_CONFIG`. Kiln does not pin it.
+- **Licence:** MIT. It is not part of Kiln's programs; the command runs it and Kiln does not ship it.

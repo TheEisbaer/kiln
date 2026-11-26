@@ -1,0 +1,148 @@
+#!/bin/sh
+# The publish command for a repo on Azure DevOps, shipped with Kiln: a repo's settings name it as
+# its `publish_command`. Kiln's core runs it for a card of that repo once its review passed and
+# the card has a work item number, in the instance's data directory. It pushes the card's commit
+# to Azure DevOps on a branch named <type>/<work item>-<name>, and opens a draft pull request
+# with the work item linked, or brings an open one up to date.
+#
+# It needs az with the azure-devops extension, signed in (az login), git with credentials for
+# dev.azure.com that need no prompt, jq and gitleaks. It uses the developer's own sign-in and
+# credentials, as the developer's own terminal would. It is started by the core only; a Claude
+# Code session never runs it.
+#
+# What the core reads: exit status 0 and the pull request's address as the last line that starts
+# with https://. Anything else is a failure, and what is printed on standard error is its reason.
+# The core runs it again after main moved: then the branch is pushed again and the open pull
+# request is updated, never a second one opened.
+
+set -eu
+
+fail() { echo "azure-devops publish: $1" >&2; exit 1; }
+
+[ -z "${CLAUDECODE:-}" ] || fail "a Claude Code session never publishes; the core does."
+
+for name in KILN_CARD KILN_REPO KILN_COMMIT KILN_BRANCH KILN_TITLE KILN_TEXT_FILE KILN_WORK_ITEM; do
+  eval "value=\${$name:-}"
+  [ -n "$value" ] || fail "$name is not set; the core sets it (KILN_WORK_ITEM when the card has a work item)."
+done
+case "$KILN_CARD" in *[!0-9]*) fail "KILN_CARD is not a card's ID." ;; esac
+case "$KILN_WORK_ITEM" in *[!0-9]*|0*) fail "KILN_WORK_ITEM is not a work item number." ;; esac
+case "$KILN_COMMIT" in *[!0-9a-f]*) fail "KILN_COMMIT is not a commit." ;; esac
+[ ${#KILN_COMMIT} -eq 40 ] || fail "KILN_COMMIT is not 40 hex digits."
+case "$KILN_BRANCH" in card/[0-9]*-*) ;; *) fail "'$KILN_BRANCH' is not a card branch." ;; esac
+case "$KILN_BRANCH" in *[!a-z0-9/-]*) fail "'$KILN_BRANCH' has a character a card branch does not have." ;; esac
+[ -r "$KILN_TEXT_FILE" ] || fail "cannot read the pull request's text."
+
+# What the command needs, before anything else is run. It never installs anything: az would
+# install the extension by itself on its first `az repos` call.
+for tool in az git jq gitleaks; do
+  command -v "$tool" >/dev/null 2>&1 ||
+    fail "$tool is not on the PATH; the command needs az with the azure-devops extension, git, jq and gitleaks."
+done
+az extension show --name azure-devops >/dev/null 2>&1 ||
+  fail "az has no azure-devops extension: az extension add --name azure-devops"
+
+# The Git host's coordinates, from the copy's origin as written, before any insteadOf. Only
+# https://[<user>@]dev.azure.com/<org>/<project>/_git/<repo> is taken. The origin is never
+# printed: it may hold a credential.
+bad_origin() { fail "the copy's origin is not an Azure DevOps repository."; }
+origin=$(git -C "$KILN_REPO" config --get remote.origin.url) || bad_origin
+case "$origin" in https://*) ;; *) bad_origin ;; esac
+path=${origin#https://}
+case "$path" in
+  dev.azure.com/*) ;;
+  *@dev.azure.com/*)
+    user=${path%%@dev.azure.com/*}
+    case "$user" in */*|*@*) bad_origin ;; esac
+    path=${path#"$user"@} ;;
+  *) bad_origin ;;
+esac
+path=${path#dev.azure.com/}
+case "$path" in */*/_git/*) ;; *) bad_origin ;; esac
+org=${path%%/*}; rest=${path#*/}
+project=${rest%%/_git/*}; repo=${rest#*/_git/}
+for segment in "$org" "$project" "$repo"; do
+  case "$segment" in
+    ''|.|..|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%~-]*) bad_origin ;;
+  esac
+done
+orgurl="https://dev.azure.com/$org"
+project_name=$(printf '%s' "$project" | sed 's/%20/ /g')
+
+# The branch: <type>/<work item>-<the card branch's name>, with the type from the title's
+# Conventional Commits prefix. The same card always gives the same branch.
+type=$(printf '%s' "$KILN_TITLE" | sed -n 's/^\([a-z]*\)[(:!].*/\1/p')
+case "$type" in feat|fix|chore|docs|test|refactor|perf|build|ci|style) ;; *) type=chore ;; esac
+name=${KILN_BRANCH#card/}; name=${name#*-}
+branch="$type/$KILN_WORK_ITEM-$name"
+
+# A clone kept for publishing under the directory the command runs in, made once from the copy,
+# with the host as its origin. A clone killed half-way is left as <clone>.tmp.<pid> and never
+# read again; one made meanwhile by another card's publish wins.
+clone="$(pwd)/azure-devops/$org/$project/$repo"
+if [ ! -d "$clone/.git" ]; then
+  mkdir -p "$(dirname "$clone")" || fail "cannot make the directory of the clone."
+  tmp="$clone.tmp.$$"
+  rm -rf "$tmp"
+  git clone --quiet --no-checkout "$KILN_REPO" "$tmp" || fail "cannot clone the copy $KILN_REPO for publishing."
+  git -C "$tmp" remote set-url origin "$origin" || fail "cannot set the clone's origin."
+  [ -e "$clone" ] || mv "$tmp" "$clone" || fail "cannot move the clone into place."
+  rm -rf "$tmp"
+  [ -d "$clone/.git" ] || fail "$clone is in the way of the clone."
+fi
+cd "$clone"
+git remote set-url origin "$origin" || fail "cannot set the clone's origin."
+
+# The card's commit, from the copy, into a ref of the card's own. Nothing is fetched from the
+# host, so two cards publishing at once share no ref.
+ref="refs/kiln/card-$KILN_CARD"
+git fetch --quiet --no-write-fetch-head "$KILN_REPO" "+refs/kiln/publish/card-$KILN_CARD:$ref" ||
+  fail "cannot fetch the card's commit from $KILN_REPO."
+[ "$(git rev-parse --verify --quiet "$ref^{commit}")" = "$KILN_COMMIT" ] ||
+  fail "the copy's commit for card $KILN_CARD is not $KILN_COMMIT."
+
+# Nothing that looks like a secret leaves: gitleaks over the change against its parent, which is
+# main's head, the commit's message, the title and the text, as one stream. The stream is put in
+# a file of the clone first, so that a git that fails cannot pass for a clean scan.
+scan=$(mktemp "$clone/.git/kiln-scan.XXXXXX") || fail "cannot make the file of the scan."
+trap 'rm -f "$scan"' EXIT
+{
+  git diff --no-ext-diff "$KILN_COMMIT^" "$KILN_COMMIT" &&
+    git log -1 --format=%B "$KILN_COMMIT" &&
+    printf '%s\n' "$KILN_TITLE" &&
+    cat "$KILN_TEXT_FILE"
+} >"$scan" || fail "cannot gather the change for gitleaks; nothing was pushed."
+if gitleaks stdin --no-banner <"$scan" >/dev/null 2>&1; then status=0; else status=$?; fi
+rm -f "$scan"
+case "$status" in
+  0) ;;
+  1) fail "gitleaks flags the change, its message, the title or the text; nothing was pushed." ;;
+  *) fail "gitleaks failed (exit $status); nothing was pushed." ;;
+esac
+
+GIT_TERMINAL_PROMPT=0 git push --quiet --force origin "$KILN_COMMIT:refs/heads/$branch" ||
+  fail "cannot push $branch."
+
+# The pull request's text: Azure DevOps takes at most 4000 characters. jq replaces a character
+# the cut split with U+FFFD, so the text is valid UTF-8 of at most 3902 bytes.
+text=$(head -c 3900 "$KILN_TEXT_FILE" | jq -Rsj .) || fail "cannot cut the pull request's text."
+
+pr=$(az repos pr list --organization "$orgurl" --project "$project_name" --repository "$repo" \
+  --source-branch "$branch" --status active --query '[0].pullRequestId' -o tsv 2>/dev/null) ||
+  fail "cannot list the pull requests of $branch (is az signed in?)."
+if [ -z "$pr" ]; then
+  pr=$(az repos pr create --organization "$orgurl" --project "$project_name" --repository "$repo" \
+    --source-branch "$branch" --target-branch main --draft true \
+    --title="$KILN_TITLE" --description="$text" --work-items "$KILN_WORK_ITEM" \
+    --query pullRequestId -o tsv) || fail "cannot open the pull request of $branch."
+else
+  case "$pr" in *[!0-9]*) fail "Azure DevOps gave no pull request number." ;; esac
+  az repos pr update --organization "$orgurl" --id "$pr" --title="$KILN_TITLE" \
+    --description="$text" -o none || fail "cannot update pull request $pr."
+  az repos pr work-item add --organization "$orgurl" --id "$pr" --work-items "$KILN_WORK_ITEM" -o none ||
+    fail "cannot link work item $KILN_WORK_ITEM to pull request $pr."
+fi
+case "$pr" in ''|*[!0-9]*) fail "Azure DevOps gave no pull request number." ;; esac
+
+echo "azure-devops publish: $branch, pull request !$pr, work item #$KILN_WORK_ITEM" >&2
+printf '%s\n' "$orgurl/$project/_git/$repo/pullrequest/$pr"
