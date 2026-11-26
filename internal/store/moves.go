@@ -20,6 +20,7 @@ const (
 	Drop     Action = "drop"      // drop a card that will not produce a change
 	Publish  Action = "publish"   // publish a card whose review passed
 	Start    Action = "start"     // start a card in the backlog: to a spec run, or queued for its predecessors
+	ToHost   Action = "to-host"   // put a card that needs you for a reviewer's feedback back to the Git host (ADR 0028)
 )
 
 // Note is what a move takes of the developer's note: none, one that may be
@@ -38,8 +39,9 @@ const MaxNote = 16 << 10
 
 // Facts are what the table of moves looks at besides a card's state: whether
 // the card has a run in flight; whether the core has a publish command;
-// whether the card's last entry is a publishing that failed (PublishFailed) or
-// a pull request closed without a merge (PullClosed);
+// whether the card's last entry is a publishing that failed (PublishFailed), a
+// pull request closed without a merge (PullClosed), or a reviewer's feedback
+// on its pull request (Feedback);
 // whether the card has a pull request's address, kept by its publishing; and
 // its predecessors that are not done, Open, and those that were dropped,
 // Dropped, each in ID order (ADR 0010); and, for a card in the backlog, what
@@ -54,6 +56,7 @@ type Facts struct {
 	Publishing    bool
 	PublishFailed bool
 	PullClosed    bool
+	Feedback      bool
 	Published     bool
 	Open          []int64
 	Dropped       []int64
@@ -97,6 +100,15 @@ func retried(f Facts) bool { return f.Publishing && (f.PublishFailed || f.PullCl
 // way. While the core publishes, a card has no move, as with a run in flight.
 func settled(f Facts) bool { return f.Published || !f.Publishing }
 
+// feedback is the condition of to-host: the card needs you because a reviewer
+// commented on its pull request.
+func feedback(f Facts) bool { return f.Feedback }
+
+// notFeedback is the condition of again from review, needing you: running the
+// review again is not one of ADR 0028's moves, and a review run would not see
+// the reviewer's comments.
+func notFeedback(f Facts) bool { return !f.Feedback }
+
 // moves is the table of the developer's moves, the only ones Decide makes. A
 // card whose review passed waits in review for the developer's approval:
 // with a publish command the developer publishes it, and in any
@@ -109,7 +121,9 @@ func settled(f Facts) bool { return f.Published || !f.Publishing }
 // one or without, to implement or to a new spec, when the approved spec no
 // longer fits. Drop is in the table from every state but done, and
 // only for a card without a run in flight (see Decide), and at the Git host
-// only as the moves from there. Start takes a card in the backlog to a spec
+// only as the moves from there. A card that needs you because a reviewer
+// commented on its pull request (ADR 0028) is sent back to implement or to
+// spec, dropped, or put back to the Git host, with no again. Start takes a card in the backlog to a spec
 // run, or queues it while a predecessor is not done (see DecideWith).
 var moves = append([]move{
 	{Start, State{Backlog, Developer}, State{Spec, Run}, NoNote, nil},
@@ -117,7 +131,7 @@ var moves = append([]move{
 	{Again, State{Spec, Approval}, State{Spec, Run}, RequiredNote, nil},
 	{Again, State{Spec, Developer}, State{Spec, Run}, OptionalNote, nil},
 	{Again, State{Implement, Developer}, State{Implement, Run}, OptionalNote, nil},
-	{Again, State{Review, Developer}, State{Review, Run}, OptionalNote, nil},
+	{Again, State{Review, Developer}, State{Review, Run}, OptionalNote, notFeedback},
 	{SendBack, State{Review, Developer}, State{Implement, Run}, OptionalNote, nil},
 	{Publish, State{Review, Developer}, atHost, NoNote, retried},
 	{Publish, State{Review, Approval}, atHost, NoNote, publishing},
@@ -127,6 +141,7 @@ var moves = append([]move{
 	{SendBack, atHost, State{Implement, Run}, RequiredNote, settled},
 	{ToSpec, State{Implement, Developer}, State{Spec, Run}, OptionalNote, nil},
 	{ToSpec, State{Review, Developer}, State{Spec, Run}, OptionalNote, nil},
+	{ToHost, State{Review, Developer}, atHost, NoNote, feedback},
 }, dropRows()...)
 
 // dropRows are the rows of drop: from every pairing but done, in the order of
@@ -252,7 +267,9 @@ func (s *Store) Decide(id int64, action Action, note string) (Card, error) {
 // for the card's state is refused with ErrRefused, a note that does not fit
 // the move with ErrNote, and the card is returned as it is. Publish writes
 // the card's publication anew in the same transaction: the developer's yes,
-// if any, and no commit and no address yet.
+// if any, and no commit and no address yet. ToHost sets the publication's
+// feedback_since to the move's time in the same transaction, and leaves the
+// rest of the publication as it is.
 func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Card, error) {
 	if o.WorkItem != 0 {
 		if action != Approve && action != Publish {
@@ -284,7 +301,7 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 	}
 	// Approving a spec starts the number of send-backs again (ADR 0054); the
 	// developer's other moves leave it.
-	e := edit{id: id, cause: CauseDeveloper, reason: reason, approved: action == Approve}
+	e := edit{id: id, cause: CauseDeveloper, reason: reason, approved: action == Approve, mark: action == ToHost}
 	e.next = func(from State, f Facts) (State, error) {
 		f.Publishing = o.Publishing
 		for _, m := range moves {
@@ -359,7 +376,8 @@ func (s *Store) refusedWorkItem(id int64, err error) (Card, error) {
 }
 
 // writePublication writes a card's publication anew: the developer's yes, if
-// any, and no commit and no address yet. Its branch is kept.
+// any, and no commit and no address yet. Its branch and its feedback_since are
+// kept.
 func writePublication(tx *sql.Tx, card int64, yes string) error {
 	_, err := tx.Exec(`INSERT INTO publishes (card, workflow_yes, commit_id, address) VALUES (?, ?, NULL, NULL)
 		ON CONFLICT (card) DO UPDATE SET workflow_yes = excluded.workflow_yes, commit_id = NULL, address = NULL`,

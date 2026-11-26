@@ -193,7 +193,7 @@ func TestMigrateV16(t *testing.T) {
 	}
 	mustCreate(t, s, "the first card")
 	mustCreate(t, s, "the second card")
-	if _, err := s.db.Exec(`ALTER TABLE cards DROP COLUMN work_item; PRAGMA user_version = 16`); err != nil {
+	if _, err := s.db.Exec(`ALTER TABLE cards DROP COLUMN work_item; ALTER TABLE publishes DROP COLUMN feedback_since; PRAGMA user_version = 16`); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -214,8 +214,8 @@ func TestMigrateV16(t *testing.T) {
 	}
 
 	s = reopen(t, path)
-	if v := userVersion(t, s); v != 17 {
-		t.Fatalf("the store is version %d, want 17", v)
+	if v := userVersion(t, s); v != version {
+		t.Fatalf("the store is version %d, want %d", v, version)
 	}
 	for _, id := range []int64{1, 2} {
 		wantWorkItem(t, s, id, 0)

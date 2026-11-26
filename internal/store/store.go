@@ -22,7 +22,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 17
+const version = 18
 
 // KilnRepo is the name of the one repo of an instance started from its flags,
 // and of every card written before version 16 (ADR 0025).
@@ -375,6 +375,18 @@ ALTER TABLE entries ADD COLUMN proposal INTEGER;`)
 		_, err := tx.Exec(`ALTER TABLE cards ADD COLUMN work_item INTEGER`)
 		return err
 	},
+	// 17 to 18: when the Git host's feedback on a card's pull request was
+	// last read, or the developer put the card back to the Git host (ADR
+	// 0028); NULL before any. A publication that has a pull request's
+	// address gets the migration's time, so that the feedback its pull request
+	// had before does not bring its card back.
+	func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`ALTER TABLE publishes ADD COLUMN feedback_since TEXT`); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`UPDATE publishes SET feedback_since = ? WHERE address IS NOT NULL`, time.Now().UTC().Format(time.RFC3339Nano))
+		return err
+	},
 }
 
 // afterMigration, set only by the test, is called when the store has been moved
@@ -621,6 +633,9 @@ type edit struct {
 	// more; approved sets the number to 0 (ADR 0054).
 	sendBack bool
 	approved bool
+	// mark sets the card's publication's feedback_since to the change's
+	// time, in the same transaction (the developer's to-host, ADR 0028).
+	mark bool
 	// keepSince, when it is set and true for the state the card goes to and
 	// the facts, leaves the card's since as it is. Only the rule's entry that
 	// renames the limit a card waits for room under sets it, so that the card
@@ -749,6 +764,11 @@ func (s *Store) change(e edit) (Card, error) {
 			return Card{}, err
 		}
 		card.SendBacks = 0
+	}
+	if e.mark {
+		if _, err := tx.Exec(`UPDATE publishes SET feedback_since = ? WHERE card = ?`, at, id); err != nil {
+			return Card{}, err
+		}
 	}
 	if e.write != nil {
 		if err := e.write(tx, id); err != nil {
