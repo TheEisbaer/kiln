@@ -4,18 +4,21 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
 
 // Run is what the caller says about a run's container. Its network, mounts,
-// environment, user and limits are the seal's and cannot be given.
+// environment and user are the seal's and cannot be given. Its memory and
+// CPUs are the caller's, checked by the seal; its other limits and its cpuset
+// are the seal's.
 type Run struct {
 	ID      string            // names the run's network and container, kiln-run-<ID>
 	Image   string            // the run image (ADR 0039)
 	Proxy   string            // the proxy container's name
 	Command []string          // the container's arguments, after the image
-	Labels  map[string]string // extra labels; kiln.run and kiln.instance cannot be among them
+	Labels  map[string]string // extra labels; kiln.run, kiln.instance, kiln.hosts and kiln.cpuset cannot be among them
 	// The instance the run belongs to, carried by the label kiln.instance on
 	// its network and container, by which ListRuns finds it. A run started by
 	// hand has none, so no core lists it.
@@ -27,6 +30,10 @@ type Run struct {
 	Hosts         []string
 	WayOutImage   string
 	WayOutNetwork string
+	// Memory is the run's memory, <n>m or <n>g, without swap, and CPUs its
+	// CPUs, a whole number; "" and 0 are 4g and 2 (CheckLimits).
+	Memory string
+	CPUs   int
 }
 
 // runLabel carries a run's ID on its container (ADR 0035, point 2), and marks
@@ -64,18 +71,21 @@ func CheckRunID(id string) error { return checkRunID(id) }
 // runName is the name of a run's network and of its container.
 func runName(id string) string { return "kiln-run-" + id }
 
-// runLimits are the limits of a run's container, and of its save container:
-// 4 GiB without swap, 2 CPUs, 1024 processes (ADR 0017).
-var runLimits = []string{
-	"--memory", "4g",
-	"--memory-swap", "4g",
-	"--cpus", "2",
-	"--pids-limit", "1024",
-}
-
 // CreateRun creates a run's network, with the proxy attached, and then its
-// container. With an instance, both carry the label kiln.instance=<instance>. The container is created, not started: the caller places files in
-// it and starts it.
+// container. With an instance, both carry the label kiln.instance=<instance>.
+// The container is created, not started: the caller places files in it and
+// starts it.
+//
+// Its memory and CPUs are the caller's, checked by the seal (CheckLimits), or
+// 4g and 2; its memory is also its memory with swap. A run that asks for more
+// CPUs than the engine's count, docker info's NCPU, is refused with an error
+// that wraps ErrCPUs, before anything is created or removed. The container
+// gets --cpuset-cpus with exactly its CPUs, so that nproc inside it shows
+// them, and the label kiln.cpuset with the same list. They are chosen from 0
+// to NCPU-1 by chooseCPUs, the least used by the created and running
+// containers labelled kiln.run first, under a lock of the process held from
+// the listing until the container's create has returned, so that runs created
+// side by side get disjoint sets while the CPUs last.
 //
 // With a list of hosts, the list is checked first, and the outward network is
 // created if it is missing; one of its name without the label kiln.web is
@@ -108,6 +118,16 @@ func CreateRun(ctx context.Context, r Run) error {
 	if err := checkRunID(r.ID); err != nil {
 		return err
 	}
+	if err := CheckLimits(r.Memory, r.CPUs); err != nil {
+		return err
+	}
+	memory, cpus := r.Memory, r.CPUs
+	if memory == "" {
+		memory = defaultMemory
+	}
+	if cpus == 0 {
+		cpus = defaultCPUs
+	}
 	if r.Instance != "" {
 		if err := checkInstance(r.Instance); err != nil {
 			return err
@@ -126,13 +146,20 @@ func CreateRun(ctx context.Context, r Run) error {
 	}
 	keys := make([]string, 0, len(r.Labels))
 	for k := range r.Labels {
-		if k == "" || k == runLabel || k == instanceLabel || k == hostsLabel || strings.Contains(k, "=") {
+		if k == "" || k == runLabel || k == instanceLabel || k == hostsLabel || k == cpusetLabel || strings.Contains(k, "=") {
 			return fmt.Errorf("the label %q cannot be given for a run", k)
 		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	name := runName(r.ID)
+	engine, err := engineCPUs(ctx)
+	if err != nil {
+		return err
+	}
+	if cpus > engine {
+		return cpusError{want: cpus, have: engine}
+	}
 
 	if err := removeLeftovers(ctx, name, r.ID, r.Proxy); err != nil {
 		return err
@@ -189,34 +216,53 @@ func CreateRun(ctx context.Context, r Run) error {
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--init")
-	args = append(args, runLimits...)
-	args = append(args,
+	// The limits come in createPinned, between these and the rest.
+	rest := []string{
 		"--log-driver", "json-file",
 		// Not a credential: the proxy replaces it (ADR 0017).
-		"--env", "ANTHROPIC_BASE_URL=http://"+r.Proxy+":"+proxyPort,
+		"--env", "ANTHROPIC_BASE_URL=http://" + r.Proxy + ":" + proxyPort,
 		"--env", "ANTHROPIC_API_KEY=kiln-placeholder",
-		"--env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1") // ADR 0041, point 3
+		"--env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", // ADR 0041, point 3
+	}
 	if len(r.Hosts) > 0 {
 		// Claude Code takes the first of these for all its traffic, the model's
 		// included, unless NO_PROXY names the proxy (ADR 0059). HTTP_PROXY is
 		// not set: the way out answers only CONNECT.
 		wayOutURL := "http://" + wayOutName(r.ID) + ":" + wayOutPort
-		args = append(args,
+		rest = append(rest,
 			"--env", "HTTPS_PROXY="+wayOutURL,
 			"--env", "https_proxy="+wayOutURL,
 			"--env", "NO_PROXY="+r.Proxy,
 			"--env", "no_proxy="+r.Proxy)
 	}
 	// Whatever follows is the image and its arguments, never an option.
-	args = append(args, "--", r.Image)
-	args = append(args, r.Command...)
+	rest = append(rest, "--", r.Image)
+	rest = append(rest, r.Command...)
 
-	if _, err := createContainer(ctx, nil, "create", args...); err != nil {
-		// createContainer removed the container; the way out and the network
+	if err := createPinned(ctx, args, rest, memory, engine, cpus); err != nil {
+		// createPinned left no container; the way out and the network
 		// must go as well.
 		return undo(err)
 	}
 	return nil
+}
+
+// createPinned creates a run's container from its arguments, head and rest,
+// with its limits between them: its memory, its CPUs, and a cpuset of as many
+// CPUs, chosen of the engine's, which it carries as the label kiln.cpuset as
+// well. It holds cpusetMu from the listing of the CPUs in use until the
+// create has returned.
+func createPinned(ctx context.Context, head, rest []string, memory string, engine, cpus int) error {
+	cpusetMu.Lock()
+	defer cpusetMu.Unlock()
+	used, err := usedCPUs(ctx)
+	if err != nil {
+		return err
+	}
+	cpuset := formatCPUs(chooseCPUs(engine, cpus, used))
+	args := slices.Concat(head, []string{"--label", cpusetLabel + "=" + cpuset}, runLimits(memory, cpus, cpuset), rest)
+	_, err = createContainer(ctx, nil, "create", args...)
+	return err
 }
 
 // removeLeftovers removes what an earlier CreateRun of the same run left behind

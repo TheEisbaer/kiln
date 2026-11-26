@@ -138,7 +138,10 @@ func testSaveContainer(t *testing.T, f fixture, dial []string) {
 	if status["NoNewPrivs"] != "1" {
 		t.Errorf("NoNewPrivs is %q, want 1", status["NoNewPrivs"])
 	}
-	assertLimits(t, report)
+	assertLimits(t, report, false)
+	if got := inspectLimits(t, save); got != (hostLimits{"4294967296", "4294967296", "2000000000", "", ""}) {
+		t.Errorf("the save container has %+v, want 4 GiB, 2 CPUs and no cpuset", got)
+	}
 	for _, problem := range mountProblems(fileIn(t, report, "/proc/self/mountinfo"), "") {
 		t.Error(problem)
 	}
@@ -163,10 +166,13 @@ func testSaveContainer(t *testing.T, f fixture, dial []string) {
 }
 
 // cgroupFiles are the limits a probe reads, under /sys/fs/cgroup.
-var cgroupFiles = []string{"memory.max", "memory.swap.max", "cpu.max", "pids.max"}
+var cgroupFiles = []string{"memory.max", "memory.swap.max", "cpu.max", "pids.max", "cpuset.cpus.effective"}
 
-// assertLimits asserts the run's limits from the cgroup files a probe read.
-func assertLimits(t *testing.T, report probeReport) {
+// assertLimits asserts the run's limits from the cgroup files a probe read:
+// 4 GiB without swap, 2 CPUs, 1024 processes, and, with pinned, a cpuset of
+// 2 CPUs. A save container has no cpuset of its own, and its effective
+// cpuset is the engine's.
+func assertLimits(t *testing.T, report probeReport, pinned bool) {
 	t.Helper()
 	want := map[string]string{"memory.max": "4294967296", "pids.max": "1024", "memory.swap.max": "0"}
 	for _, f := range cgroupFiles {
@@ -178,7 +184,11 @@ func assertLimits(t *testing.T, report probeReport) {
 			continue
 		}
 		got := strings.TrimSpace(r.Value)
-		if f == "cpu.max" {
+		if f == "cpuset.cpus.effective" {
+			if cpus, ok := parseCPUs(got, 1<<16); pinned && (!ok || len(cpus) != 2) {
+				t.Errorf("cpuset.cpus.effective is %q, want 2 CPUs", got)
+			}
+		} else if f == "cpu.max" {
 			quota, period, _ := strings.Cut(got, " ")
 			q, qErr := strconv.ParseFloat(quota, 64)
 			p, pErr := strconv.ParseFloat(period, 64)

@@ -1,10 +1,10 @@
 // Package settings holds the instance's repos as the core knows them: for
 // each, its name, its bare copy, its publish command, its check result
-// command, its spec runs' list of hosts, its limit and its own toolchain, if
-// any, and which one is
-// Kiln's own (ADR 0025); and the instance's limit (ADR 0014). The repos come from the settings file, which Load reads, or,
-// for a core started from its flags, from the one repo the flags make
-// (internal/tick).
+// command, its spec runs' list of hosts, its limit, its own toolchain, if
+// any, the memory and CPUs of its runs, and which one is Kiln's own
+// (ADR 0025); and the instance's limit (ADR 0014). The repos come from the
+// settings file, which Load reads, or, for a core started from its flags,
+// from the one repo the flags make (internal/tick).
 package settings
 
 import (
@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/TheEisbaer/kiln/internal/seal"
 )
 
 // Repo is one of the instance's repos, read from the settings file by Load,
@@ -45,6 +47,10 @@ type Repo struct {
 	// Toolchain is the repo's own toolchain (ADR 0039), nil for a repo whose
 	// runs use Kiln's images.
 	Toolchain *Toolchain
+	// Memory and CPUs are the limits of the repo's run containers, as
+	// seal.CheckLimits takes them: "" and 0 are the seal's defaults.
+	Memory string
+	CPUs   int
 }
 
 // Toolchain is a repo's own toolchain: the Dockerfile in the instance, never
@@ -146,6 +152,11 @@ type fileRepo struct {
 	// Limit is read as a pointer, so that a missing member and 0 differ.
 	Limit     *int           `json:"limit"`
 	Toolchain *fileToolchain `json:"toolchain"`
+	// Memory and CPUs are read as they are written, so that a missing member
+	// and "" or 0 differ, and a value of the wrong type is refused with the
+	// repo's name (limitsOf).
+	Memory json.RawMessage `json:"memory"`
+	CPUs   json.RawMessage `json:"cpus"`
 }
 
 type fileToolchain struct {
@@ -171,6 +182,34 @@ func toolchainOf(repo string, t *fileToolchain) (*Toolchain, error) {
 	return &Toolchain{Dockerfile: t.Dockerfile, Inputs: t.Inputs}, nil
 }
 
+// limitsOf is a repo's memory and CPUs as the file gives them, "" and 0 when
+// it leaves them out or gives null, refused with the reason when they are not
+// a string and a whole number, when they are written out as "" or 0, or when
+// seal.CheckLimits refuses them.
+func limitsOf(r fileRepo) (string, int, error) {
+	memory, cpus := "", 0
+	if given(r.Memory) {
+		if err := json.Unmarshal(r.Memory, &memory); err != nil {
+			return "", 0, fmt.Errorf("the memory is %s; it is a string, <n>m or <n>g", r.Memory)
+		}
+		if memory == "" {
+			return "", 0, errors.New(`the memory is ""; it is <n>m or <n>g, or left out`)
+		}
+	}
+	if given(r.CPUs) {
+		if err := json.Unmarshal(r.CPUs, &cpus); err != nil {
+			return "", 0, fmt.Errorf("the CPUs are %s; they are a whole number from 1", r.CPUs)
+		}
+		if cpus == 0 {
+			return "", 0, errors.New("the CPUs are 0; they are a whole number from 1, or left out")
+		}
+	}
+	return memory, cpus, seal.CheckLimits(memory, cpus)
+}
+
+// given is false for a member that is missing or null.
+func given(raw json.RawMessage) bool { return len(raw) > 0 && string(raw) != "null" }
+
 // Load reads the settings file at path, one JSON object with the member
 // repos and the optional member limit, and returns its repos in order, after
 // Check, and the instance's limit. It refuses, with the reason, a file over 1
@@ -178,8 +217,10 @@ func toolchainOf(repo string, t *fileToolchain) (*Toolchain, error) {
 // the object, a copy that is not an absolute path, and a limit, of a repo or
 // of the instance, below 1, a work item other than "required", and a toolchain
 // whose Dockerfile is not an absolute path or whose input is not a path in the
-// repo in clean form; it does not read the Dockerfile. A repo without a limit has Limit 0, the default,
-// and so has the instance. It only reads.
+// repo in clean form; it does not read the Dockerfile. It refuses a memory or
+// CPUs that seal.CheckLimits refuses, and also "" and 0 written out. A repo
+// without a limit has Limit 0, the default, and so has the instance; one
+// without a memory or CPUs has "" or 0, the seal's defaults. It only reads.
 func Load(path string) (Settings, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -228,9 +269,13 @@ func Load(path string) (Settings, error) {
 		if err != nil {
 			return Settings{}, fmt.Errorf("the settings file %s: %w", path, err)
 		}
+		memory, cpus, err := limitsOf(r)
+		if err != nil {
+			return Settings{}, fmt.Errorf("the settings file %s: the repo %q: %w", path, r.Name, err)
+		}
 		repos = append(repos, Repo{Name: r.Name, Copy: r.Copy, Own: r.Own, PublishCommand: r.PublishCommand,
 			CheckResultCommand: r.CheckResultCommand, SpecHosts: r.SpecHosts, Limit: limit,
-			NeedsWorkItem: r.WorkItem == "required", Toolchain: toolchain})
+			NeedsWorkItem: r.WorkItem == "required", Toolchain: toolchain, Memory: memory, CPUs: cpus})
 	}
 	if err := Check(repos); err != nil {
 		return Settings{}, fmt.Errorf("the settings file %s: %w", path, err)

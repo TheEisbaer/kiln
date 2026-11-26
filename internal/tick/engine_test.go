@@ -1027,6 +1027,11 @@ echo "https://git.example/pull/$KILN_CARD"`
 			if k := strings.Count(running, "kiln-run-"); k != 3 {
 				t.Errorf("%d run containers of the instance run at once, want 3:\n%s", k, running)
 			}
+			// Kiln's own repo sets no memory or CPUs: every run has the
+			// defaults and a cpuset of 2.
+			for _, card := range cards {
+				assertRunLimits(t, "kiln-run-"+runOf(card, n), "4294967296", 2)
+			}
 			core.Process.Signal(syscall.SIGKILL)
 			<-done
 			for _, card := range cards {
@@ -1224,17 +1229,17 @@ func testToolchain(t *testing.T, f *fixture) {
 	cfg := f.config(c)
 	cfg.Repo, cfg.Hosts = "", nil
 	cfg.Repos = []settings.Repo{{Name: store.KilnRepo, Copy: kilnCopy, Own: true},
-		{Name: repo, Copy: c.repo, Toolchain: &settings.Toolchain{Dockerfile: dockerfile, Inputs: []string{"lock.txt"}}}}
+		{Name: repo, Copy: c.repo, Toolchain: &settings.Toolchain{Dockerfile: dockerfile, Inputs: []string{"lock.txt"}},
+			Memory: "6g", CPUs: 1}}
 	cfg.Layer = layer
 	core, done := f.start(t, child{Command: "core", Config: cfg})
 
-	// cardRuns writes card n of the repo, waits until its run waits at its
-	// gate, and returns its container's image and what uid 1000 reads of the
-	// cache; then it lets the run end.
-	cardRuns := func(n int) (string, string) {
+	// atGate writes a card of a repo, with the word, and waits until its run
+	// waits at its gate; end lets that run end and waits until it has.
+	atGate := func(repo, word string) (string, int64) {
 		t.Helper()
 		s := f.open(t, c)
-		card, err := s.CreateIn(repo, fmt.Sprintf("Add a line to NOTES.md. kiln-case-toolchain-%d %s", n, gateWord), 0)
+		card, err := s.CreateIn(repo, fmt.Sprintf("Add a line to NOTES.md. %s %s", word, gateWord), 0)
 		if err == nil {
 			_, err = s.Move(card.ID, waiting, store.CauseDeveloper)
 		}
@@ -1247,15 +1252,29 @@ func testToolchain(t *testing.T, f *fixture) {
 			_, err := docker(t.Context(), "exec", container, "test", "-e", "/tmp/waiting")
 			return err == nil
 		})
-		image := must(t, "inspect", "--format", "{{.Config.Image}}", container)
-		cache := must(t, "exec", "--user", "1000", container, "cat", "/opt/toy-cache/lock.txt")
+		return container, card.ID
+	}
+	end := func(container string, card int64) {
+		t.Helper()
 		must(t, "exec", container, "touch", "/tmp/gate")
-		waitUntil(t, fmt.Sprintf("card %d waits no longer for a run", card.ID), func() bool {
+		waitUntil(t, fmt.Sprintf("card %d waits no longer for a run", card), func() bool {
 			s := f.open(t, c)
-			cd, err := s.Card(card.ID)
+			cd, err := s.Card(card)
 			s.Close()
 			return err == nil && cd.WaitsFor != store.Run && instanceLeft(t, c.instance) == ""
 		})
+	}
+	// cardRuns writes card n of the repo, waits until its run waits at its
+	// gate, and returns its container's image and what uid 1000 reads of the
+	// cache; then it lets the run end. The repo's run has its memory, 6g,
+	// and its 1 CPU.
+	cardRuns := func(n int) (string, string) {
+		t.Helper()
+		container, card := atGate(repo, fmt.Sprintf("kiln-case-toolchain-%d", n))
+		assertRunLimits(t, container, "6442450944", 1)
+		image := must(t, "inspect", "--format", "{{.Config.Image}}", container)
+		cache := must(t, "exec", "--user", "1000", container, "cat", "/opt/toy-cache/lock.txt")
+		end(container, card)
 		return image, cache
 	}
 
@@ -1263,6 +1282,10 @@ func testToolchain(t *testing.T, f *fixture) {
 		t.Errorf("the first run is on %q and reads %q, want %s and lock one", image, cache, runImage)
 	}
 	first := imageIDs()
+	// A run of Kiln's own repo in the same core has the defaults.
+	container, card := atGate(store.KilnRepo, "kiln-case-toolchain-kiln")
+	assertRunLimits(t, container, "4294967296", 2)
+	end(container, card)
 	commitMain(t, c.repo, map[string]string{"NOTES.md": "# Notes\nA line on main.\n"})
 	if image, cache := cardRuns(2); image != runImage || cache != "lock one" {
 		t.Errorf("the second run is on %q and reads %q, want %s and lock one", image, cache, runImage)
@@ -1280,6 +1303,17 @@ func testToolchain(t *testing.T, f *fixture) {
 	f.stop(t, core, done)
 	if out := core.Stdout.(*bytes.Buffer).String(); strings.Count(out, "kiln core: repo "+repo+": built "+runImage+"\n") != 2 {
 		t.Errorf("the core did not build %s twice:\n%s", runImage, out)
+	}
+}
+
+// assertRunLimits asserts a run container's memory, with swap the same, its
+// CPUs and its cpuset of as many CPUs.
+func assertRunLimits(t *testing.T, container, memory string, cpus int) {
+	t.Helper()
+	got := strings.Fields(must(t, "inspect", "--format", "{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.NanoCpus}} {{.HostConfig.CpusetCpus}}", container))
+	want := []string{memory, memory, fmt.Sprint(cpus) + "000000000"}
+	if len(got) != 4 || !slices.Equal(got[:3], want) || len(strings.Split(got[3], ",")) != cpus {
+		t.Errorf("%s has the memory, memory with swap, CPUs and cpuset %q, want %q and a cpuset of %d CPUs", container, got, want, cpus)
 	}
 }
 

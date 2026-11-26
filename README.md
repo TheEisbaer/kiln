@@ -87,6 +87,10 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
    - `limit`: the most cards of the repo in progress at once, ready to merge included; optional, 3 by default, at least 1.
    - `work_item`: `"required"` when the repo's pull requests cannot merge without a linked work item: a card of it whose review passes waits for you until it has a number; optional, none needed by default.
    - `toolchain`: the repo's own toolchain, `{"dockerfile": "<absolute path>", "inputs": ["<path in the repo>", …]}`; optional, and never on Kiln's own repo. Without it the repo's runs use `kiln-run`. See [A repo's own toolchain](#a-repos-own-toolchain).
+   - `memory`: the memory of each of the repo's runs, without swap, as `"<n>m"` or `"<n>g"` (MiB or GiB), with `n` a whole number without a leading zero and at least `6m`; optional, `"4g"` by default.
+   - `cpus`: the CPUs of each of the repo's runs, a whole number from 1; optional, 2 by default. A run is also pinned to as many CPUs, so that `nproc` inside it shows them: Kiln picks the CPUs least used by the runs on the engine, so that runs side by side get CPUs of their own while there are enough. A run that asks for more CPUs than the engine has (`docker info --format '{{.NCPU}}'`) does not start: its card waits for a run, and the core says why once.
+
+   `memory` and `cpus` apply to the repo's runs only, at every stage, from the next run that starts; the save and the core's build keep 4g and 2 CPUs. A value that is not as above stops the core at its start, with the repo and the reason.
 
    Beside `repos`, the optional member `limit` at the top of the file is the instance's limit: the most cards of all repos together that are in progress and not yet ready to merge; 3 by default, at least 1. A core started from its flags has 3.
 

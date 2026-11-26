@@ -138,9 +138,9 @@ func SaveRun(ctx context.Context, id, image, tree string, base []byte) (newTree 
 }
 
 // createSave creates a save container for a run, with the given command, and
-// returns its ID. It has no network, the run's user and limits, no
-// capabilities, no mounts and no environment, and carries the label
-// kiln.run=<id>. The image is never pulled. On failure nothing is left behind.
+// returns its ID. It has no network, the run's user, the fixed limits
+// (fixedLimits) whatever its run's, no capabilities, no mounts and no
+// environment, and carries the label kiln.run=<id>. The image is never pulled. On failure nothing is left behind.
 func createSave(ctx context.Context, id, image string, command []string) (string, error) {
 	if err := checkRunID(id); err != nil {
 		return "", err
@@ -154,7 +154,7 @@ func createSave(ctx context.Context, id, image string, command []string) (string
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 	}
-	args = append(args, runLimits...)
+	args = append(args, fixedLimits...)
 	args = append(args, "--log-driver", "json-file", "--", image)
 	return createContainer(ctx, nil, "create", append(args, command...)...)
 }

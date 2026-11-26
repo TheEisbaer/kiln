@@ -72,6 +72,21 @@ func TestCoreConfig(t *testing.T) {
 			t.Errorf("the limit 0: %d %q, want 1 and the reason", code, e.String())
 		}
 	})
+	t.Run("a repo's memory and CPUs", func(t *testing.T) {
+		var o, e bytes.Buffer
+		file := settingsFile(t, `{"repos":[{"name":"kiln","copy":"/a/kiln.git","own":true},{"name":"work","copy":"/a/work.git","memory":"6g","cpus":3}]}`)
+		cfg, code := coreConfig([]string{"--data", "/d", "--model", "m", "--settings", file}, env, &o, &e)
+		if code != 0 || len(cfg.Repos) != 2 || cfg.Repos[1].Memory != "6g" || cfg.Repos[1].CPUs != 3 || cfg.Repos[0].Memory != "" || cfg.Repos[0].CPUs != 0 {
+			t.Errorf("6g and 3: %d, %+v, %q; want 0 and the limits on work only", code, cfg.Repos, e.String())
+		}
+		for member, want := range map[string]string{`"cpus":0`: `the repo "work": the CPUs are 0`, `"memory":"5m"`: `the repo "work": the memory "5m" is below 6m`} {
+			e.Reset()
+			file = settingsFile(t, `{"repos":[{"name":"kiln","copy":"/a/kiln.git","own":true},{"name":"work","copy":"/a/work.git",`+member+`}]}`)
+			if _, code := coreConfig([]string{"--data", "/d", "--model", "m", "--settings", file}, env, &o, &e); code != 1 || !strings.Contains(e.String(), want) {
+				t.Errorf("%s: %d %q, want 1 and %q", member, code, e.String(), want)
+			}
+		}
+	})
 	t.Run("a relative --settings", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(oneRepo), 0o600); err != nil {
