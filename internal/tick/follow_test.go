@@ -82,6 +82,14 @@ type fakeEngine struct {
 	imageFails  map[string]bool // the names of the images whose builds fail
 	// imageGate, when not nil, holds every BuildImage until it is closed.
 	imageGate chan struct{}
+	// The calls of FillCache so far, the cache volumes there by name, true
+	// for one filled with its proof, whether a fill fails, and fillGate,
+	// which, when not nil, holds every FillCache until it is closed or its
+	// context ends.
+	fills     []seal.Fill
+	volumes   map[string]bool
+	fillFails bool
+	fillGate  chan struct{}
 	// The next starts of a card's created container that fail, also after
 	// starting has returned: the container stays created, as when the engine
 	// refuses a start.
@@ -197,7 +205,46 @@ func newFakeEngine() *fakeEngine {
 		reviews: map[int64][]string{}, reviewed: map[string]string{}, saves: map[int64]bool{}, models: map[string]string{},
 		outcomes: map[int64][]string{}, outcome: map[string]string{}, inspected: map[string]int{},
 		startFails: map[int64]int{}, otherInstruction: map[int64]bool{}, docsFail: map[int64]error{},
-		removeFails: map[string]bool{}, breakOff: map[int64]bool{}, proposals: map[int64]string{}}
+		removeFails: map[string]bool{}, breakOff: map[int64]bool{}, proposals: map[int64]string{}, volumes: map[string]bool{}}
+}
+
+// FillCache records the fill, makes its volume afresh, unproven, as the
+// seal's does, waits at fillGate, and then fails or proves the volume. As the
+// seal's replaces the repo's one fill container, which is the proof, no other
+// volume of the repo stays filled.
+func (e *fakeEngine) FillCache(ctx context.Context, f seal.Fill) error {
+	volume := seal.CacheVolume(f.Repo, f.Digest)
+	e.mu.Lock()
+	e.fills = append(e.fills, f)
+	for v := range e.volumes {
+		if prefix := seal.CacheVolume(f.Repo, ""); strings.HasPrefix(v, prefix) && len(v) == len(prefix)+64 {
+			e.volumes[v] = false
+		}
+	}
+	e.volumes[volume] = false
+	gate := e.fillGate
+	e.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return fmt.Errorf("docker wait: %w", ctx.Err())
+		}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.fillFails {
+		return errors.New("the fill exited with status 1, as the test has it")
+	}
+	e.volumes[volume] = true
+	return nil
+}
+
+// CacheFilled is true for a volume filled with its proof.
+func (e *fakeEngine) CacheFilled(_ context.Context, repo, digest string) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.volumes[seal.CacheVolume(repo, digest)], nil
 }
 
 func (e *fakeEngine) KeepProxy(ctx context.Context, p seal.Proxy) (bool, error) {

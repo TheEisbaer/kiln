@@ -62,6 +62,22 @@ type Toolchain struct {
 	Dockerfile string
 	// Inputs are paths in the repo, files or directories, in clean form.
 	Inputs []string
+	// Cache is the repo's package caches, nil for a repo without one.
+	Cache *Cache
+}
+
+// Cache is a repo's package caches: the Dockerfile in the instance that the
+// image kiln-cache-<repo> is built from, with the repo's main as the
+// context, whose command fills the cache's volume; the paths in the repo
+// whose change makes the cache due again; and the path where the repo's runs
+// see it, read-only (internal/tick, internal/seal).
+type Cache struct {
+	// Dockerfile is the Dockerfile's absolute path.
+	Dockerfile string
+	// Inputs are paths in the repo, files or directories, in clean form.
+	Inputs []string
+	// Path is an absolute path that seal.CheckCachePath takes.
+	Path string
 }
 
 // MaxName is the longest name a repo can have.
@@ -162,24 +178,60 @@ type fileRepo struct {
 type fileToolchain struct {
 	Dockerfile string   `json:"dockerfile"`
 	Inputs     []string `json:"inputs"`
+	// Cache is read on its own (toolchainOf), so that a member it does not
+	// know is refused with the repo's name.
+	Cache json.RawMessage `json:"cache"`
+}
+
+type fileCache struct {
+	Dockerfile string   `json:"dockerfile"`
+	Inputs     []string `json:"inputs"`
+	Path       string   `json:"path"`
 }
 
 // toolchainOf is a repo's toolchain as the file gives it, or nil, refused
-// with the reason when its Dockerfile is empty or not an absolute path, or an
-// input is empty, absolute, not in clean form, ., or .. or below it.
+// with the reason when its cache has a member it does not know or a value of
+// the wrong type, when its Dockerfile, or its cache's, is empty or not an
+// absolute path, an input of either is empty, absolute, not in clean form, .,
+// or .. or below it, or seal.CheckCachePath refuses the cache's path.
 func toolchainOf(repo string, t *fileToolchain) (*Toolchain, error) {
 	if t == nil {
 		return nil, nil
 	}
-	if t.Dockerfile == "" || !filepath.IsAbs(t.Dockerfile) {
-		return nil, fmt.Errorf("the toolchain's Dockerfile of the repo %q is not an absolute path: %q", repo, t.Dockerfile)
+	if err := checkBuilt(repo, "toolchain", t.Dockerfile, t.Inputs); err != nil {
+		return nil, err
 	}
-	for _, in := range t.Inputs {
+	tc := &Toolchain{Dockerfile: t.Dockerfile, Inputs: t.Inputs}
+	if given(t.Cache) {
+		dec := json.NewDecoder(bytes.NewReader(t.Cache))
+		dec.DisallowUnknownFields()
+		var c fileCache
+		if err := dec.Decode(&c); err != nil {
+			return nil, fmt.Errorf("the cache of the repo %q: %w", repo, err)
+		}
+		if err := checkBuilt(repo, "cache", c.Dockerfile, c.Inputs); err != nil {
+			return nil, err
+		}
+		if err := seal.CheckCachePath(c.Path); err != nil {
+			return nil, fmt.Errorf("the repo %q: %w", repo, err)
+		}
+		tc.Cache = &Cache{Dockerfile: c.Dockerfile, Inputs: c.Inputs, Path: c.Path}
+	}
+	return tc, nil
+}
+
+// checkBuilt refuses the Dockerfile and inputs of a repo's toolchain or
+// cache, what, as toolchainOf says.
+func checkBuilt(repo, what, dockerfile string, inputs []string) error {
+	if dockerfile == "" || !filepath.IsAbs(dockerfile) {
+		return fmt.Errorf("the %s's Dockerfile of the repo %q is not an absolute path: %q", what, repo, dockerfile)
+	}
+	for _, in := range inputs {
 		if in == "" || path.IsAbs(in) || path.Clean(in) != in || in == "." || in == ".." || strings.HasPrefix(in, "../") {
-			return nil, fmt.Errorf("the toolchain's input %q of the repo %q is not a path in the repo in clean form", in, repo)
+			return fmt.Errorf("the %s's input %q of the repo %q is not a path in the repo in clean form", what, in, repo)
 		}
 	}
-	return &Toolchain{Dockerfile: t.Dockerfile, Inputs: t.Inputs}, nil
+	return nil
 }
 
 // limitsOf is a repo's memory and CPUs as the file gives them, "" and 0 when
@@ -215,9 +267,10 @@ func given(raw json.RawMessage) bool { return len(raw) > 0 && string(raw) != "nu
 // Check, and the instance's limit. It refuses, with the reason, a file over 1
 // MiB, a member it does not know, a value of the wrong type, anything after
 // the object, a copy that is not an absolute path, and a limit, of a repo or
-// of the instance, below 1, a work item other than "required", and a toolchain
-// whose Dockerfile is not an absolute path or whose input is not a path in the
-// repo in clean form; it does not read the Dockerfile. It refuses a memory or
+// of the instance, below 1, a work item other than "required", a toolchain or
+// a cache whose Dockerfile is not an absolute path or whose input is not a
+// path in the repo in clean form, and a cache's path that
+// seal.CheckCachePath refuses; it does not read the Dockerfiles. It refuses a memory or
 // CPUs that seal.CheckLimits refuses, and also "" and 0 written out. A repo
 // without a limit has Limit 0, the default, and so has the instance; one
 // without a memory or CPUs has "" or 0, the seal's defaults. It only reads.

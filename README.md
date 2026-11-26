@@ -86,7 +86,7 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
    - `publish_command`, `check_result_command` and `spec_hosts` (a list of names, or `["*"]`): what `--publish-command`, `--check-result-command` and `--spec-hosts` give, each optional.
    - `limit`: the most cards of the repo in progress at once, ready to merge included; optional, 3 by default, at least 1.
    - `work_item`: `"required"` when the repo's pull requests cannot merge without a linked work item: a card of it whose review passes waits for you until it has a number; optional, none needed by default.
-   - `toolchain`: the repo's own toolchain, `{"dockerfile": "<absolute path>", "inputs": ["<path in the repo>", …]}`; optional, and never on Kiln's own repo. Without it the repo's runs use `kiln-run`. See [A repo's own toolchain](#a-repos-own-toolchain).
+   - `toolchain`: the repo's own toolchain, `{"dockerfile": "<absolute path>", "inputs": ["<path in the repo>", …]}`, with an optional `cache`, `{"dockerfile": "<absolute path>", "inputs": ["<path in the repo>", …], "path": "<absolute path in the run>"}`; optional, and never on Kiln's own repo. Without it the repo's runs use `kiln-run`. See [A repo's own toolchain](#a-repos-own-toolchain).
    - `memory`: the memory of each of the repo's runs, without swap, as `"<n>m"` or `"<n>g"` (MiB or GiB), with `n` a whole number without a leading zero and at least `6m`; optional, `"4g"` by default.
    - `cpus`: the CPUs of each of the repo's runs, a whole number from 1; optional, 2 by default. A run is also pinned to as many CPUs, so that `nproc` inside it shows them: Kiln picks the CPUs least used by the runs on the engine, so that runs side by side get CPUs of their own while there are enough. A run that asks for more CPUs than the engine has (`docker info --format '{{.NCPU}}'`) does not start: its card waits for a run, and the core says why once.
 
@@ -136,7 +136,7 @@ The steps below are what the script does, and how to do it by hand. Kiln needs a
 
 ## A repo's own toolchain
 
-A repo other than Kiln's own can bring its own toolchain: the tools and package caches its build and tests need offline. Its `toolchain` member in the settings file has two members.
+A repo other than Kiln's own can bring its own toolchain: the tools its build and tests need, and the package caches they need offline, which belong in a cache (below). Its `toolchain` member in the settings file has two members, and an optional third, `cache`.
 
 - `dockerfile`: the absolute path of a Dockerfile kept in the instance, beside the settings file, never in a repo. The image is built with the repo's `main`'s head as its context, `git archive` of it, with this Dockerfile added as `Dockerfile.kiln-toolchain`, a path `main` may not hold. `COPY` paths are therefore paths in the repo, and the repo's `.dockerignore` applies.
 - `inputs`: the files and directories of the repo whose change makes the image due again, such as its lock files; optional. A path is relative to the repo's root, in clean form. The Dockerfile itself always counts.
@@ -150,16 +150,44 @@ The Dockerfile must leave or provide:
 - `git`, `find` and `chmod`, for the save;
 - a glibc system, since Kiln's layer installs Claude Code's `linux-x64` or `linux-arm64` build, not its `-musl` one.
 
-A run is uid 1000 and the build is root, so the caches the Dockerfile fills must be readable by any user, and a cache a tool writes into while it runs must also be writable by uid 1000. Pin the base image by its digest: a newer base under the same tag does not make the image due. Add a toolchain to a repo while none of its implement runs is in flight, since such a run's save would wait for `kiln-run-<repo>`, which only a start builds.
+A run is uid 1000 and the build is root, so whatever the Dockerfile installs that a run reads must be readable by any user, and a cache a tool writes into while it runs must also be writable by uid 1000. Pin the base image by its digest: a newer base under the same tag does not make the image due. Add a toolchain to a repo while none of its implement runs is in flight, since such a run's save would wait for `kiln-run-<repo>`, which only a start builds.
+
+### A repo's package caches
+
+The packages a build restores change with every lock file, so they are kept out of the toolchain image, in a volume of their own that every run of the repo mounts read-only. `cache` has three members:
+
+- `dockerfile`: the absolute path of the cache's Dockerfile, kept in the instance like the toolchain's. It is built with `main`'s head as the context, as `Dockerfile.kiln-cache`, a path `main` may not hold, into `kiln-cache-<repo>`. It starts with `ARG TOOLCHAIN` and `FROM ${TOOLCHAIN}`, which is the repo's toolchain image, and `COPY`s only the lock files and props the restore needs.
+- `inputs`: those lock files and props, whose change makes the cache due again; optional. The Dockerfile, `path` and the toolchain image always count, Kiln's layer does not.
+- `path`: where the runs see the cache, an absolute path such as `/opt/cache`. It is in clean form, of ASCII letters, digits, `.`, `_` and `-`, and it is not `/`, and neither is, is inside nor holds `/work`, `/kiln`, `/home`, `/tmp`, `/proc`, `/sys`, `/dev`, `/etc`, `/run`, `/usr`, `/bin`, `/sbin`, `/lib` or `/lib64`.
+
+The Dockerfile's `CMD` does the restore into `path`, and then makes it readable by any user. It runs in the container `kiln-fill-<repo>` from `kiln-cache-<repo>`, with the network and the repo's `memory` and `cpus`, as the image's user, with the volume `kiln-cache-<repo>-<digest>` mounted read-write at `path`. For example:
+
+```dockerfile
+ARG TOOLCHAIN
+FROM ${TOOLCHAIN}
+WORKDIR /src
+COPY package.json package-lock.json NuGet.config Directory.Packages.props ./
+COPY src/App/App.csproj src/App/
+CMD ["sh", "-c", "set -eu; npm ci --cache /opt/cache/npm --ignore-scripts && dotnet restore --packages /opt/cache/nuget && chmod -R a+rX /opt/cache"]
+```
+
+A restore in a `RUN` instruction at `path` lands in the volume too, by the engine's copy of the image's content into a new volume, but outside the repo's memory and CPUs. The volume's top directory takes the owner and mode of `path` in the image, so a fill that is not root needs `RUN install -d -o <user> <path>`.
+
+The runs see the cache read-only, as uid 1000. Point the tools at it there: npm with `npm ci --offline --cache /opt/cache/npm`, and NuGet as a fallback folder, `fallbackPackageFolders`, with the restore going into the run's own tree, since NuGet would write into its global packages folder. A tool that writes into its cache while it runs fails on it. The toolchain Dockerfile then holds tools only, so a lock file's change fills the cache again instead of rebuilding the toolchain.
+
+The core builds `kiln-cache-<repo>` and fills the volume after the toolchain's images, beside the tick, when a run of the repo is about to start and the volume of this moment is not filled. The core prints the fill's start and end. A volume counts as filled only once its fill has exited 0: `kiln-fill-<repo>` is kept as that proof, and a volume left by a killed or failed fill is removed and filled again. The repo's runs wait while the fill runs or after it failed, and other repos' runs go on. A failure is printed once, with the end of the fill's output, and tried again at once when the cache's Dockerfile, its inputs or the toolchain change, and otherwise a minute after the failure; `docker logs kiln-fill-<repo>` shows the whole output. A run in flight keeps the volume it started with.
+
+Kiln does not remove old cache volumes yet. `docker volume ls --filter label=kiln.cache=<repo>` lists them, and `docker volume rm <name>` removes one that no container uses; the newest is the one `kiln-fill-<repo>` mounts. Like the toolchain's images, `kiln-cache-<repo>` is never removed either.
 
 For example, with the `work` repo of the example above:
 
 ```sh
 jq -n --arg copy "$HOME/kiln-live/repo.git" --arg work "$HOME/kiln-live/work.git" \
-      --arg dockerfile "$HOME/kiln-live/work.Dockerfile" \
+      --arg dockerfile "$HOME/kiln-live/work.Dockerfile" --arg cache "$HOME/kiln-live/work-cache.Dockerfile" \
       '{repos: [{name: "kiln", copy: $copy, own: true},
                 {name: "work", copy: $work,
-                 toolchain: {dockerfile: $dockerfile, inputs: ["package-lock.json", "nuget"]}}]}' \
+                 toolchain: {dockerfile: $dockerfile,
+                             cache: {dockerfile: $cache, inputs: ["package-lock.json", "nuget"], path: "/opt/cache"}}}]}' \
       > ~/kiln-live/settings.json.new
 chmod 600 ~/kiln-live/settings.json.new && mv ~/kiln-live/settings.json.new ~/kiln-live/settings.json
 ```
