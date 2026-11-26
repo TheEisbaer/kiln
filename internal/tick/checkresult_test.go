@@ -28,7 +28,10 @@ import (
 // "empty", nothing; "exit", failed and then exit 1, with a token-like line
 // on standard error; "sleep", a sleep of 10 s whose pid is in dir/pid;
 // "gate", once dir/gate is there, what it holds, or failed when it holds
-// nothing, after it has made dir/waiting.
+// nothing, after it has made dir/waiting; "review", two items of feedback,
+// one with a file and line, one with a control character and a run of four
+// backticks; "since", review after an item of feedback when KILN_SINCE is
+// before the time in dir/since, and passed otherwise.
 const checkCommand = `set -eu
 dir=%s
 n=$(( $(cat "$dir/calls" 2>/dev/null || echo 0) + 1 ))
@@ -45,6 +48,9 @@ case "$mode" in
     empty) rm "$dir/running" ;;
     exit) echo "token ghp_0123456789abcdef" >&2; rm "$dir/running"; echo failed; exit 1 ;;
     sleep) rm "$dir/running"; sleep 10 & echo $! > "$dir/pid"; wait ;;
+    review) printf 'ann NOTES.md:2: say why this line\n\nbob: \033[2Jsee ` + "````" + `go\n'; rm "$dir/running"; echo review ;;
+    since) t=$(cat "$dir/since"); rm "$dir/running"
+        if expr "$KILN_SINCE" \< "$t" > /dev/null; then echo "carol: a newer comment"; echo review; else echo passed; fi ;;
     gate) touch "$dir/waiting"; while [ ! -e "$dir/gate" ]; do sleep 0.05; done; rm "$dir/running"
         r=$(cat "$dir/gate"); echo "${r:-failed}" ;;
 esac
@@ -52,6 +58,10 @@ esac
 
 // The output of the stand-in's mode failed, as the core keeps it.
 const failedOutput = "FAIL TestOne\n\uFFFD[2Jcontrol\nsee ````go"
+
+// The output of the stand-in's mode review, the feedback, as the core keeps
+// it.
+const reviewOutput = "ann NOTES.md:2: say why this line\n\nbob: \uFFFD[2Jsee ````go"
 
 // checking is a publishing bench whose core has the stand-in check result
 // command too, with its own directory.
@@ -165,8 +175,8 @@ func TestCheckNone(t *testing.T) {
 
 // TestCheckPendingPassed leaves a card whose check is pending or passed at the
 // Git host, with nothing written and nothing said; the command is told only
-// KILN_COMMIT of the names that begin with KILN_, in the data directory with
-// no standard input.
+// KILN_COMMIT and KILN_SINCE of the names that begin with KILN_, in the data
+// directory with no standard input.
 func TestCheckPendingPassed(t *testing.T) {
 	p := newChecking(t)
 	t.Setenv("KILN_CARD", "x")
@@ -202,7 +212,7 @@ func TestCheckPendingPassed(t *testing.T) {
 		t.Errorf("the command was told %s=%q in %q with %q on its standard input, want %s in %s", envCommit, env[envCommit], env["WORKDIR"], env["STDIN"], commit, data)
 	}
 	for name := range env {
-		if strings.HasPrefix(name, "KILN_") && name != envCommit {
+		if strings.HasPrefix(name, "KILN_") && name != envCommit && name != envSince {
 			t.Errorf("the command was told %s as well", name)
 		}
 	}
@@ -381,7 +391,7 @@ func TestCheckBadResults(t *testing.T) {
 	})
 	out := core.out.String()
 	for _, want := range []string{
-		"kiln core: card 1: the check result command's last line is not pending, passed, failed or closed: ok\n",
+		"kiln core: card 1: the check result command's last line is not pending, passed, failed, closed or review: ok\n",
 		"kiln core: card 1: the check result command printed nothing\n",
 		"kiln core: card 1: the check result command failed: exit status 1: token ghp_0123456789abcdef\n",
 		"kiln core: card 1: the check result command did not end within 200ms\n",
@@ -640,8 +650,12 @@ func TestReadCheck(t *testing.T) {
 		{in: "failed\n", result: checkFailed},
 		{in: "closed", result: checkClosed},
 		{in: "a\nclosed\n", result: checkClosed},
-		{in: "Closed", failure: "the check result command's last line is not pending, passed, failed or closed: Closed"},
-		{in: "Failed", failure: "the check result command's last line is not pending, passed, failed or closed: Failed"},
+		{in: "ann: a comment\r\n\nbob: \x1b\nreview\n", result: checkReview, output: "ann: a comment\n\nbob: \uFFFD"},
+		{in: "ann: a comment\nreview", cut: true, result: checkReview, output: checkCut + "\nann: a comment"},
+		{in: "review", result: checkReview},
+		{in: "Review", failure: "the check result command's last line is not pending, passed, failed, closed or review: Review"},
+		{in: "Closed", failure: "the check result command's last line is not pending, passed, failed, closed or review: Closed"},
+		{in: "Failed", failure: "the check result command's last line is not pending, passed, failed, closed or review: Failed"},
 		{in: " \n", failure: "the check result command printed nothing"},
 		{in: "\xff\x1b\nfailed", result: checkFailed, output: "\uFFFD\uFFFD"},
 	} {

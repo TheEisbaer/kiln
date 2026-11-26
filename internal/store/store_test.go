@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 18"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 19"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 18 was opened")
+		t.Fatal("a store of version 19 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 18") || !strings.Contains(msg, "version 17") {
+	if msg := err.Error(); !strings.Contains(msg, "version 19") || !strings.Contains(msg, "version 18") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 18 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 18 and 0", v, tables)
+	if v != 19 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 19 and 0", v, tables)
 	}
 }
 
@@ -1197,8 +1197,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 17 {
-		t.Fatalf("the store is version %d after Open, want 17", v)
+	if v := userVersion(t, s); v != version || version != 18 {
+		t.Fatalf("the store is version %d after Open, want 18", v)
 	}
 	// What version 1 held is still there, and has no run or reason, and no
 	// send-back.
@@ -1273,6 +1273,7 @@ ALTER TABLE entries DROP COLUMN proposal;
 ALTER TABLE cards DROP COLUMN fixes;
 ALTER TABLE cards DROP COLUMN work_item;
 ALTER TABLE cards DROP COLUMN repo;
+ALTER TABLE publishes DROP COLUMN feedback_since;
 PRAGMA user_version = 9`); err != nil {
 		t.Fatal(err)
 	}

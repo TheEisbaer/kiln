@@ -670,6 +670,7 @@ const MOVES = {
   "to-spec": "Send back to spec",
   drop: "Drop the card",
   start: "Start",
+  "to-host": "Back to the Git host",
 };
 const AGAIN = { spec: "Run the spec again", implement: "Run implement again", review: "Run the review again" };
 function moveLabel(c, action) {
@@ -735,10 +736,14 @@ const RUN_LINE = /(?:^|; )exit (\d+)(, killed for memory)?, (?:no result|result 
 // its fence's first and last line is the output. It matches the store's
 // CheckFailedReason.
 const CHECK_FAILED = "the check failed on the Git host";
+// A reviewer's feedback on the pull request keeps the feedback the same way.
+// It matches the store's ReviewReason.
+const REVIEW_FEEDBACK = "a reviewer commented on its pull request";
+function feedbackCard(c) { return (c.reason || "").startsWith(REVIEW_FEEDBACK) && needsYou(c); }
 
 function reasonParts(reason) {
   reason = reason || "";
-  if (reason.startsWith(CHECK_FAILED)) {
+  if (reason.startsWith(CHECK_FAILED) || reason.startsWith(REVIEW_FEEDBACK)) {
     const at = reason.indexOf("\n\n");
     if (at < 0) return { sentence: sentence(reason), facts: [], failed: false, output: "" };
     const lines = reason.slice(at + 2).replace(/\n$/, "").split("\n");
@@ -1509,11 +1514,13 @@ function sentBack(c) {
 
 // first is the move that matters first in a state: starting a card in the
 // backlog, approving a spec, marking a passed review done, sending back a
-// change a review sent back, and running the stage again otherwise.
+// change a review sent back or a reviewer commented on, and running the
+// stage again otherwise.
 function first(c) {
   if (c.moves.some((m) => m.action === "start")) return "start";
   if (canPublish(c)) return "publish";
   if (c.waits_for === "host") return null;
+  if (feedbackCard(c)) return "send-back";
   if (c.waits_for === "approval") return c.stage === "review" ? "done" : "approve";
   return sentBack(c) ? "send-back" : "again";
 }
@@ -1524,11 +1531,12 @@ function quiet(c, m) { return m.action === "done" && (canPublish(c) || c.waits_f
 
 // renderMoves shows the moves the card's state allows: the one that matters
 // first and filled, the others quiet, sending back to spec last, and dropping
-// the card small and apart, on the right.
+// the card small and apart, on the right. Back to the Git host comes right
+// after the send-back to implement.
 function renderMoves(c) {
   const box = $("p-moves");
   box.replaceChildren();
-  const rank = (m) => m.action === first(c) ? 0 : quiet(c, m) ? 3 : m.action === "to-spec" ? 2 : 1;
+  const rank = (m) => m.action === first(c) ? 0 : m.action === "to-host" ? 0.5 : quiet(c, m) ? 3 : m.action === "to-spec" ? 2 : 1;
   const moves = c.moves.filter((m) => m.action !== "drop").sort((a, b) => rank(a) - rank(b));
   // An approval takes a note in a field of its own before the buttons, empty
   // by default, so that approving without one stays a single click.
@@ -1572,6 +1580,7 @@ function renderMoves(c) {
   moves.forEach((m, i) => {
     const b = el("button", i === 0 && rank(m) === 0 ? "primary" : quiet(c, m) ? "quiet" : "", moveLabel(c, m.action));
     b.type = "button";
+    if (m.action === "to-host") b.title = "You answered at the Git host; Kiln brings the card back only for feedback newer than now.";
     if (m.action === "approve" && approves) {
       b.addEventListener("click", async () => {
         const r = await decide(c.id, "approve", $("p-approve-note").value, box, workItemMore($("p-approve-work-item").value));
@@ -1722,6 +1731,9 @@ function noteText(c, m) {
     case "send-back":
       if (c.waits_for === "host") return { title: "Send back to implement",
         what: "The card goes back to implement and waits for a run, which is told your note; the note wins where it differs from the spec. The pull request is left as it is on the Git host.",
+        label: "What should change?", go: "Send back" };
+      if (feedbackCard(c)) return { title: "Send back to implement",
+        what: "The card goes back to implement and waits for a run, which is told the comments above and your note, if any. Once its review passes, the update is published to the same pull request.",
         label: "What should change?", go: "Send back" };
       return { title: "Send back to implement", what: c.waits_for === "approval" ?
         "The review passed. The card goes back to implement; the run is told the review and your note, which wins where it differs from the spec." :

@@ -21,17 +21,24 @@ import (
 // The check on the Git host. For every card at the Git host with a pull
 // request, a checker beside the tick, like a publisher and counted in no
 // limit, runs the developer's check result command with the published commit
-// and reads its result from the last line it prints: pending, passed, failed
-// or closed. A failed check for the commit that is still published sends the
+// and reads its result from the last line it prints: pending, passed, failed,
+// closed or review. A failed check for the commit that is still published sends the
 // card back to implement by the rule, as a send-back (ADR 0012, rule 2; ADR
 // 0054), with the check's output in the entry, which the implement run is
 // told (told). closed says that the commit's pull request was closed without
 // a merge: the card goes to review, needing you, by the Git host, and it is no
-// send-back. pending and passed change nothing, and anything else is said on
+// send-back. review says that a person commented on the commit's pull request
+// at or after the card's feedback mark, which the command is told as
+// KILN_SINCE: the card goes to review, needing you, by the Git host, with the
+// feedback in the entry, and it is no send-back either (ADR 0028); the
+// developer's send-back tells the implement run the feedback (told). pending
+// and passed change nothing, and anything else is said on
 // the core's error output and changes nothing either.
 //
 // What the core knows of the checks is in memory only, as a guard and a
-// pace (ADR 0035): a core started again checks at once.
+// pace (ADR 0035): a core started again checks at once. Only the feedback
+// mark is kept, on the card's publication, since feedback, unlike a failed
+// check, would not come again on its own.
 
 // The times of the check. Only the test changes them.
 var (
@@ -47,7 +54,25 @@ const (
 	checkPassed  = "passed"
 	checkFailed  = "failed"
 	checkClosed  = "closed"
+	checkReview  = "review"
 )
+
+// envSince is the variable that tells the check result command the card's
+// feedback mark, besides envCommit.
+const envSince = "KILN_SINCE"
+
+// sinceLayout is how the feedback mark is told: in UTC, cut to the second, in
+// the form the Git host's since takes, so that two times compare as strings.
+const sinceLayout = "2006-01-02T15:04:05Z"
+
+// sinceOf is the feedback mark as the command is told it: the epoch for a card
+// without one.
+func sinceOf(mark time.Time) string {
+	if mark.IsZero() {
+		mark = time.Unix(0, 0)
+	}
+	return mark.UTC().Truncate(time.Second).Format(sinceLayout)
+}
 
 // maxCheckOutput is the most of the check's output that is kept, its end,
 // from a line start.
@@ -145,7 +170,15 @@ func (c *core) sayCheck(st *checkState, text string) {
 // check runs the check result command once for a card's commit and acts on
 // its result.
 func (c *core) check(ctx context.Context, id int64, st *checkState) {
-	result, output, failure := c.runCheckResult(ctx, st.repo.CheckResultCommand, st.commit)
+	c.mu.Lock()
+	read := st.last
+	c.mu.Unlock()
+	var result, output, failure string
+	if pub, err := c.store.Publication(id); err != nil {
+		failure = "the card's publication is not read: " + err.Error()
+	} else {
+		result, output, failure = c.runCheckResult(ctx, st.repo.CheckResultCommand, st.commit, sinceOf(pub.FeedbackSince))
+	}
 	if ctx.Err() != nil {
 		return // an interrupt: the next core checks again
 	}
@@ -164,6 +197,10 @@ func (c *core) check(ctx context.Context, id int64, st *checkState) {
 	case checkClosed:
 		if err := c.checkClosed(ctx, st.repo, id, st.commit); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(c.errOut, "kiln core: card %d: the closed pull request is not acted on: %s\n", id, run.Printable(err.Error()))
+		}
+	case checkReview:
+		if err := c.checkReview(ctx, st.repo, id, st.commit, read, output); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(c.errOut, "kiln core: card %d: the reviewer's feedback is not acted on: %s\n", id, run.Printable(err.Error()))
 		}
 	}
 	at("checked")
@@ -239,13 +276,39 @@ func (c *core) checkClosed(ctx context.Context, repo settings.Repo, id int64, co
 	return nil
 }
 
+// checkReview acts on a reviewer's feedback on the pull request of a card's
+// commit, read at the time read: as for a closed pull request, a change that
+// is in main already closes the card as merged, and otherwise the card goes to
+// review, needing you, by the Git host, with the reason store.ReviewReason
+// and, after an empty line, the feedback fenced, as no send-back; its feedback
+// mark becomes read. The feedback goes on no output. A card that is no longer
+// at the Git host with this commit is left as it is.
+func (c *core) checkReview(ctx context.Context, repo settings.Repo, id int64, commit string, read time.Time, feedback string) error {
+	if err := c.mergeFirst(ctx, repo, id, commit); err != nil {
+		return err
+	}
+	reason := store.ReviewReason
+	if feedback != "" {
+		reason += "\n\n" + fenced(feedback, "text")
+	}
+	if _, err := c.store.ReviewFeedback(id, commit, read, reason); err != nil {
+		if errors.Is(err, store.ErrRefused) {
+			return nil // merged, moved by the developer, or published anew meanwhile
+		}
+		return err
+	}
+	fmt.Fprintf(c.out, "card %d: %s\n", id, store.ReviewReason)
+	return nil
+}
+
 // runCheckResult runs command, the check result command of a card's repo, for
 // a commit: with sh -c, in the data directory, with no standard input, for at
 // most checkLimit, its session killed with it, and with the environment of the
-// core without any name that begins with KILN_, and KILN_COMMIT, the commit.
-// Its standard error is only said, in a failure. It returns the result and,
-// for a failed check, its output (see readCheck), or the failure.
-func (c *core) runCheckResult(ctx context.Context, command, commit string) (result, output, failure string) {
+// core without any name that begins with KILN_, and KILN_COMMIT, the commit,
+// and KILN_SINCE, the card's feedback mark as sinceOf gives it. Its standard
+// error is only said, in a failure. It returns the result and, for a failed
+// check or a reviewer's feedback, its output (see readCheck), or the failure.
+func (c *core) runCheckResult(ctx context.Context, command, commit, since string) (result, output, failure string) {
 	cctx, cancel := context.WithTimeout(ctx, checkLimit)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "sh", "-c", command)
@@ -255,7 +318,7 @@ func (c *core) runCheckResult(ctx context.Context, command, commit string) (resu
 			cmd.Env = append(cmd.Env, e)
 		}
 	}
-	cmd.Env = append(cmd.Env, envCommit+"="+commit)
+	cmd.Env = append(cmd.Env, envCommit+"="+commit, envSince+"="+since)
 	detach(cmd)
 	stdout, stderr := &tail{max: 64 << 10}, &tail{max: 4 * maxReason}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
@@ -276,8 +339,10 @@ func (c *core) runCheckResult(ctx context.Context, command, commit string) (resu
 // readCheck reads what the check result command printed on its standard
 // output, of which a part at the start was dropped when cut is set: valid
 // UTF-8, without a carriage return before a newline, and trimmed at its end,
-// its last line, trimmed, is the result, pending, passed, failed or closed.
-// With closed what comes before it is dropped. With failed the output is what comes before it, trimmed and made printable, and
+// its last line, trimmed, is the result, pending, passed, failed, closed or
+// review. With closed what comes before it is dropped. With failed, and with
+// review, whose output is the feedback, the output is what comes before it,
+// trimmed and made printable, and
 // only its end when it is longer than maxCheckOutput or was cut: from the
 // first line start within the last maxCheckOutput bytes, or the first
 // character start when there is none, after a line that says so. Any other
@@ -295,7 +360,7 @@ func readCheck(data []byte, cut bool) (result, output, failure string) {
 	switch last = strings.TrimSpace(last); last {
 	case checkPending, checkPassed, checkClosed:
 		return last, "", ""
-	case checkFailed:
+	case checkFailed, checkReview:
 	default:
 		if len(last) > maxLastLine {
 			end := maxLastLine
@@ -304,7 +369,7 @@ func readCheck(data []byte, cut bool) (result, output, failure string) {
 			}
 			last = last[:end] + "…"
 		}
-		return "", "", "the check result command's last line is not pending, passed, failed or closed: " + last
+		return "", "", "the check result command's last line is not pending, passed, failed, closed or review: " + last
 	}
 	output = strings.TrimSpace(run.Printable(before))
 	if len(output) > maxCheckOutput {
@@ -321,5 +386,5 @@ func readCheck(data []byte, cut bool) (result, output, failure string) {
 	if cut && output != "" {
 		output = checkCut + "\n" + output
 	}
-	return checkFailed, output, ""
+	return last, output, ""
 }

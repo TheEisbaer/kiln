@@ -14,12 +14,15 @@ import (
 // published and the pull request's address; and the branch on the Git host it
 // is published on, named at its first publishing and kept for every later
 // one, so that one card has one pull request. A card never published has none
-// of them.
+// of them. FeedbackSince is the card's feedback mark (ADR 0028): the Git
+// host's feedback on its pull request counts from then on; the zero time
+// before any.
 type Publication struct {
-	WorkflowYes string
-	Commit      string
-	Address     string
-	Branch      string
+	WorkflowYes   string
+	Commit        string
+	Address       string
+	Branch        string
+	FeedbackSince time.Time
 }
 
 // The reasons on the entries of publishing that the store tells apart.
@@ -32,6 +35,11 @@ const (
 	// ClosedReason is the reason of a card whose pull request the Git host
 	// closed without a merge, which then needs you.
 	ClosedReason = "its pull request was closed without a merge"
+	// ReviewReason begins the reason of a card that a reviewer's feedback on
+	// its pull request moved from the Git host to "needs you", followed, when
+	// the check result command printed any, by an empty line and the feedback
+	// as a fenced block (ADR 0028).
+	ReviewReason = "a reviewer commented on its pull request"
 	// PublishedReason begins the reason of the entry that keeps a card's pull
 	// request's address, followed by the address.
 	PublishedReason = "published as "
@@ -59,6 +67,14 @@ func PullClosed(s State, cause Cause, reason string) bool {
 	return s == (State{Review, Developer}) && cause == CauseHost && reason == ClosedReason
 }
 
+// Feedback says whether a card's last entry, of the state, the cause and the
+// reason, left it under "needs you" because a reviewer commented on its pull
+// request. It is told by the cause host and the reason's start, which the
+// feedback follows.
+func Feedback(s State, cause Cause, reason string) bool {
+	return s == (State{Review, Developer}) && cause == CauseHost && strings.HasPrefix(reason, ReviewReason)
+}
+
 // readFacts reads the facts of a card that the store keeps (see Facts).
 func readFacts(q querier, card int64) (Facts, error) {
 	var f Facts
@@ -74,6 +90,7 @@ func readFacts(q querier, card int64) (Facts, error) {
 	case err == nil:
 		f.PublishFailed = PublishFailed(e.State, e.Cause, reason.String)
 		f.PullClosed = PullClosed(e.State, e.Cause, reason.String)
+		f.Feedback = Feedback(e.State, e.Cause, reason.String)
 	case !errors.Is(err, sql.ErrNoRows):
 		return Facts{}, err
 	}
@@ -98,13 +115,22 @@ func (s *Store) Publication(card int64) (Publication, error) {
 }
 
 func readPublication(q querier, card int64) (Publication, error) {
-	var yes, commit, address, branch sql.NullString
-	err := q.QueryRow(`SELECT workflow_yes, commit_id, address, branch FROM publishes WHERE card = ?`, card).
-		Scan(&yes, &commit, &address, &branch)
+	var yes, commit, address, branch, since sql.NullString
+	err := q.QueryRow(`SELECT workflow_yes, commit_id, address, branch, feedback_since FROM publishes WHERE card = ?`, card).
+		Scan(&yes, &commit, &address, &branch, &since)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Publication{}, nil
 	}
-	return Publication{WorkflowYes: yes.String, Commit: commit.String, Address: address.String, Branch: branch.String}, err
+	if err != nil {
+		return Publication{}, err
+	}
+	p := Publication{WorkflowYes: yes.String, Commit: commit.String, Address: address.String, Branch: branch.String}
+	if since.Valid {
+		if p.FeedbackSince, err = time.Parse(time.RFC3339Nano, since.String); err != nil {
+			return Publication{}, fmt.Errorf("card %d's feedback mark: %w", card, err)
+		}
+	}
+	return p, nil
 }
 
 // PublishBranch returns the branch a card is published on: the one kept, or
@@ -279,21 +305,72 @@ func (s *Store) PullRequestClosed(card int64, commit string) (Card, error) {
 	return s.keepIfRefused(card, c, err)
 }
 
-// FailedCheck finds the card's newest entry of the rule whose reason begins
-// with CheckFailedReason, when it is newer than every entry that ended a run
-// which wrote a spec or a review: the failed check that the card's implement
-// runs are told until a newer spec or review exists. A retry, or a run after
-// the developer's again, still finds it.
+// ReviewFeedback moves a card that waits for the Git host to review, waiting
+// for the developer, by the Git host, with the reason, which begins with
+// ReviewReason, because a reviewer commented on the commit's pull request
+// (ADR 0028). It is no send-back: the number of send-backs stays as it is. In
+// the same transaction the card's publication must still have the commit and
+// an address, and its feedback_since is set to read, when the feedback was
+// read; its commit, address, branch and yes stay. A card that is no longer at
+// the Git host, or whose publication has another commit or none, is refused
+// with ErrRefused, nothing is written, and the card is returned as it is.
+func (s *Store) ReviewFeedback(card int64, commit string, read time.Time, reason string) (Card, error) {
+	if commit == "" || read.IsZero() || !strings.HasPrefix(reason, ReviewReason) {
+		return Card{}, errors.New("a reviewer's feedback needs a commit, the time it was read and a reason of feedback")
+	}
+	c, err := s.change(edit{id: card, next: atHost.only(State{Review, Developer}), cause: CauseHost, reason: reason, always: true,
+		write: func(tx *sql.Tx, card int64) error {
+			if _, err := publishedAs(tx, card, commit); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`UPDATE publishes SET feedback_since = ? WHERE card = ?`, read.UTC().Format(time.RFC3339Nano), card)
+			return err
+		}})
+	return s.keepIfRefused(card, c, err)
+}
+
+// FailedCheck is FromHost for a failed check only: the card's newest entry of
+// the rule whose reason begins with CheckFailedReason, when it is newer than
+// every entry that ended a run which wrote a spec or a review.
 func (s *Store) FailedCheck(card int64) (Entry, bool, error) {
+	e, ok, err := s.FromHost(card)
+	if !ok || err != nil || e.Cause != CauseRule {
+		return Entry{}, false, err
+	}
+	return e, true, nil
+}
+
+// FromHost finds the card's newest entry that is either the rule's failed
+// check, of the cause rule with a reason that begins with CheckFailedReason,
+// or the Git host's feedback, of the cause host with a reason that begins
+// with ReviewReason, when it is newer than every entry that ended a run which
+// wrote a spec or a review: what the card's implement runs are told until a
+// newer spec or review exists. A retry, or a run after the developer's again,
+// still finds it.
+//
+// A feedback entry that a later entry of the developer's to-host follows is
+// passed over: "Back to the Git host" says the developer answered it, so no
+// later implement run is told it (ADR 0028). That entry is the developer's,
+// to review, waiting for the Git host, and about no proposal. After feedback
+// and before a run writes a spec or a review, only to-host writes such an
+// entry: publish from "needs you" follows only a failed publishing or a
+// closed pull request, and a move on a proposal is never it. Feedback newer
+// than the to-host counts again.
+func (s *Store) FromHost(card int64) (Entry, bool, error) {
 	e := Entry{Card: card}
 	var at string
 	var run sql.NullString
-	err := s.db.QueryRow(`SELECT number, at, cause, stage, waits_for, run, reason FROM entries
-		WHERE card = ? AND cause = ? AND substr(reason, 1, ?) = ?
+	err := s.db.QueryRow(`SELECT number, at, cause, stage, waits_for, run, reason FROM entries AS f
+		WHERE card = ? AND ((cause = ? AND substr(reason, 1, ?) = ?)
+			OR (cause = ? AND substr(reason, 1, ?) = ? AND NOT EXISTS (SELECT 1 FROM entries AS h
+				WHERE h.card = f.card AND h.number > f.number AND h.cause = ? AND h.stage = ? AND h.waits_for = ?
+				AND h.proposal IS NULL)))
 		AND number > (SELECT COALESCE(MAX(entries.number), 0) FROM entries JOIN specs ON specs.run = entries.run
 			WHERE entries.card = ? AND specs.kind IN (?, ?))
 		ORDER BY number DESC LIMIT 1`,
-		card, CauseRule, len(CheckFailedReason), CheckFailedReason, card, KindSpec, KindReview).
+		card, CauseRule, len(CheckFailedReason), CheckFailedReason, CauseHost, len(ReviewReason), ReviewReason,
+		CauseDeveloper, atHost.Stage, atHost.WaitsFor,
+		card, KindSpec, KindReview).
 		Scan(&e.Number, &at, &e.Cause, &e.Stage, &e.WaitsFor, &run, &e.Reason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Entry{}, false, nil
