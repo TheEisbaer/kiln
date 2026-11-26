@@ -1277,9 +1277,9 @@ func (c *core) card(ctx context.Context, id int64, mayStart bool) (*follower, er
 
 // follow starts a follower beside the tick, which carries the run to its end
 // and records it. The card is followed from now until the follower has
-// returned. An error of the follower is printed with the card's ID, and the
-// next tick decides again; an interrupt ends the following, and the run goes
-// on.
+// returned. An error of the follower is printed with the card's ID, one that
+// wraps seal.ErrCPUs once per card and text, and the next tick decides again;
+// an interrupt ends the following, and the run goes on.
 func (c *core) follow(ctx context.Context, f *follower) {
 	id := f.card.ID
 	c.mu.Lock()
@@ -1291,7 +1291,15 @@ func (c *core) follow(ctx context.Context, f *follower) {
 		err := c.carry(ctx, f)
 		if ctx.Err() == nil {
 			if err != nil {
-				fmt.Fprintf(c.errOut, "kiln core: card %d: %s\n", id, run.Printable(err.Error()))
+				line := fmt.Sprintf("kiln core: card %d: %s", id, run.Printable(err.Error()))
+				if errors.Is(err, seal.ErrCPUs) {
+					// It holds until the settings change, which takes
+					// another core, so it is said once per card and text,
+					// not on every tick.
+					c.sayOnceAs(c.errOut, "cpus\x00"+line, line)
+				} else {
+					fmt.Fprintln(c.errOut, line)
+				}
 			}
 			at("followed")
 		}
@@ -1743,6 +1751,8 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 		Effort:      row.Effort,
 		Instance:    c.instance,
 		SkipSave:    !st.save,
+		Memory:      repo.Memory,
+		CPUs:        repo.CPUs,
 	}
 	// The baseline of the run's /work has a parent where the card's branch
 	// left main, whenever that is not the commit the run starts from.

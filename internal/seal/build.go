@@ -45,11 +45,11 @@ const maxBuildErr = 4 << 10
 
 // Build builds the core of a commit (ADR 0037) in a sealed container,
 // kiln-build-<instance>, from the toolchain image: with no network, no mount,
-// no capabilities, the run's limits and no environment but GOOS, GOARCH and
-// CGO_ENABLED=0, as the image's own user. src is the source, a tar as `git
-// archive` makes it, on the container's standard input; the program comes out
-// on its standard output into out. An error carries the last 4 KiB of the
-// build's standard error.
+// no capabilities, the fixed limits (fixedLimits) and no environment but
+// GOOS, GOARCH and CGO_ENABLED=0, as the image's own user. src is the source,
+// a tar as `git archive` makes it, on the container's standard input; the
+// program comes out on its standard output into out. An error carries the
+// last 4 KiB of the build's standard error.
 //
 // A container of the name left behind with the label kiln.build=<instance> is
 // removed first; one without it is refused, and nothing is touched. The
@@ -97,7 +97,7 @@ func Build(ctx context.Context, p Program, src io.Reader, out io.Writer) (err er
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 	}
-	args = append(args, runLimits...)
+	args = append(args, fixedLimits...)
 	args = append(args, "--env", "GOOS="+p.GOOS, "--env", "GOARCH="+p.GOARCH, "--env", "CGO_ENABLED=0",
 		"--", p.Image, "sh", "-c", buildScript, "sh", p.Version)
 	cmd := commandIn(ctx, "docker", args...)

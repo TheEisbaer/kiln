@@ -134,8 +134,6 @@ func TestLoad(t *testing.T) {
 		{"limit 1.5", one(`,"limit":1.5`), "limit"},
 		{"limit as a string", one(`,"limit":"3"`), "limit"},
 		{"over 1 MiB", one("") + strings.Repeat(" ", MaxFile), "is larger than 1 MiB"},
-		{"memory", work(`,"memory":"6g"`), `unknown field "memory"`},
-		{"cpus", work(`,"cpus":4`), `unknown field "cpus"`},
 		{"a toolchain's unknown member", work(`,"toolchain":{"dockerfile":"/d","input":["a"]}`), `unknown field "input"`},
 		{"a toolchain without a Dockerfile", work(`,"toolchain":{"inputs":["a"]}`), `the toolchain's Dockerfile of the repo "work" is not an absolute path: ""`},
 		{"a relative Dockerfile", work(`,"toolchain":{"dockerfile":"Dockerfile"}`), `the toolchain's Dockerfile of the repo "work" is not an absolute path: "Dockerfile"`},
@@ -158,6 +156,69 @@ func TestLoad(t *testing.T) {
 	}
 	if _, err := Load(filepath.Join(dir, "missing.json")); err == nil || !strings.Contains(err.Error(), "the settings file") {
 		t.Errorf("a missing file: %v", err)
+	}
+}
+
+func TestLoadLimits(t *testing.T) {
+	load := func(t *testing.T, member string) (Settings, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "settings.json")
+		body := `{"repos":[{"name":"kiln","copy":"/a/kiln.git","own":true},{"name":"work","copy":"/a/w.git"` + member + `}]}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path)
+	}
+	for _, tc := range []struct {
+		member string
+		memory string
+		cpus   int
+	}{
+		{``, "", 0},
+		{`,"memory":"6m"`, "6m", 0},
+		{`,"memory":"4g"`, "4g", 0},
+		{`,"memory":"16384m"`, "16384m", 0},
+		{`,"cpus":1`, "", 1},
+		{`,"cpus":64`, "", 64},
+		{`,"memory":"6g","cpus":3`, "6g", 3},
+		{`,"memory":null,"cpus":null`, "", 0},
+	} {
+		t.Run("accepted "+tc.member, func(t *testing.T) {
+			s, err := load(t, tc.member)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r := s.Repos[1]; r.Memory != tc.memory || r.CPUs != tc.cpus {
+				t.Errorf("the repo has %q and %d, want %q and %d", r.Memory, r.CPUs, tc.memory, tc.cpus)
+			}
+			if r := s.Repos[0]; r.Memory != "" || r.CPUs != 0 {
+				t.Errorf("Kiln's repo has %q and %d, want the defaults", r.Memory, r.CPUs)
+			}
+		})
+	}
+	for _, tc := range []struct{ member, want string }{
+		{`,"memory":"5m"`, "below 6m"},
+		{`,"memory":"0g"`, "not <n>m or <n>g"},
+		{`,"memory":"04g"`, "not <n>m or <n>g"},
+		{`,"memory":"4G"`, "not <n>m or <n>g"},
+		{`,"memory":"4"`, "not <n>m or <n>g"},
+		{`,"memory":"4gb"`, "not <n>m or <n>g"},
+		{`,"memory":"-1g"`, "not <n>m or <n>g"},
+		{`,"memory":" 4g"`, "not <n>m or <n>g"},
+		{`,"memory":""`, `the memory is ""`},
+		{`,"memory":"9999999999g"`, "more bytes"},
+		{`,"memory":4`, "the memory is 4; it is a string"},
+		{`,"cpus":1.5`, "the CPUs are 1.5"},
+		{`,"cpus":0`, "the CPUs are 0"},
+		{`,"cpus":-1`, "the CPUs are -1"},
+		{`,"cpus":"2"`, `the CPUs are "2"`},
+	} {
+		t.Run("refused "+tc.member, func(t *testing.T) {
+			_, err := load(t, tc.member)
+			if err == nil || !strings.Contains(err.Error(), `the repo "work": `) || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Load error = %v, want the repo \"work\" and %q", err, tc.want)
+			}
+		})
 	}
 }
 

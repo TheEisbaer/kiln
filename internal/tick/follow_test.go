@@ -49,6 +49,7 @@ type fakeEngine struct {
 	fail        map[int64]bool       // the cards whose runs fail
 	errOnce     map[int64]bool       // the cards whose first Carry fails once its run is in the store
 	refuse      map[int64]bool       // the cards whose Carry always fails before starting
+	refuseCPUs  map[int64]bool       // the cards whose Carry always fails before starting, as for more CPUs than the engine has
 	keeps       []seal.Proxy         // the calls of KeepProxy
 	pushes      []string             // the credentials pushed, in order
 	pushFails   bool                 // whether a push fails
@@ -192,7 +193,7 @@ func (e *fakeEngine) Build(_ context.Context, p seal.Program, src io.Reader, out
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{containers: map[string]string{}, carrying: map[int64]int{}, carried: map[int64]int{},
 		gates: map[string]chan struct{}{}, held: map[string]bool{}, fail: map[int64]bool{}, errOnce: map[int64]bool{},
-		refuse: map[int64]bool{}, imageFails: map[string]bool{}, inputs: map[int64]run.Inputs{}, firstTick: -1,
+		refuse: map[int64]bool{}, refuseCPUs: map[int64]bool{}, imageFails: map[string]bool{}, inputs: map[int64]run.Inputs{}, firstTick: -1,
 		reviews: map[int64][]string{}, reviewed: map[string]string{}, saves: map[int64]bool{}, models: map[string]string{},
 		outcomes: map[int64][]string{}, outcome: map[string]string{}, inspected: map[string]int{},
 		startFails: map[int64]int{}, otherInstruction: map[int64]bool{}, docsFail: map[int64]error{},
@@ -424,6 +425,7 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 	errOnce := e.errOnce[card]
 	delete(e.errOnce, card)
 	refuse := e.refuse[card]
+	refuseCPUs := e.refuseCPUs[card]
 	other := e.otherInstruction[card]
 	breakOff := e.breakOff[card]
 	if starting != nil {
@@ -459,6 +461,11 @@ func (e *fakeEngine) Carry(ctx context.Context, in run.Inputs, starting func() e
 		// As Carry refuses a branch that is neither absent nor at the commit,
 		// before anything is made.
 		return run.Verdict{}, errors.New("refused before the start, as the test has it")
+	}
+	if refuseCPUs && starting != nil {
+		// As CreateRun refuses a run of more CPUs than the engine has,
+		// before anything is made.
+		return run.Verdict{}, fmt.Errorf("the run asks for 6 CPUs and the engine has 4, as the test has it: %w", seal.ErrCPUs)
 	}
 	if !there {
 		e.set(in.ID, "created")
@@ -1118,6 +1125,44 @@ func TestFollowersRefusedStart(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestCPUsRefusedSaidOnce has a card whose Carry always fails as for more
+// CPUs than the engine has: the core says so once, not on every tick, and the
+// card waits for a run, while an ordinary refusal beside it is printed on
+// every tick.
+func TestCPUsRefusedSaidOnce(t *testing.T) {
+	b := newBench(t, 2)
+	var cpus, other int64
+	b.with(t, func(s *store.Store) {
+		cpus = b.card(t, s, store.Spec)
+		other = b.card(t, s, store.Spec)
+	})
+	e := newFakeEngine()
+	e.refuseCPUs[cpus] = true
+	e.refuse[other] = true
+	core := b.start(t, e, 2)
+	waitUntil(t, "three refused starts of each card", func() bool {
+		s := e.snapshot()
+		return s.carried[cpus] >= 3 && s.carried[other] >= 3
+	})
+	core.stop(t)
+	out := core.out.String()
+	line := fmt.Sprintf("kiln core: card %d: the run asks for 6 CPUs and the engine has 4, as the test has it: %s\n", cpus, seal.ErrCPUs)
+	if n := strings.Count(out, line); n != 1 {
+		t.Errorf("the core said %q %d times, want once:\n%s", line, n, out)
+	}
+	if n := strings.Count(out, fmt.Sprintf("kiln core: card %d: refused before the start", other)); n < 3 {
+		t.Errorf("the ordinary refusal was printed %d times, want one per start:\n%s", n, out)
+	}
+	if s := e.snapshot(); len(s.started) != 0 {
+		t.Errorf("the runs of cards %v started", s.started)
+	}
+	b.with(t, func(s *store.Store) {
+		if c, err := s.Card(cpus); err != nil || c.State != waiting {
+			t.Errorf("the refused card %d is %+v (%v), want it waiting in spec", cpus, c, err)
+		}
+	})
 }
 
 // TestRunsRefused refuses a limit outside 1 to MaxRuns before anything is

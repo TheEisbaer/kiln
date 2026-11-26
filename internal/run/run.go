@@ -52,6 +52,12 @@ type Inputs struct {
 	Hosts         []string
 	WayOutImage   string
 	WayOutNetwork string
+	// Memory and CPUs are the limits of the run's container, as
+	// seal.CheckLimits takes them; "" and 0 are the seal's defaults. They are
+	// not among the labels a repeat must match: a run keeps the limits its
+	// container was created with. `kiln run` by hand has no flags for them.
+	Memory string
+	CPUs   int
 	// SkipSave leaves step 6 out: no save container, nothing taken into the
 	// instance's copy, and the branch neither created nor moved. The record's
 	// save is "not saved". The tick sets it for a spec run; `kiln run` by hand
@@ -546,7 +552,8 @@ func (r *run) create(ctx context.Context, starting func() error, stored bool, st
 		}
 		if err := seal.CreateRun(ctx, seal.Run{ID: r.ID, Image: r.Image, Proxy: r.Proxy,
 			Command: r.command(), Labels: labels, Instance: r.Instance,
-			Hosts: r.Hosts, WayOutImage: r.WayOutImage, WayOutNetwork: r.WayOutNetwork}); err != nil {
+			Hosts: r.Hosts, WayOutImage: r.WayOutImage, WayOutNetwork: r.WayOutNetwork,
+			Memory: r.Memory, CPUs: r.CPUs}); err != nil {
 			return err
 		}
 		if err := after("create"); err != nil {

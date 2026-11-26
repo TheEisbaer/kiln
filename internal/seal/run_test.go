@@ -222,7 +222,12 @@ func TestRun(t *testing.T) {
 		}
 	})
 
-	t.Run("limits", func(t *testing.T) { assertLimits(t, report) })
+	t.Run("limits", func(t *testing.T) {
+		assertLimits(t, report, true)
+		assertPinned(t, probeRun, "4294967296", 2)
+	})
+
+	t.Run("a run's limits", func(t *testing.T) { testLimits(t, f) })
 
 	t.Run("mounts", func(t *testing.T) {
 		if report.Init == "" {

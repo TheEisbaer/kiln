@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TheEisbaer/kiln/internal/run"
 	"github.com/TheEisbaer/kiln/internal/settings"
 	"github.com/TheEisbaer/kiln/internal/store"
 	"github.com/TheEisbaer/kiln/internal/web"
@@ -87,10 +88,18 @@ func refs(t *testing.T, repo string) string {
 }
 
 // TestCardRunsOnItsRepo builds the spec, implement and review runs of a card
-// of the second repo from that repo's copy, and leaves Kiln's own copy alone.
+// of the second repo from that repo's copy, with its memory and CPUs, and
+// leaves Kiln's own copy alone.
 func TestCardRunsOnItsRepo(t *testing.T) {
 	r := newTwoRepos(t)
 	c, ctx := r.c, t.Context()
+	c.Repos[1].Memory, c.Repos[1].CPUs = "6g", 3
+	limits := func(t *testing.T, stage string, in run.Inputs, memory string, cpus int) {
+		t.Helper()
+		if in.Memory != memory || in.CPUs != cpus {
+			t.Errorf("the %s run has the memory %q and %d CPUs, want %q and %d", stage, in.Memory, in.CPUs, memory, cpus)
+		}
+	}
 	kilnRefs := refs(t, r.kiln.Copy)
 	card := r.card(t, "second")
 	row := func(cd store.Card, commit string) store.RunRow {
@@ -114,6 +123,7 @@ func TestCardRunsOnItsRepo(t *testing.T) {
 		t.Errorf("the spec run's inputs have the repo %s, the hosts %v and the commit %s, want %s, [example.org] and %s",
 			in.Repo, in.Hosts, in.Commit, r.second.Copy, r.secondMain)
 	}
+	limits(t, "spec", in, "6g", 3)
 
 	// The implement run: from the card's branch in the second repo's copy.
 	card = r.approve(t, card, store.Implement)
@@ -123,6 +133,8 @@ func TestCardRunsOnItsRepo(t *testing.T) {
 	}
 	if in, _, err := c.inputs(ctx, row(card, tip), card, false); err != nil || in.Repo != r.second.Copy || in.Hosts != nil || in.Parent != r.secondMain {
 		t.Errorf("the implement run's inputs: %+v, %v; want the parent %s, where the branch left main", in, err, r.secondMain)
+	} else {
+		limits(t, "implement", in, "6g", 3)
 	}
 
 	// The review run: told the diff made in the second repo's copy.
@@ -140,6 +152,15 @@ func TestCardRunsOnItsRepo(t *testing.T) {
 	if told := string(readFile(t, in.Instruction)); !strings.Contains(told, "+A line of the card.") {
 		t.Errorf("the review run is not told the diff of the second repo:\n%s", told)
 	}
+	limits(t, "review", in, "6g", 3)
+
+	// A card of Kiln's own repo, which sets neither, gets the seal's defaults.
+	own := r.card(t, store.KilnRepo)
+	in, _, err = c.inputs(ctx, row(own, r.kilnMain), own, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits(t, "Kiln's spec", in, "", 0)
 
 	if got := refs(t, r.kiln.Copy); got != kilnRefs {
 		t.Errorf("Kiln's own copy has the refs\n%s\nwas\n%s", got, kilnRefs)
