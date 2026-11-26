@@ -26,8 +26,13 @@ import (
 
 // Inputs are what one run is started with.
 type Inputs struct {
-	Repo        string // the instance's copy of the target repo, a bare repo
-	Commit      string // the commit the run starts from
+	Repo   string // the instance's copy of the target repo, a bare repo
+	Commit string // the commit the run starts from
+	// Parent is the commit where the card's branch left main, when it is not
+	// Commit: the baseline in the run's /work gets it as its one parent. It is
+	// not among the labels a repeat must match: a repeat into a container that
+	// is there keeps the parent that container was created with.
+	Parent      string
 	Branch      string // the branch its save goes to
 	ID          string // the run's ID
 	Instruction string // the file of the instruction
@@ -83,6 +88,9 @@ const (
 	labelInstruction = "kiln.instruction" // the instruction's SHA-256
 	labelInstance    = "kiln.instance"    // set by the seal from Inputs.Instance
 	labelHosts       = "kiln.hosts"       // set by the seal from Inputs.Hosts
+	// The parent tree the container's command names, set only when it names
+	// one. It is not matched: a repeat takes it from the container.
+	labelParentTree = "kiln.parent-tree"
 )
 
 // Where Claude Code writes in a run: the documents of a stage (ADR 0038) and
@@ -135,6 +143,7 @@ type run struct {
 	ref         string // refs/heads/<branch>
 	commit      string // the full ID
 	tree        string // the commit's tree
+	parentTree  string // the tree of Parent, empty without one
 	entries     []treeEntry
 	instruction []byte
 	sum         string // the instruction's SHA-256
@@ -169,6 +178,17 @@ func check(ctx context.Context, in Inputs) (*run, error) {
 	if r.tree, err = gitLine(ctx, in.Repo, "rev-parse", "--verify", r.commit+"^{tree}"); err != nil {
 		return nil, err
 	}
+	if in.Parent != "" {
+		parent, err := gitLine(ctx, in.Repo, "rev-parse", "--verify", "--end-of-options", in.Parent+"^{commit}")
+		if err != nil {
+			return nil, fmt.Errorf("the parent commit %q: %w", in.Parent, err)
+		}
+		if parent != r.commit {
+			if r.parentTree, err = gitLine(ctx, in.Repo, "rev-parse", "--verify", parent+"^{tree}"); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if r.entries, err = listTree(ctx, in.Repo, r.commit); err != nil {
 		return nil, err
 	}
@@ -183,6 +203,19 @@ func check(ctx context.Context, in Inputs) (*run, error) {
 	return r, nil
 }
 
+// parentTreeOf checks the parent tree that a container's label names: empty,
+// or a tree in the repo, by its full ID.
+func parentTreeOf(ctx context.Context, repo, label string) (string, error) {
+	if label == "" {
+		return "", nil
+	}
+	tree, err := gitLine(ctx, repo, "rev-parse", "--verify", "--end-of-options", label+"^{tree}")
+	if err != nil || tree != label {
+		return "", fmt.Errorf("the container's parent tree %q is not a tree of the repo: %v", label, err)
+	}
+	return tree, nil
+}
+
 // labels are the labels of the run's container.
 func (r *run) labels() map[string]string {
 	return map[string]string{
@@ -195,9 +228,12 @@ func (r *run) labels() map[string]string {
 }
 
 // command is the run's command, after the image (ADR 0020). The instruction
-// comes on standard input, and the effort is always given (ADR 0030).
+// comes on standard input, and the effort is always given (ADR 0030). The
+// baseline script runs first and takes four arguments, the last of them empty
+// without a parent tree.
 func (r *run) command() []string {
-	return []string{"sh", "-c", `exec claude "$@" < /kiln/instruction.md`, "sh",
+	return []string{"sh", "-c", baselineScript + "exec claude \"$@\" < /kiln/instruction.md\n", "sh",
+		"/work", "/kiln/base.pack", r.tree, r.parentTree,
 		"-p", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", "bypassPermissions",
 		"--model", r.Model, "--effort", r.Effort}
@@ -365,6 +401,11 @@ func carry(ctx context.Context, in Inputs, out, errOut, notes io.Writer, startin
 			}
 			return nil, errors.New(text)
 		}
+		// The command was fixed with the container, so the pack placed
+		// again has to hold the parent tree it names, not today's.
+		if r.parentTree, err = parentTreeOf(ctx, r.Repo, state.Labels[labelParentTree]); err != nil {
+			return nil, err
+		}
 	}
 	status := ""
 	if state != nil {
@@ -499,8 +540,12 @@ func (r *run) create(ctx context.Context, starting func() error, stored bool, st
 			return err
 		}
 	} else {
+		labels := r.labels()
+		if r.parentTree != "" {
+			labels[labelParentTree] = r.parentTree
+		}
 		if err := seal.CreateRun(ctx, seal.Run{ID: r.ID, Image: r.Image, Proxy: r.Proxy,
-			Command: r.command(), Labels: r.labels(), Instance: r.Instance,
+			Command: r.command(), Labels: labels, Instance: r.Instance,
 			Hosts: r.Hosts, WayOutImage: r.WayOutImage, WayOutNetwork: r.WayOutNetwork}); err != nil {
 			return err
 		}
@@ -512,8 +557,16 @@ func (r *run) create(ctx context.Context, starting func() error, stored bool, st
 	// 2: the same files of the same commit, whose labels step 0 checked, are
 	// written again into a container that was placed into before.
 	files, err := placingTar(ctx, r.Repo, r.entries)
+	var base []byte
 	if err == nil {
-		err = seal.PlaceRun(ctx, r.ID, bytes.NewReader(files), r.instruction)
+		trees := []string{r.tree}
+		if r.parentTree != "" {
+			trees = append(trees, r.parentTree)
+		}
+		base, err = basePack(ctx, r.Repo, trees...)
+	}
+	if err == nil {
+		err = seal.PlaceRun(ctx, r.ID, bytes.NewReader(files), r.instruction, base)
 	}
 	if err == nil {
 		err = after("place")

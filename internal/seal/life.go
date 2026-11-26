@@ -18,7 +18,8 @@ import (
 // refused, and nothing is touched.
 
 // What PlaceRun writes into a run's container (ADR 0038): the working tree under
-// /work, and the instruction.
+// /work, the instruction, and the pack of the baseline's trees when there is
+// one.
 const (
 	workDir         = "work"
 	instructionPath = "kiln/instruction.md"
@@ -63,12 +64,13 @@ func existingRun(ctx context.Context, id string) (*foundContainer, error) {
 // directory or a symlink. An absolute name, a name with "..", any other type, a
 // name given twice, and a name under one that is not a directory are refused
 // before anything is copied. The instruction goes to kiln/instruction.md, mode
-// 0644.
+// 0644. A base that is not nil, a pack of the trees that the run's baseline
+// commits are made of, goes to kiln/base.pack, mode 0644, likewise.
 //
 // Everything is copied with one `docker cp --archive`, so nothing else can be
 // placed. It can be repeated on a container that has not started: the same
 // files are written again.
-func PlaceRun(ctx context.Context, id string, files io.Reader, instruction []byte) error {
+func PlaceRun(ctx context.Context, id string, files io.Reader, instruction, base []byte) error {
 	c, err := existingRun(ctx, id)
 	if err != nil {
 		return err
@@ -76,7 +78,7 @@ func PlaceRun(ctx context.Context, id string, files io.Reader, instruction []byt
 	if c.state != "created" {
 		return fmt.Errorf("the container %s has started (it is %s); nothing is placed in it", runName(id), c.state)
 	}
-	archive, err := placing(files, instruction)
+	archive, err := placing(files, instruction, base)
 	if err != nil {
 		return err
 	}
@@ -85,7 +87,7 @@ func PlaceRun(ctx context.Context, id string, files io.Reader, instruction []byt
 }
 
 // placing reads the caller's tar and returns the tar that PlaceRun copies.
-func placing(files io.Reader, instruction []byte) ([]byte, error) {
+func placing(files io.Reader, instruction, base []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	written := map[string]byte{} // a path under work/, "" for work/ itself, by type
@@ -181,6 +183,14 @@ func placing(files io.Reader, instruction []byte) ([]byte, error) {
 	}
 	if _, err := tw.Write(instruction); err != nil {
 		return nil, err
+	}
+	if base != nil {
+		if err := header(basePath, tar.TypeReg, 0o644, int64(len(base)), "", time.Now()); err != nil {
+			return nil, err
+		}
+		if _, err := tw.Write(base); err != nil {
+			return nil, err
+		}
 	}
 	if err := tw.Close(); err != nil {
 		return nil, err

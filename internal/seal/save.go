@@ -31,6 +31,9 @@ const basePath = "kiln/base.pack"
 // to /tmp/out/tree and a pack of the objects <tree> lacks to
 // /tmp/out/objects.pack.
 //
+// Every run has a .git at /work/.git since its baseline is made (internal/run);
+// it is removed like any other .git, and nothing of it is read or saved.
+//
 // The object list goes through a file, not a pipe, so that a failure of
 // rev-list fails the script: sh has no pipefail.
 const saveScript = `set -eu

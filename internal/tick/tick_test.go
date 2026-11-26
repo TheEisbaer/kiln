@@ -552,7 +552,8 @@ func show(d *store.Doc) string {
 // TestInputs checks that a spec run that starts is told the instruction and
 // the card's text, and that a run in flight keeps the file it was started with.
 func TestInputs(t *testing.T) {
-	c := &core{Config: Config{Data: t.TempDir(), Repo: "/repo.git", Image: "kiln-run", Proxy: "kiln-proxy",
+	repo, main := bareRepo(t, map[string]string{"NOTES.md": "# Notes\n"})
+	c := &core{Config: Config{Data: t.TempDir(), Repo: repo, Image: "kiln-run", Proxy: "kiln-proxy",
 		Hosts: []string{"go.dev"}, WayOutImage: "kiln-wayout", WayOutNetwork: "kiln-web"}, instance: "ab12cd34"}
 	s, err := store.Open(filepath.Join(c.Data, "store.db"))
 	if err != nil {
@@ -565,7 +566,7 @@ func TestInputs(t *testing.T) {
 	} else if _, err := s.Move(cd.ID, waiting, store.CauseDeveloper); err != nil {
 		t.Fatal(err)
 	}
-	row := store.RunRow{ID: "ab12cd34-1-1", Card: 1, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}
+	row := store.RunRow{ID: "ab12cd34-1-1", Card: 1, Commit: main, Model: "claude-opus-5-5", Effort: "high"}
 	card := store.Card{ID: 1, Text: "The card's text.", Repo: store.KilnRepo, State: waiting}
 
 	// A run that starts: the instruction, a line ## The card, an empty line and
@@ -583,6 +584,17 @@ func TestInputs(t *testing.T) {
 	}
 	if !in.SkipSave || !reflect.DeepEqual(in.Hosts, c.Hosts) || in.WayOutImage == "" || in.Branch != "kiln/card-1" {
 		t.Errorf("the spec run's inputs are %+v", in)
+	}
+	// A run from main has no parent. A merge base that fails other than by
+	// finding no common ancestor fails the inputs, instead of dropping the
+	// parent.
+	if in.Parent != "" {
+		t.Errorf("a run from main has the parent %q", in.Parent)
+	}
+	unknown := row
+	unknown.ID, unknown.Commit = "ab12cd34-1-9", strings.Repeat("0", 40)
+	if _, _, err := c.inputs(t.Context(), unknown, card, false); err == nil || !strings.Contains(err.Error(), "merge-base") {
+		t.Errorf("a commit merge-base cannot read: want its error, got %v", err)
 	}
 
 	// A run in flight whose file holds another text keeps it: a core rebuilt

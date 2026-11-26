@@ -1744,6 +1744,27 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 		Instance:    c.instance,
 		SkipSave:    !st.save,
 	}
+	// The baseline of the run's /work has a parent where the card's branch
+	// left main, whenever that is not the commit the run starts from.
+	// A repo with no common ancestor has none: the baseline is one commit.
+	// That is merge-base's exit status 1 alone; any other failure is an error,
+	// since a run without the parent would take HEAD for where the branch left
+	// main. Only a run that starts reads it: a run in flight takes the parent
+	// tree from its container's label, or is gone, so a copy that cannot be
+	// read fails it at the run's step 0, as it did before the parent.
+	if !inFlight {
+		base, err := gitLine(ctx, repo.Copy, "merge-base", "HEAD", row.Commit)
+		var exit *exec.ExitError
+		switch {
+		case err == nil:
+			if base != row.Commit {
+				in.Parent = base
+			}
+		case errors.As(err, &exit) && exit.ExitCode() == 1 && ctx.Err() == nil:
+		default:
+			return run.Inputs{}, "", err
+		}
+	}
 	if card.Stage == store.Spec {
 		in.Hosts, in.WayOutImage, in.WayOutNetwork = repo.SpecHosts, c.WayOutImage, c.WayOutNetwork
 	}
