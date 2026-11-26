@@ -464,6 +464,7 @@ A line says what was settled and ends with the date in brackets, for example (20
   - when the string literal `KILN_ENGINE_TESTS` appears anywhere but in the body of a `Test` function of `internal/seal`, `internal/run` or `internal/tick`;
   - when one of those has no engine test;
   - when the engine packages named in `check/in-image` or in the workflow's matrix differ from them (2026-11-25).
+- The toolchain image of Kiln's own repo carries jq 1.8.2 as `/usr/local/bin/jq`: the release's static binary for amd64 or arm64, pinned by the SHA-256 of each file, installed before the Go modules, so that tests that drive jq run in the check and in the runs (2026-11-26).
 
 ## ADR 0047: One repo with one Go module, divided by Kiln's parts, with guardrail files in a few named places
 
