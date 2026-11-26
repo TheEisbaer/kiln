@@ -27,6 +27,13 @@ not read by the check command.
 - **Why this one:** It is the official `golang` image of Docker Hub's library, maintained by the Docker library maintainers (`github.com/docker-library/golang`) with the Go project's own toolchain from go.dev inside; that toolchain builds the core (ADR 0037), and the image is pinned by digest so that a moved tag changes nothing.
 - **Licence:** Go is BSD-3-Clause. The Debian packages in the image carry their own licences; none of them becomes part of Kiln's programs.
 
+### jq
+
+- **For:** Tests of shell commands that parse JSON with `jq`, run in the check and in the runs of this repo: the toolchain image (`images/toolchain/`) carries it as `/usr/local/bin/jq`, and so does the run image built on it.
+- **Looked at:** Debian's `jq` package from the base image's distribution, which is 1.7.1 in trixie, follows the distribution rather than a pin of ours, and needs `apt-get` with the package index at build time; `gojq`, a Go implementation, which would be a Go module and a build of our own for a tool that only tests use.
+- **Why this one:** It is jq's own release: one static binary per platform, with no library to install, and the release's `sha256sum.txt` gives each file's SHA-256. The Dockerfile pins the version and the SHA-256 for amd64 and arm64, so a changed file fails the build, as with Claude Code.
+- **Licence:** MIT. The binary also contains parts under the permissive notices of its `COPYING`: David M. Gay's `dtoa.c` and `g_fmt.c`, `decNumber` under the ICU licence, and code from Heimdal (BSD-3-Clause). It is downloaded into the toolchain image when that is built, and never committed or shipped with Kiln's programs.
+
 ### The checkout action
 
 - **For:** Fetching the pull request's code onto the runner in `.github/workflows/check.yml`.
