@@ -302,7 +302,9 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 	// Approving a spec starts the number of send-backs again (ADR 0054); the
 	// developer's other moves leave it.
 	e := edit{id: id, cause: CauseDeveloper, reason: reason, approved: action == Approve, mark: action == ToHost}
+	var movedFrom State // the state e.next saw, for the correction e.write keeps
 	e.next = func(from State, f Facts) (State, error) {
+		movedFrom = from
 		f.Publishing = o.Publishing
 		for _, m := range moves {
 			if m.action != action || !m.allows(from, f) {
@@ -354,6 +356,18 @@ func (s *Store) DecideWith(id int64, action Action, note string, o Options) (Car
 				return fmt.Errorf("%w: the card has no spec to keep the note with", ErrRefused)
 			}
 			return nil
+		}
+	}
+	if (action == SendBack || action == Again) && note != "" {
+		e.write = func(tx *sql.Tx, card int64) error {
+			if movedFrom.Stage != Implement && movedFrom.Stage != Review {
+				return nil
+			}
+			// No spec, no row: the card is not refused for it.
+			_, err := tx.Exec(`INSERT INTO corrections (card, spec, action, from_stage, from_waits_for, note)
+				SELECT ?, run, ?, ?, ?, ? FROM specs WHERE card = ? AND kind = ? ORDER BY rowid DESC LIMIT 1`,
+				card, action, movedFrom.Stage, movedFrom.WaitsFor, note, card, KindSpec)
+			return err
 		}
 	}
 	c, err := s.change(e)

@@ -193,7 +193,7 @@ func TestMigrateV16(t *testing.T) {
 	}
 	mustCreate(t, s, "the first card")
 	mustCreate(t, s, "the second card")
-	if _, err := s.db.Exec(`ALTER TABLE cards DROP COLUMN work_item; ALTER TABLE publishes DROP COLUMN feedback_since; PRAGMA user_version = 16`); err != nil {
+	if _, err := s.db.Exec(`ALTER TABLE cards DROP COLUMN work_item; ALTER TABLE publishes DROP COLUMN feedback_since; DROP TABLE corrections; PRAGMA user_version = 16`); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()

@@ -301,13 +301,13 @@ func TestCheckFailedRetried(t *testing.T) {
 		told := string(readFile(t, filepath.Join(p.cfg.Data, "instructions", fmt.Sprintf("%s-1-%d.md", p.instance, n))))
 		want := []string{"## The card", "## The approved spec", "## The failed check"}
 		if n == 6 {
-			want = append(want, noteHeading)
+			want = []string{"## The card", "## The approved spec", correctionsHeading, "## The failed check"}
 		}
 		if h := toldParts(t, told, instructions.Implement); !slices.Equal(h, want) || !strings.Contains(told, failedOutput) {
 			t.Errorf("run %d is told the headings %q:\n%s", n, h, told)
 		}
-		if n == 6 && !strings.HasSuffix(told, "Look at the test's log.") {
-			t.Errorf("run %d is told the note not last:\n%s", n, told)
+		if want := "### Note 1 of 1, the newest: implement run again, from implement needing you\n\nLook at the test's log."; n == 6 && !strings.Contains(told, want) {
+			t.Errorf("run %d is not told the note with its move:\n%s", n, told)
 		}
 	}
 }

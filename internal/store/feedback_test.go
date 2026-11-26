@@ -230,7 +230,7 @@ func TestMigrateV17(t *testing.T) {
 	if _, err := s.DecideWith(without, Publish, "", Options{Publishing: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`ALTER TABLE publishes DROP COLUMN feedback_since; PRAGMA user_version = 17`); err != nil {
+	if _, err := s.db.Exec(`ALTER TABLE publishes DROP COLUMN feedback_since; DROP TABLE corrections; PRAGMA user_version = 17`); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()

@@ -22,7 +22,7 @@ import (
 
 // version is the version of the store's shape, kept in the file's
 // PRAGMA user_version. 0 is a file with nothing in it (ADR 0036).
-const version = 18
+const version = 19
 
 // KilnRepo is the name of the one repo of an instance started from its flags,
 // and of every card written before version 16 (ADR 0025).
@@ -387,6 +387,90 @@ ALTER TABLE entries ADD COLUMN proposal INTEGER;`)
 		_, err := tx.Exec(`UPDATE publishes SET feedback_since = ? WHERE address IS NOT NULL`, time.Now().UTC().Format(time.RFC3339Nano))
 		return err
 	},
+	// 18 to 19: the developer's notes since a card's approval, one row each
+	// (ADR 0042, rule 3). The cards that were there get theirs from their
+	// entries, once: the notes of the developer's moves from implement or
+	// review to a run of either, after the card's last approval, tied to the
+	// run of its newest spec.
+	func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE corrections (
+	id INTEGER PRIMARY KEY,
+	card INTEGER NOT NULL,
+	spec TEXT NOT NULL,
+	action TEXT NOT NULL,
+	from_stage TEXT NOT NULL,
+	from_waits_for TEXT NOT NULL,
+	note TEXT NOT NULL
+) STRICT`); err != nil {
+			return err
+		}
+		return backfillCorrections(tx)
+	},
+}
+
+// pendingCorrection is a note found in the history by backfillCorrections.
+type pendingCorrection struct {
+	action Action
+	from   State
+	note   string
+}
+
+// backfillCorrections fills corrections from the entries of the cards there
+// are, as migration 18 to 19 (the only place that reads the history for it).
+func backfillCorrections(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT card, cause, stage, waits_for, reason FROM entries
+		WHERE proposal IS NULL ORDER BY card, number`)
+	if err != nil {
+		return err
+	}
+	pending := map[int64][]pendingCorrection{}
+	var order []int64
+	prev := map[int64]State{}
+	for rows.Next() {
+		var card int64
+		var cause string
+		var st State
+		var reason sql.NullString
+		if err := rows.Scan(&card, &cause, &st.Stage, &st.WaitsFor, &reason); err != nil {
+			rows.Close()
+			return err
+		}
+		p, had := prev[card]
+		prev[card] = st
+		if !had {
+			order = append(order, card)
+			continue
+		}
+		if cause != string(CauseDeveloper) {
+			continue
+		}
+		switch {
+		case st.Stage == Spec || (p == State{Spec, Approval} && st == State{Implement, Run}):
+			pending[card] = nil
+		case reason.String != "" && (p.Stage == Implement || p.Stage == Review) &&
+			(st == State{Implement, Run} || st == State{Review, Run}):
+			a := SendBack
+			if p.Stage == st.Stage {
+				a = Again
+			}
+			pending[card] = append(pending[card], pendingCorrection{a, p, reason.String})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, card := range order {
+		for _, c := range pending[card] {
+			if _, err := tx.Exec(`INSERT INTO corrections (card, spec, action, from_stage, from_waits_for, note)
+				SELECT ?, run, ?, ?, ?, ? FROM specs WHERE card = ? AND kind = ? ORDER BY rowid DESC LIMIT 1`,
+				card, c.action, c.from.Stage, c.from.WaitsFor, c.note, card, KindSpec); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // afterMigration, set only by the test, is called when the store has been moved
@@ -1124,7 +1208,9 @@ func (s *Store) Retrying(card int64) (first string, retrying bool, err error) {
 // developer's; "" otherwise. The rule's entries after a failed or a refused
 // run are passed over, each with the run's entry just before it, so that a
 // retry and a run after a refusal are told what the first run was told. An
-// entry about a proposal is passed over.
+// entry about a proposal is passed over. Only a spec run's instruction uses it:
+// an implement run and a review run are told the developer's notes through
+// Corrections.
 func (s *Store) Note(card int64) (string, error) {
 	rows, err := s.db.Query(`SELECT cause, stage, waits_for, run, reason FROM entries
 		WHERE card = ? AND proposal IS NULL ORDER BY number DESC`, card)
@@ -1161,6 +1247,38 @@ func (s *Store) Note(card int64) (string, error) {
 		return "", fmt.Errorf("%w %d", ErrNoCard, card)
 	}
 	return "", nil
+}
+
+// Correction is a note the developer gave with a move from implement or
+// review since the card's spec was approved: the move and the state it was
+// made from.
+type Correction struct {
+	Action Action
+	From   State
+	Note   string
+}
+
+// Corrections reads the notes the developer gave on a card since its newest
+// spec was approved, oldest first; none when there are none or the card has no
+// spec. They are state, written with the move (ADR 0042, rule 3): no entry is
+// read.
+func (s *Store) Corrections(card int64) ([]Correction, error) {
+	rows, err := s.db.Query(`SELECT action, from_stage, from_waits_for, note FROM corrections
+		WHERE card = ? AND spec = (SELECT run FROM specs WHERE card = ? AND kind = ? ORDER BY rowid DESC LIMIT 1)
+		ORDER BY id`, card, card, KindSpec)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []Correction
+	for rows.Next() {
+		var c Correction
+		if err := rows.Scan(&c.Action, &c.From.Stage, &c.From.WaitsFor, &c.Note); err != nil {
+			return nil, err
+		}
+		list = append(list, c)
+	}
+	return list, rows.Err()
 }
 
 // Spec reads the newest spec of a card, the one written last, with its run's
