@@ -172,7 +172,7 @@ ALTER TABLE entries DROP COLUMN proposal;
 ALTER TABLE cards DROP COLUMN fixes;
 ALTER TABLE cards DROP COLUMN work_item;
 ALTER TABLE cards DROP COLUMN repo;
-ALTER TABLE publishes DROP COLUMN feedback_since;
+ALTER TABLE publishes DROP COLUMN feedback_since; DROP TABLE corrections;
 PRAGMA user_version = 11`); err != nil {
 		t.Fatal(err)
 	}

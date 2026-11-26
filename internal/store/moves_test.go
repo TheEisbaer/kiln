@@ -419,3 +419,108 @@ func TestApproveNote(t *testing.T) {
 		t.Errorf("Newest = %+v, %v; it does not read the note", d, err)
 	}
 }
+
+// approvedCard makes a card with a spec of the run id, approved, and moved to
+// the state to.
+func approvedCard(t *testing.T, s *Store, id string, to State) Card {
+	t.Helper()
+	card := mustCreate(t, s, "a card")
+	if _, err := s.Move(card.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
+	mustAddRun(t, s, theRun(card.ID, id))
+	if _, err := s.EndRun(id, Finished, "", State{Spec, Approval}, Cost{}, specDoc("spec "+id)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(card.ID, Approve, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Move(card.ID, to, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	return card
+}
+
+// TestCorrections: a send-back or an again with a note from implement or
+// review writes a row with the newest spec's run; no other move does, and a
+// refused one writes nothing.
+func TestCorrections(t *testing.T) {
+	s := open(t)
+	card := approvedCard(t, s, "r1", State{Review, Developer})
+	list := func() []Correction {
+		t.Helper()
+		l, err := s.Corrections(card.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	if len(list()) != 0 {
+		t.Fatalf("corrections before any move: %+v", list())
+	}
+	// A move without a note, and a refused one, write none.
+	if _, err := s.Decide(card.ID, Again, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(card.ID, SendBack, "refused: a run is awaited"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("a send-back from review waiting for a run: %v", err)
+	}
+	if len(list()) != 0 {
+		t.Fatalf("corrections after a move without a note and a refused one: %+v", list())
+	}
+	if _, err := s.Move(card.ID, State{Review, Developer}, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(card.ID, SendBack, " Note A. "); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Move(card.ID, State{Implement, Developer}, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(card.ID, Again, "Note B."); err != nil {
+		t.Fatal(err)
+	}
+	want := []Correction{
+		{SendBack, State{Review, Developer}, "Note A."},
+		{Again, State{Implement, Developer}, "Note B."},
+	}
+	if got := list(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Corrections = %+v, want %+v", got, want)
+	}
+	// A drop with a note writes none.
+	if _, err := s.Decide(card.ID, Drop, "no more"); err != nil {
+		t.Fatal(err)
+	}
+	if got := list(); len(got) != 2 {
+		t.Errorf("after a drop: %+v", got)
+	}
+}
+
+// TestCorrectionsSpec: an again with a note from a spec writes none, and a new
+// spec ends the notes.
+func TestCorrectionsSpec(t *testing.T) {
+	s := open(t)
+	card := approvedCard(t, s, "r1", State{Review, Developer})
+	if _, err := s.Decide(card.ID, SendBack, "Note A."); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := s.Corrections(card.ID); err != nil || len(l) != 1 {
+		t.Fatalf("Corrections = %+v, %v", l, err)
+	}
+	if _, err := s.Move(card.ID, State{Spec, Approval}, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(card.ID, Again, "Spec note."); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := s.Corrections(card.ID); err != nil || len(l) != 1 {
+		t.Fatalf("an again from spec wrote a row: %+v, %v", l, err)
+	}
+	mustAddRun(t, s, theRun(card.ID, "r2"))
+	if _, err := s.EndRun("r2", Finished, "", State{Spec, Approval}, Cost{}, specDoc("spec r2")); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := s.Corrections(card.ID); err != nil || len(l) != 0 {
+		t.Errorf("after a new spec: %+v, %v", l, err)
+	}
+}

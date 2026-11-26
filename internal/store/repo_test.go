@@ -20,7 +20,7 @@ func makeV15(t *testing.T) string {
 	mustCreate(t, s, "the second card")
 	if _, err := s.db.Exec(`ALTER TABLE cards DROP COLUMN work_item;
 ALTER TABLE cards DROP COLUMN repo;
-ALTER TABLE publishes DROP COLUMN feedback_since;
+ALTER TABLE publishes DROP COLUMN feedback_since; DROP TABLE corrections;
 PRAGMA user_version = 15`); err != nil {
 		t.Fatal(err)
 	}

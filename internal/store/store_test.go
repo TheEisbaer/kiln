@@ -246,16 +246,16 @@ func TestNewerStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("PRAGMA user_version = 19"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 20"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 
 	_, err = Open(path)
 	if err == nil {
-		t.Fatal("a store of version 19 was opened")
+		t.Fatal("a store of version 20 was opened")
 	}
-	if msg := err.Error(); !strings.Contains(msg, "version 19") || !strings.Contains(msg, "version 18") {
+	if msg := err.Error(); !strings.Contains(msg, "version 20") || !strings.Contains(msg, "version 19") {
 		t.Errorf("the message %q does not name both versions", msg)
 	}
 
@@ -271,8 +271,8 @@ func TestNewerStore(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if v != 19 || tables != 0 {
-		t.Errorf("after the refusal: version %d with %d tables, want 19 and 0", v, tables)
+	if v != 20 || tables != 0 {
+		t.Errorf("after the refusal: version %d with %d tables, want 20 and 0", v, tables)
 	}
 }
 
@@ -854,7 +854,7 @@ func TestMigrateV2(t *testing.T) {
 				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") && !strings.HasPrefix(line, "runs | ") &&
 				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") &&
 				!strings.HasPrefix(line, "instance | ") && !strings.HasPrefix(line, "instance_entries | ") &&
-				!strings.HasPrefix(line, "predecessors | ") && !strings.HasPrefix(line, "sqlite_autoindex_predecessors_1 | ") {
+				!strings.HasPrefix(line, "predecessors | ") && !strings.HasPrefix(line, "corrections | ") && !strings.HasPrefix(line, "sqlite_autoindex_predecessors_1 | ") {
 				out = append(out, line)
 			}
 		}
@@ -1005,7 +1005,7 @@ func TestMigrateV3(t *testing.T) {
 			if !strings.HasPrefix(line, "version ") && !strings.HasPrefix(line, "specs | ") && !strings.HasPrefix(line, "runs | ") &&
 				!strings.HasPrefix(line, "cards | ") && !strings.HasPrefix(line, "publishes | ") &&
 				!strings.HasPrefix(line, "instance | ") && !strings.HasPrefix(line, "instance_entries | ") &&
-				!strings.HasPrefix(line, "predecessors | ") && !strings.HasPrefix(line, "sqlite_autoindex_predecessors_1 | ") &&
+				!strings.HasPrefix(line, "predecessors | ") && !strings.HasPrefix(line, "corrections | ") && !strings.HasPrefix(line, "sqlite_autoindex_predecessors_1 | ") &&
 				!strings.HasPrefix(line, "sqlite_autoindex_specs_1 | ") {
 				out = append(out, line)
 			}
@@ -1197,8 +1197,8 @@ func userVersion(t *testing.T, s *Store) int {
 func TestMigrate(t *testing.T) {
 	path := makeV1(t)
 	s := reopen(t, path)
-	if v := userVersion(t, s); v != version || version != 18 {
-		t.Fatalf("the store is version %d after Open, want 18", v)
+	if v := userVersion(t, s); v != version || version != 19 {
+		t.Fatalf("the store is version %d after Open, want 19", v)
 	}
 	// What version 1 held is still there, and has no run or reason, and no
 	// send-back.
@@ -1273,7 +1273,7 @@ ALTER TABLE entries DROP COLUMN proposal;
 ALTER TABLE cards DROP COLUMN fixes;
 ALTER TABLE cards DROP COLUMN work_item;
 ALTER TABLE cards DROP COLUMN repo;
-ALTER TABLE publishes DROP COLUMN feedback_since;
+ALTER TABLE publishes DROP COLUMN feedback_since; DROP TABLE corrections;
 PRAGMA user_version = 9`); err != nil {
 		t.Fatal(err)
 	}
@@ -2083,5 +2083,100 @@ func TestCopyAndClose(t *testing.T) {
 	}
 	if _, err := s.Create("after a failed copy"); err == nil {
 		t.Error("the store was not closed after a failed copy")
+	}
+}
+
+// TestMigrateV18 moves a store of version 18 forward: the notes the developer
+// gave after a card's last approval are filled from its entries, and a kill in
+// the move leaves version 18.
+func TestMigrateV18(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Card 1: approved, sent back with A, then an again from implement with B.
+	c1 := approvedCard(t, s, "r1", State{Review, Developer})
+	mustDecide := func(id int64, a Action, note string) {
+		t.Helper()
+		if _, err := s.Decide(id, a, note); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustDecide(c1.ID, SendBack, "A")
+	if _, err := s.Move(c1.ID, State{Implement, Developer}, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	mustDecide(c1.ID, Again, "B")
+	// Card 2: an again note on its spec before the approval.
+	c2 := mustCreate(t, s, "second")
+	if _, err := s.Move(c2.ID, State{Spec, Run}, CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
+	mustAddRun(t, s, theRun(c2.ID, "r2"))
+	if _, err := s.EndRun("r2", Finished, "", State{Spec, Approval}, Cost{}, specDoc("spec r2")); err != nil {
+		t.Fatal(err)
+	}
+	mustDecide(c2.ID, Again, "before the approval")
+	mustAddRun(t, s, theRun(c2.ID, "r2b"))
+	if _, err := s.EndRun("r2b", Finished, "", State{Spec, Approval}, Cost{}, specDoc("spec r2b")); err != nil {
+		t.Fatal(err)
+	}
+	mustDecide(c2.ID, Approve, "")
+	// Card 3: approved, sent back with C, then sent to spec.
+	c3 := approvedCard(t, s, "r3", State{Review, Developer})
+	mustDecide(c3.ID, SendBack, "C")
+	if _, err := s.Move(c3.ID, State{Implement, Developer}, CauseRun); err != nil {
+		t.Fatal(err)
+	}
+	mustDecide(c3.ID, ToSpec, "")
+
+	// Back to version 18: no table.
+	if _, err := s.db.Exec(`DROP TABLE corrections; PRAGMA user_version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	before := dump(t, path)
+
+	func() {
+		defer func() { afterMigration = nil }()
+		afterMigration = func() { panic("killed") }
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("the move forward was not stopped")
+			}
+		}()
+		Open(path)
+	}()
+	if got := dump(t, path); got != before || !strings.HasPrefix(got, "version 18\n") {
+		t.Fatalf("after a kill the store is\n%s\nwas\n%s", got, before)
+	}
+
+	s = reopen(t, path)
+	if v := userVersion(t, s); v != 19 {
+		t.Fatalf("the store is version %d, want 19", v)
+	}
+	got, err := s.Corrections(c1.ID)
+	want := []Correction{
+		{SendBack, State{Review, Developer}, "A"},
+		{Again, State{Implement, Developer}, "B"},
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("card 1: %+v, %v; want %+v", got, err, want)
+	}
+	if got, err := s.Corrections(c2.ID); err != nil || len(got) != 0 {
+		t.Errorf("card 2: %+v, %v", got, err)
+	}
+	// Card 3 went back to spec, which ends its notes.
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM corrections WHERE card = ?`, c3.ID).Scan(&n); err != nil || n != 0 {
+		t.Errorf("card 3's rows: %d, %v", n, err)
+	}
+	mustAddRun(t, s, theRun(c3.ID, "r3b"))
+	if _, err := s.EndRun("r3b", Finished, "", State{Spec, Approval}, Cost{}, specDoc("spec r3b")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Corrections(c3.ID); err != nil || len(got) != 0 {
+		t.Errorf("card 3 after a new spec: %+v, %v", got, err)
 	}
 }
