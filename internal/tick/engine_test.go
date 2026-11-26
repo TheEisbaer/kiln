@@ -52,6 +52,9 @@ const (
 	// alwaysBackWord makes every review of the card go back.
 	alwaysBackWord = "kiln-stand-in-alwaysback"
 	noChangeWord   = "kiln-stand-in-nochange"
+	// configWord makes implement runs change the repo's Claude Code
+	// configuration (testdata/claude/claude).
+	configWord = "kiln-stand-in-config"
 )
 
 // The spec the stand-in writes with kiln-stand-in-escape.
@@ -830,11 +833,26 @@ echo "https://git.example/pull/$KILN_CARD"`
 	t.Run("a review that sends the change back", func(t *testing.T) {
 		t.Parallel()
 		c := f.newCase(t, f.standIn)
+		mainTrees := watchMainTrees(t, c)
 		f.card(t, c, "Add a line to NOTES.md. kiln-case-back "+goesBackWord)
 		f.specAndApprove(t, c)
 		core, done := f.core(t, c, "")
 		f.waitState(t, c, reviewPassed, 5)
 		f.stop(t, core, done)
+
+		// A card that changes no configuration is laid over in no run
+		// (ADR 0025): no /kiln/card-config, no part on it, no label.
+		for n := 2; n <= 5; n++ {
+			if seen := f.seen(t, c, n); !strings.HasSuffix(seen, "== card-config absent\n") {
+				t.Errorf("run %d saw\n%s", n, seen)
+			}
+			if strings.Contains(string(readFile(t, c.instructionOf(n))), "## The repo's Claude Code configuration") {
+				t.Errorf("run %d was told of the configuration", n)
+			}
+		}
+		if got := mainTrees.laidOver(); len(got) > 0 {
+			t.Errorf("containers with the label kiln.main-tree: %q", got)
+		}
 
 		tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/developer by run",
 			"implement/run by rule", "review/run by run", "review/approval by run"},
@@ -871,6 +889,74 @@ echo "https://git.example/pull/$KILN_CARD"`
 		}
 		if strings.Contains(string(readFile(t, c.instructionOf(2))), "## The last review") {
 			t.Error("the first implement run was told a review")
+		}
+	})
+
+	// A card whose branch changes the repo's Claude Code configuration, through
+	// a review that sends it back: the review run and the second implement run
+	// work under main's version (ADR 0025, rule 2), and the branch keeps the
+	// card's, with the fix the second implement run made in /kiln/card-config.
+	t.Run("a card that changes the repo's Claude Code configuration", func(t *testing.T) {
+		t.Parallel()
+		c := f.newCase(t, f.standIn)
+		mainFiles := map[string]string{
+			"CLAUDE.md":              "# Try\n\nThe marker is " + f.marker + ".\n",
+			"NOTES.md":               "# Notes\n",
+			"run.sh":                 "set -eu\nprintf 'A line from the run.\\n' >> NOTES.md\necho checked\n",
+			"pkg/AGENTS.md":          "Main's AGENTS.md.\n",
+			".claude/hooks/check.sh": "Main's hook.\n",
+			".claude/hooks/gone.sh":  "Main's other hook.\n",
+		}
+		c.repo, c.commit = bareRepo(t, mainFiles)
+		c.refs, c.objects = copyHolds(t, c.repo)
+		mainTrees := watchMainTrees(t, c)
+		f.card(t, c, "Add a line to NOTES.md. kiln-case-config "+goesBackWord+" "+configWord)
+		f.specAndApprove(t, c)
+		core, done := f.core(t, c, "")
+		f.waitState(t, c, reviewPassed, 5)
+		f.stop(t, core, done)
+
+		tip := f.assertLoop(t, c, []string{"implement/run by developer", "review/run by run", "review/developer by run",
+			"implement/run by rule", "review/run by run", "review/approval by run"},
+			[]string{"spec 1", "report 2", "pull-request 2", "review 3", "report 4", "pull-request 4", "review 5"})
+
+		// The first implement run starts from main and is not laid over; the
+		// review and the second implement run see main's configuration.
+		if seen := f.seen(t, c, 2); !strings.HasSuffix(seen, "== card-config absent\n") {
+			t.Errorf("the first implement run saw\n%s", seen)
+		}
+		wantSeen := "== CLAUDE.md\n" + mainFiles["CLAUDE.md"] + "== pkg/AGENTS.md\n" + mainFiles["pkg/AGENTS.md"] +
+			"== .claude/hooks/check.sh\n" + mainFiles[".claude/hooks/check.sh"] +
+			"== .claude\n.claude\n.claude/hooks\n.claude/hooks/check.sh\n.claude/hooks/gone.sh\n== card-config present\n"
+		list := "```text\nM\t.claude/hooks/check.sh\nD\t.claude/hooks/gone.sh\nA\t.claude/skills/new/SKILL.md\nM\tCLAUDE.md\nM\tpkg/AGENTS.md\n```\n"
+		for _, n := range []int{3, 4, 5} {
+			if seen := f.seen(t, c, n); seen != wantSeen {
+				t.Errorf("run %d saw\n%s\nwant\n%s", n, seen, wantSeen)
+			}
+			told := string(readFile(t, c.instructionOf(n)))
+			if !strings.Contains(told, "\n## The repo's Claude Code configuration\n\n") || !strings.Contains(told, list) {
+				t.Errorf("run %d was told\n%s\nwant the configuration's part with\n%s", n, told, list)
+			}
+		}
+		if got := mainTrees.laidOver(); !slices.Equal(got, []string{"kiln-run-" + c.runOf(3), "kiln-run-" + c.runOf(4), "kiln-run-" + c.runOf(5)}) {
+			t.Errorf("the laid-over containers are %q, want those of runs 3 to 5", got)
+		}
+
+		// The branch keeps the card's configuration, with the fix made in
+		// /kiln/card-config and without the change made in /work.
+		for path, want := range map[string]string{
+			"CLAUDE.md":                   "The card's CLAUDE.md.\nA fix of the configuration.",
+			"pkg/AGENTS.md":               "The card's AGENTS.md.",
+			".claude/hooks/check.sh":      "The card's hook.",
+			".claude/skills/new/SKILL.md": "The card's skill.",
+			"NOTES.md":                    "# Notes\nA line from the implement run.\nA fix after the review.",
+		} {
+			if got := gitIn(t, c.repo, "show", tip+":"+path); got != want {
+				t.Errorf("%s on the branch is %q, want %q", path, got, want)
+			}
+		}
+		if files := gitIn(t, c.repo, "ls-tree", "-r", "--name-only", tip); strings.Contains(files, "gone.sh") {
+			t.Errorf("the branch has the removed hook:\n%s", files)
 		}
 	})
 
@@ -2109,6 +2195,48 @@ func watchEvents(t *testing.T, filter, event string, since time.Time) *lines {
 	}
 	t.Cleanup(func() { cancel(); cmd.Wait() })
 	return l
+}
+
+// seen is what the stand-in saw of the repo's Claude Code configuration in
+// the nth run of card 1, from its record.
+func (f *fixture) seen(t *testing.T, c *testCase, n int) string {
+	t.Helper()
+	return readTarEntry(t, filepath.Join(c.data, "runs", c.runOf(n), "documents.tar"), "out/seen.txt")
+}
+
+// mainTrees follows the starts of an instance's run containers with their
+// label kiln.main-tree, as "<name>=<label>".
+type mainTrees struct{ *lines }
+
+// watchMainTrees follows a case's run containers from now on.
+func watchMainTrees(t *testing.T, c *testCase) mainTrees {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	l := &lines{}
+	cmd := exec.CommandContext(ctx, "docker", "events", "--since", strconv.FormatInt(time.Now().Add(-5*time.Second).Unix(), 10),
+		"--filter", "type=container", "--filter", "label=kiln.instance="+c.instance, "--filter", "event=start",
+		"--format", `{{.Actor.Attributes.name}}={{index .Actor.Attributes "kiln.main-tree"}}`)
+	cmd.Stdout = l
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel(); cmd.Wait() })
+	return mainTrees{l}
+}
+
+// laidOver are the names of the run containers that started with the label,
+// in order.
+func (m mainTrees) laidOver() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var names []string
+	for _, line := range strings.Fields(m.buf.String()) {
+		if name, tree, _ := strings.Cut(line, "="); strings.HasPrefix(name, "kiln-run-") && tree != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // removeInstance removes whatever of an instance is left on the engine, for a

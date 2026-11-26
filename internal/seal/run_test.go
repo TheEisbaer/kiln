@@ -547,6 +547,10 @@ func TestRun(t *testing.T) {
 		t.Parallel()
 		testSave(t, f)
 	})
+	t.Run("the save of a laid-over run", func(t *testing.T) {
+		t.Parallel()
+		testConfigSave(t, f)
+	})
 	t.Run("RemoveRun", func(t *testing.T) {
 		t.Parallel()
 		testRemoveRun(t, f)
@@ -734,7 +738,7 @@ func runProbe(t *testing.T, probe []byte, id string, config probeConfig, extra .
 		file(strings.TrimPrefix(probePath, "/work/"), 0o755, string(probe)),
 		file(strings.TrimPrefix(probeConfigPath, "/work/"), 0o644, string(configJSON)),
 	}, extra...)
-	if err := PlaceRun(t.Context(), id, bytes.NewReader(tarOf(t, entries...)), []byte(probeInstruction), nil); err != nil {
+	if err := PlaceRun(t.Context(), id, bytes.NewReader(tarOf(t, entries...)), nil, []byte(probeInstruction), nil); err != nil {
 		t.Fatal(err)
 	}
 	diff := must(t, "diff", runName(id))

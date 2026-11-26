@@ -52,10 +52,54 @@ git pack-objects --quiet --stdout < /tmp/objects > /tmp/out/objects.pack
 printf '%s\n' "$new" > /tmp/out/tree
 `
 
+// configSaveScript is the save container's command for a laid-over run, run
+// as `sh -c configSaveScript sh <tree> <pathspec>...`. It is saveScript, but
+// the configuration, the paths the pathspecs match, comes from
+// /kiln/card-config and everything else from /work: it adds /work outside
+// them on top of <tree>, removes every entry they match, and adds every file
+// under /kiln/card-config that they match, ignored or not. Every .git under
+// either directory is removed first. Every pathspec starts with ":(", so that
+// its exclude is ":(exclude," and the rest.
+const configSaveScript = `set -eu
+tree=$1
+shift
+export GIT_DIR=/tmp/save.git GIT_INDEX_FILE=/tmp/save.index
+git init --quiet --bare "$GIT_DIR"
+git index-pack --stdin < /kiln/base.pack > /dev/null
+chmod -R u+rwX /work /kiln/card-config
+find /work /kiln/card-config -name .git -prune -exec rm -rf {} +
+git read-tree "$tree"
+outside() {
+	for p; do
+		set -- "$@" ":(exclude,${p#:(}"
+		shift
+	done
+	git --work-tree=/work add -A -- . "$@"
+}
+cd /work
+outside "$@"
+git --work-tree=/work ls-files -z -- "$@" > /tmp/config
+git --work-tree=/work update-index -z --force-remove --stdin < /tmp/config
+cd /kiln/card-config
+git --work-tree=/kiln/card-config ls-files -z --others -- "$@" > /tmp/config
+git --work-tree=/kiln/card-config update-index -z --add --stdin < /tmp/config
+cd /
+new=$(git write-tree)
+mkdir /tmp/out
+git rev-list --objects "$new" --not "$tree" > /tmp/objects
+git pack-objects --quiet --stdout < /tmp/objects > /tmp/out/objects.pack
+printf '%s\n' "$new" > /tmp/out/tree
+`
+
 // SaveRun takes the working tree of a run's container that has stopped and
 // returns it as a Git tree on top of tree: the new tree's ID, and a pack of
 // the objects that tree lacks. base is a pack of tree's objects, as `git
 // rev-list --objects <tree> | git pack-objects --stdout` makes it.
+//
+// pathspecs, when they are not nil, are a laid-over run's configuration paths
+// (ADR 0025): the configuration is then taken from the run's
+// /kiln/card-config and everything else from /work (configSaveScript). Each
+// starts with ":(". With nil, the save is of /work alone (saveScript).
 //
 // The work is done in a save container, kiln-save-<id>, with no network, from
 // the run image, so that nothing of the run's tree is unpacked on the host:
@@ -63,16 +107,26 @@ printf '%s\n' "$new" > /tmp/out/tree
 //  1. A save container left behind with the label kiln.run=<id> is removed.
 //     One without it is refused, and nothing is touched.
 //  2. It creates the save container fresh, with saveScript as its command.
-//  3. It copies in kiln/base.pack, and pipes the run's /work into it; the host
-//     only passes the bytes on.
+//  3. It copies in kiln/base.pack, and pipes the run's /work into it, and with
+//     pathspecs its /kiln/card-config as well; the host only passes the bytes
+//     on.
 //  4. It starts the save container, waits for it, and reads /tmp/out.
 //
 // The save container is removed afterwards, after success or failure, on a
 // context that cannot be cancelled. SaveRun can be repeated: the same tree
 // gives the same result.
-func SaveRun(ctx context.Context, id, image, tree string, base []byte) (newTree string, pack []byte, err error) {
+func SaveRun(ctx context.Context, id, image, tree string, base []byte, pathspecs []string) (newTree string, pack []byte, err error) {
 	if !objectID.MatchString(tree) {
 		return "", nil, fmt.Errorf("the tree %q is not an object ID", tree)
+	}
+	command := []string{"sh", "-c", saveScript, "sh", tree}
+	if pathspecs != nil {
+		for _, p := range pathspecs {
+			if !strings.HasPrefix(p, ":(") || strings.ContainsRune(p, 0) {
+				return "", nil, fmt.Errorf("the pathspec %q does not start with :(", p)
+			}
+		}
+		command = append([]string{"sh", "-c", configSaveScript, "sh", tree}, pathspecs...)
 	}
 	run, err := existingRun(ctx, id)
 	if err != nil {
@@ -96,7 +150,7 @@ func SaveRun(ctx context.Context, id, image, tree string, base []byte) (newTree 
 		}
 	}
 
-	save, err := createSave(ctx, id, image, []string{"sh", "-c", saveScript, "sh", tree})
+	save, err := createSave(ctx, id, image, command)
 	if err != nil {
 		return "", nil, err // createSave leaves nothing behind
 	}
@@ -116,6 +170,12 @@ func SaveRun(ctx context.Context, id, image, tree string, base []byte) (newTree 
 	}
 	if err := copyBetween(ctx, run.id+":/"+workDir, save+":/"); err != nil {
 		return "", nil, err
+	}
+	// After the base, whose kiln/ it goes into.
+	if pathspecs != nil {
+		if err := copyBetween(ctx, run.id+":/"+cardConfigDir, save+":/kiln/"); err != nil {
+			return "", nil, err
+		}
 	}
 
 	if _, err := docker(ctx, nil, "start", save); err != nil {

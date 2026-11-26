@@ -32,7 +32,14 @@ type Inputs struct {
 	// Commit: the baseline in the run's /work gets it as its one parent. It is
 	// not among the labels a repeat must match: a repeat into a container that
 	// is there keeps the parent that container was created with.
-	Parent      string
+	Parent string
+	// Main is the head of main when the run starts. A run whose commit
+	// differs from it in a configuration path (ConfigPathspecs) is laid over
+	// (ADR 0025, rule 2); with none, nothing is. It is not among the labels a
+	// repeat must match: a repeat into a container that is there keeps the
+	// main tree that container was created with, or none. `kiln run` by hand
+	// gives none.
+	Main        string
 	Branch      string // the branch its save goes to
 	ID          string // the run's ID
 	Instruction string // the file of the instruction
@@ -102,6 +109,9 @@ const (
 	// The parent tree the container's command names, set only when it names
 	// one. It is not matched: a repeat takes it from the container.
 	labelParentTree = "kiln.parent-tree"
+	// Main's tree, set only on a laid-over run. It is not matched either: a
+	// repeat and the save take it from the container.
+	labelMainTree = "kiln.main-tree"
 )
 
 // Where Claude Code writes in a run: the documents of a stage (ADR 0038) and
@@ -151,14 +161,19 @@ func checkFlags(in Inputs) error {
 // run is one run, with its inputs checked.
 type run struct {
 	Inputs
-	ref         string // refs/heads/<branch>
-	commit      string // the full ID
-	tree        string // the commit's tree
-	parentTree  string // the tree of Parent, empty without one
-	entries     []treeEntry
-	instruction []byte
-	sum         string // the instruction's SHA-256
-	out, errOut io.Writer
+	ref        string // refs/heads/<branch>
+	commit     string // the full ID
+	tree       string // the commit's tree
+	parentTree string // the tree of Parent, empty without one
+	entries    []treeEntry
+	// For a laid-over run (layOver): main's tree, the trees /work and its
+	// baseline are made of, the entries of the work tree, and the card's
+	// configuration entries. mainTree is empty for any other run.
+	mainTree, workTree, workParentTree string
+	workEntries, cardConfig            []treeEntry
+	instruction                        []byte
+	sum                                string // the instruction's SHA-256
+	out, errOut                        io.Writer
 }
 
 // check judges every input and resolves the commit. It makes nothing.
@@ -217,12 +232,18 @@ func check(ctx context.Context, in Inputs) (*run, error) {
 // parentTreeOf checks the parent tree that a container's label names: empty,
 // or a tree in the repo, by its full ID.
 func parentTreeOf(ctx context.Context, repo, label string) (string, error) {
+	return labelTree(ctx, repo, "parent tree", label)
+}
+
+// labelTree checks a tree that a container's label names, as parentTreeOf
+// does; what names the label in the error.
+func labelTree(ctx context.Context, repo, what, label string) (string, error) {
 	if label == "" {
 		return "", nil
 	}
 	tree, err := gitLine(ctx, repo, "rev-parse", "--verify", "--end-of-options", label+"^{tree}")
 	if err != nil || tree != label {
-		return "", fmt.Errorf("the container's parent tree %q is not a tree of the repo: %v", label, err)
+		return "", fmt.Errorf("the container's %s %q is not a tree of the repo: %v", what, label, err)
 	}
 	return tree, nil
 }
@@ -243,11 +264,22 @@ func (r *run) labels() map[string]string {
 // baseline script runs first and takes four arguments, the last of them empty
 // without a parent tree.
 func (r *run) command() []string {
+	tree, parent := r.baseTrees()
 	return []string{"sh", "-c", baselineScript + "exec claude \"$@\" < /kiln/instruction.md\n", "sh",
-		"/work", "/kiln/base.pack", r.tree, r.parentTree,
+		"/work", "/kiln/base.pack", tree, parent,
 		"-p", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", "bypassPermissions",
 		"--model", r.Model, "--effort", r.Effort}
+}
+
+// baseTrees are the trees /work and its baseline are made of: the commit's
+// tree and the parent's, or for a laid-over run the work tree and the work
+// parent tree. The second is empty without a parent.
+func (r *run) baseTrees() (tree, parent string) {
+	if r.mainTree != "" {
+		return r.workTree, r.workParentTree
+	}
+	return r.tree, r.parentTree
 }
 
 // after calls afterStep, when the test has set it.
@@ -425,6 +457,23 @@ func carry(ctx context.Context, in Inputs, out, errOut, notes io.Writer, startin
 	if status == "" && starting == nil {
 		return nil, ErrGone
 	}
+	// Whether the run is laid over, and on which main, is the container's
+	// once it is there, whatever main is now; a run that starts takes it
+	// from Main.
+	var mainTree string
+	if state != nil {
+		mainTree, err = labelTree(ctx, r.Repo, "main tree", state.Labels[labelMainTree])
+	} else {
+		mainTree, err = r.mainTreeOf(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if mainTree != "" {
+		if err := r.layOver(ctx, mainTree); err != nil {
+			return nil, err
+		}
+	}
 
 	// Where the branch is matters only to the save, which moves it. A run
 	// that saves nothing, a spec run or a review run, never touches it: a
@@ -555,6 +604,9 @@ func (r *run) create(ctx context.Context, starting func() error, stored bool, st
 		if r.parentTree != "" {
 			labels[labelParentTree] = r.parentTree
 		}
+		if r.mainTree != "" {
+			labels[labelMainTree] = r.mainTree
+		}
 		if err := seal.CreateRun(ctx, seal.Run{ID: r.ID, Image: r.Image, Proxy: r.Proxy,
 			Command: r.command(), Labels: labels, Instance: r.Instance,
 			Hosts: r.Hosts, WayOutImage: r.WayOutImage, WayOutNetwork: r.WayOutNetwork,
@@ -568,17 +620,31 @@ func (r *run) create(ctx context.Context, starting func() error, stored bool, st
 
 	// 2: the same files of the same commit, whose labels step 0 checked, are
 	// written again into a container that was placed into before.
-	files, err := placingTar(ctx, r.Repo, r.entries)
+	// A laid-over run's /work is the work tree's, and the card's
+	// configuration goes beside it.
+	entries := r.entries
+	if r.mainTree != "" {
+		entries = r.workEntries
+	}
+	files, err := placingTar(ctx, r.Repo, entries)
+	var cardConfig io.Reader
+	if err == nil && r.mainTree != "" {
+		var own []byte
+		if own, err = placingTar(ctx, r.Repo, r.cardConfig); err == nil {
+			cardConfig = bytes.NewReader(own)
+		}
+	}
 	var base []byte
 	if err == nil {
-		trees := []string{r.tree}
-		if r.parentTree != "" {
-			trees = append(trees, r.parentTree)
+		tree, parent := r.baseTrees()
+		trees := []string{tree}
+		if parent != "" {
+			trees = append(trees, parent)
 		}
 		base, err = basePack(ctx, r.Repo, trees...)
 	}
 	if err == nil {
-		err = seal.PlaceRun(ctx, r.ID, bytes.NewReader(files), r.instruction, base)
+		err = seal.PlaceRun(ctx, r.ID, bytes.NewReader(files), cardConfig, r.instruction, base)
 	}
 	if err == nil {
 		err = after("place")
@@ -733,13 +799,18 @@ func (r *run) collect(ctx context.Context) (*record, error) {
 }
 
 // save is step 6: it saves the run's working tree to the branch, and returns
-// the saved commit, or noChange.
+// the saved commit, or noChange. A laid-over run's configuration is saved
+// from /kiln/card-config, and everything else from /work.
 func (r *run) save(ctx context.Context, end Ending, guard string) (string, error) {
 	base, err := basePack(ctx, r.Repo, r.tree)
 	if err != nil {
 		return "", err
 	}
-	tree, pack, err := seal.SaveRun(ctx, r.ID, r.Image, r.tree, base)
+	var pathspecs []string
+	if r.mainTree != "" {
+		pathspecs = ConfigPathspecs
+	}
+	tree, pack, err := seal.SaveRun(ctx, r.ID, r.Image, r.tree, base, pathspecs)
 	if err != nil {
 		return "", err
 	}
