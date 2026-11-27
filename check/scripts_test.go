@@ -136,3 +136,35 @@ func TestKilnUpMakesSettingsAbsolute(t *testing.T) {
 		}
 	})
 }
+
+// TestKilnUpBuildsItsOwnCheckout runs a copy of the start script, under
+// <dir>/x/scripts/, without KILN_SOURCE: it takes <dir>/x, with symlinks
+// resolved, as the source, and stops at the source check.
+func TestKilnUpBuildsItsOwnCheckout(t *testing.T) {
+	script, err := os.ReadFile("../" + scriptsDir + "/kiln-up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "x", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copied := filepath.Join(dir, "x", "scripts", "kiln-up")
+	if err := os.WriteFile(copied, script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real, err := filepath.EvalSymlinks(filepath.Join(dir, "x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", copied)
+	cmd.Dir = t.TempDir()
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir()}
+	out, err := cmd.CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 2 {
+		t.Errorf("exit: %v, want status 2; output %q", err, out)
+	}
+	if want := "kiln-up: " + real + " is not Kiln's source"; !strings.Contains(string(out), want) {
+		t.Errorf("output %q, want %q", out, want)
+	}
+}

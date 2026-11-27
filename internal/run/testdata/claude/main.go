@@ -10,8 +10,12 @@
 // same three steps, and refuses the credential after the case's first answer:
 // a Messages request whose x-api-key ends in -refused gets 401, as Claude's
 // API answers a credential it does not take, until the core has pushed
-// another (ADR 0040). Its data follows the Claude Code version pinned in
-// images/run/Dockerfile; the card that changes the pin updates it.
+// another (ADR 0040). The case kiln-case-install, of check's fresh-install
+// test, tells the stage by the heading of the instruction in the request, and
+// answers one Bash call that writes the stage's documents, and for implement
+// a line in NOTES.md, and then "Done.". Its data follows the Claude Code
+// version pinned in images/run/Dockerfile; the card that changes the pin
+// updates it.
 //
 // For each request it writes one line of JSON to standard output: the model,
 // output_config.effort, the x-api-key header, whether the marker given as its
@@ -197,6 +201,61 @@ const (
 	specText = "# Spec of the scripted run\n\n## 1. What will be built\n\nNothing; kiln-case-tick-spec.\n"
 )
 
+// installCase is the case of check's fresh-install test (check/install_test.go).
+const installCase = "kiln-case-install"
+
+// installStage is the stage whose instruction a request of installCase holds,
+// by the instruction's heading (instructions/), or "" for none. Review is
+// asked first and spec last, since a later stage's instruction quotes the
+// approved spec.
+func installStage(body string) string {
+	for _, s := range []struct{ heading, stage string }{
+		{"# Review a change", "review"},
+		{"# Implement a card", "implement"},
+		{"# Write the spec for a card", "spec"},
+	} {
+		if strings.Contains(body, s.heading) {
+			return s.stage
+		}
+	}
+	return ""
+}
+
+// installCommands are the Bash calls of installCase, by stage: each writes
+// what its stage's instruction asks for, and implement also the line that the
+// test finds on the Git host's main once the card has merged.
+var installCommands = map[string]string{
+	"spec": `cat >/kiln/out/spec.md <<'EOF'
+# Spec: add a line to NOTES.md
+
+Pull request title: ` + "`docs: add a line to NOTES.md`" + `
+
+## 1. What will be built
+
+One line at the end of NOTES.md.
+
+## 2. How to tell it works
+
+NOTES.md ends with the line.
+
+## 3. What was found, the options considered and the one chosen
+
+Nothing to choose.
+
+## 4. What is deliberately left out
+
+Everything else.
+
+## 5. Questions for the developer
+
+None.
+EOF`,
+	"implement": `printf '%s\n' 'A line from the fresh install.' >>/work/NOTES.md &&
+printf '%s\n' '# Report' '' 'Added the line to NOTES.md.' >/kiln/out/report.md &&
+printf '%s\n' '## Why the change' '' 'NOTES.md gets a line.' '' '## Special things to note' '' '- None.' '' '## Change outline' '' 'One line.' >/kiln/out/pull-request.md`,
+	"review": `printf '%s\n' 'Verdict: passes' '' 'The change adds the line the spec asks for.' >/kiln/out/review.md`,
+}
+
 // pageMarker is the marker of the fake public host's page.
 var pageMarker = regexp.MustCompile(`kiln-page-[a-z0-9-]+`)
 
@@ -215,6 +274,14 @@ func script(req request, body, caseName string, results int) (map[string]any, st
 		default:
 			return done, "end_turn", "done"
 		}
+	}
+	if caseName == installCase {
+		command := installCommands[installStage(body)]
+		if results > 0 || command == "" {
+			return done, "end_turn", "done"
+		}
+		input, _ := json.Marshal(map[string]string{"command": command, "description": "Write the stage's documents"})
+		return map[string]any{"type": "tool_use", "id": "toolu_kiln_1", "name": "Bash", "input": json.RawMessage(input)}, "tool_use", "bash"
 	}
 	if !strings.HasPrefix(caseName, "kiln-case-web") {
 		if results > 0 {

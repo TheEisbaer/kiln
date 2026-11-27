@@ -505,6 +505,8 @@ A line says what was settled and ends with the date in brackets, for example (20
 
   `check` stays the one required status check of `main`'s rule set (2026-11-25).
 - The line above, "The engine tests are started by `check/in-image`: always on the Git host's runner…", holds except for a change that touches only docs (ADR 0031) (2026-11-25).
+- The fresh-install test runs in a workflow of its own, `install`, beside `check` and `cache`: on a pull request that touches `docs/getting-started.md`, `scripts/`, `images/`, `cmd/`, `check/`, `go.mod` or the workflow itself, and on every push to `main`. It runs `check/in-image --install-only`. It is not part of the required check: the job `check` does not wait for it, so `main`'s rule set does not change (the developer's decision of 2026-11-27) (2026-11-27).
+- `check/in-image --install-only` runs only on the Git host's runner, and exits 2 elsewhere. It removes the engine's `kiln-*` images and the builder's cache before the test, which uses the instance's fixed names, `kiln-proxy`, the network `kiln` and port 4747 (2026-11-27).
 
 ## ADR 0050: Kiln scans everything it is about to publish and refuses on a hit
 
@@ -523,6 +525,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 - *No longer holds since 2026-11-26, for "The publish command and the check result command stay outside the repo, holding what they hold, until the work repo's own publishing is designed": for Azure DevOps Kiln ships both, in scripts/azure-devops/; see ADR 0027.* Kiln is started from the repo: `scripts/kiln-up` builds, makes or updates the copy and runs `kiln launch`, and `scripts/kiln-down` stops the proxy. The publish command and the check result command stay outside the repo, holding what they hold, until the work repo's own publishing is designed. The script gives them to the core from `KILN_PUBLISH_COMMAND` and `KILN_CHECK_RESULT_COMMAND`, and without them the core gets neither flag (the developer's decision of 2026-11-24).
 - Each repo's publish command is run for its own cards only, with `KILN_REPO` the copy of the card's repo, and each repo's check result command for its own cards' published commits only. A repo without a publish command publishes none of its cards: a review of one of them that passes waits for approval, and its moves have no `publish`, as a core without a command had. The core keeps no state across repos: a card's repo is written when the card is (2026-11-25).
 - The publish command also gets `KILN_WORK_ITEM` when the card has a work item number (2026-11-25).
+- `scripts/kiln-up` builds from the checkout it is in, unless `KILN_SOURCE` names another (2026-11-27).
 
 ## ADR 0053: Each stage starts with a fresh session, and a stage that is sent back resumes its own
 
@@ -572,3 +575,7 @@ A line says what was settled and ends with the date in brackets, for example (20
 ## ADR 0061: Kubernetes comes later; the MVP's colleague installs Kiln on their own machine
 
 - MVP item 6 of `docs/phases.md` asks for a colleague's install on their own Mac from the instructions, without help, and for an automated test of a fresh install from those instructions. Kubernetes (k3s) is on the "Later" list, and the open point of the card that rebuilds placing and collecting for Kubernetes is now a later one (2026-11-26).
+- The colleague's install is `docs/getting-started.md`, linked at the top of README. Its steps each end with a `**Check:**` paragraph, and its fenced blocks each carry a marker `<!-- kiln-install: values|run|check|start|mac|azure -->` on the line before. The check step "the guide is testable" refuses a block without a marker, a step without a check, other than one `values` and one `start` block, and `/Users/`, `/home/` or `~/work/` in the guide (2026-11-27).
+- The guide documents two routes to Claude: Claude Code's own key helper and base URL, which `kiln-up` reads, or a Claude Console API key in the login Keychain. A subscription's token from `claude setup-token` is left out until it has been tried through the proxy and the developer judges it allowed (the developer's decision of 2026-11-27) (2026-11-27).
+- The guide's team repo gets `spec_hosts` from the value `SPEC_HOSTS`, `*` by default, since a spec written without a list of hosts waits for the developer (2026-11-27).
+- `TestFreshInstall` in `check/` runs the guide's `run`, `check` and `start` blocks with values of its own, checked against the names of the guide's `values` block. Its stand-ins are a local bare repo as the Git host, publish and check result commands, and internal/run's scripted upstream in front of the real run image; its spec runs' list of hosts is a name that resolves nowhere. It takes one card of a repo with `"work_item": "required"` from posting to merged. The `mac` and `azure` blocks are not run, and the colleague's real install is their test (2026-11-27).
