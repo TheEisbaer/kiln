@@ -367,3 +367,207 @@ func TestFromHostAfterToHost(t *testing.T) {
 		t.Errorf("after newer feedback and a send-back: %+v, %v, %v", e, ok, err)
 	}
 }
+
+// laterReason is a reason of the comments read on a send-back after feedback.
+const laterReason = LaterFeedbackReason + "\n\n```text\ncarol: a newer comment\n```\n"
+
+// TestLaterFeedback tells the developer's send-back after feedback, writes the
+// comments read then once, with the mark and the card's since kept, and
+// refuses them for a card that moved; FromHost still finds the first look.
+func TestLaterFeedback(t *testing.T) {
+	s := open(t)
+	card := atHostWith(t, s, feedA)
+	check := func(what string, wantOK bool) Entry {
+		t.Helper()
+		e, ok, err := s.SentBackAfterFeedback(card)
+		if err != nil || ok != wantOK {
+			t.Errorf("%s: SentBackAfterFeedback is %+v %v %v, want %v", what, e, ok, err, wantOK)
+		}
+		return e
+	}
+	check("at the Git host", false)
+	read := time.Date(2026, 11, 27, 10, 0, 0, 500, time.UTC)
+	if _, err := s.ReviewFeedback(card, feedA, read, feedbackReason); err != nil {
+		t.Fatal(err)
+	}
+	check("after feedback", false)
+	if _, err := s.Decide(card, SendBack, "a note"); err != nil {
+		t.Fatal(err)
+	}
+	sent := check("after the send-back", true)
+	h, _ := s.History(card)
+	if sent.Number != h[len(h)-1].Number {
+		t.Errorf("the send-back is entry %d, the last is %+v", sent.Number, h[len(h)-1])
+	}
+
+	var since0 string
+	if err := s.db.QueryRow(`SELECT since FROM cards WHERE id = ?`, card).Scan(&since0); err != nil {
+		t.Fatal(err)
+	}
+	// A refused write leaves the mark, even with a read of another time.
+	if _, err := s.LaterFeedback(card, sent.Number+1, read.Add(time.Hour), laterReason); !errors.Is(err, ErrRefused) {
+		t.Errorf("a stale after: %v, want ErrRefused", err)
+	}
+	if p, _ := s.Publication(card); !p.FeedbackSince.Equal(read) {
+		t.Errorf("a stale after moved the mark to %v, want %v", p.FeedbackSince, read)
+	}
+	if _, err := s.LaterFeedback(card, sent.Number, read, "something else"); err == nil || errors.Is(err, ErrRefused) {
+		t.Errorf("a reason that is not later feedback: %v", err)
+	}
+	if h2, _ := s.History(card); len(h2) != len(h) {
+		t.Errorf("a refused write left entries: %d, was %d", len(h2), len(h))
+	}
+	later := read.Add(time.Minute)
+	got, err := s.LaterFeedback(card, sent.Number, later, laterReason)
+	if err != nil || got.State != (State{Implement, Run}) || got.SendBacks != 0 {
+		t.Fatalf("LaterFeedback: %+v %v", got, err)
+	}
+	var since1 string
+	if err := s.db.QueryRow(`SELECT since FROM cards WHERE id = ?`, card).Scan(&since1); err != nil || since1 != since0 {
+		t.Errorf("since is %q (%v), want %q", since1, err, since0)
+	}
+	if p, _ := s.Publication(card); !p.FeedbackSince.Equal(later) || p.Commit != feedA {
+		t.Errorf("the publication is %+v", p)
+	}
+	h, _ = s.History(card)
+	if e := h[len(h)-1]; e.Cause != CauseHost || e.Reason != laterReason || e.State != (State{Implement, Run}) || e.Run != "" {
+		t.Errorf("the last entry is %+v", e)
+	}
+	check("after the comments were read", false)
+	if _, err := s.LaterFeedback(card, sent.Number, later, laterReason); !errors.Is(err, ErrRefused) {
+		t.Errorf("a second write: %v, want ErrRefused", err)
+	}
+	if e, ok, err := s.FromHost(card); err != nil || !ok || !strings.HasPrefix(e.Reason, ReviewReason) {
+		t.Errorf("FromHost is %+v %v %v, want the first look", e, ok, err)
+	}
+	if e, ok, err := s.FeedbackAfter(card, 0); err != nil || !ok || e.Reason != laterReason {
+		t.Errorf("FeedbackAfter is %+v %v %v", e, ok, err)
+	}
+	if _, ok, _ := s.FeedbackAfter(card, h[len(h)-1].Number); ok {
+		t.Error("FeedbackAfter found an entry not above after")
+	}
+
+	// A card dropped after the send-back: refused, nothing written, the mark
+	// left.
+	gone := atHostWith(t, s, feedB)
+	if _, err := s.ReviewFeedback(gone, feedB, read, feedbackReason); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(gone, SendBack, ""); err != nil {
+		t.Fatal(err)
+	}
+	sentGone := mustSentBack(t, s, gone)
+	if _, err := s.Decide(gone, Drop, ""); err != nil {
+		t.Fatal(err)
+	}
+	hg, _ := s.History(gone)
+	if _, err := s.LaterFeedback(gone, sentGone.Number, later, laterReason); !errors.Is(err, ErrRefused) {
+		t.Errorf("a dropped card: %v, want ErrRefused", err)
+	}
+	if hg2, _ := s.History(gone); len(hg2) != len(hg) {
+		t.Errorf("a refused write on a dropped card left entries: %d, was %d", len(hg2), len(hg))
+	}
+	if p, _ := s.Publication(gone); !p.FeedbackSince.Equal(read) {
+		t.Errorf("a dropped card's mark is %v, want %v", p.FeedbackSince, read)
+	}
+}
+
+// mustSentBack is the developer's send-back after feedback of card, which must be
+// there.
+func mustSentBack(t *testing.T, s *Store, card int64) Entry {
+	t.Helper()
+	e, ok, err := s.SentBackAfterFeedback(card)
+	if err != nil || !ok {
+		t.Fatalf("SentBackAfterFeedback is %+v %v %v, want true", e, ok, err)
+	}
+	return e
+}
+
+// TestSentBackAfterFeedbackNot is false for the moves that follow no feedback
+// or whose run is in flight.
+func TestSentBackAfterFeedbackNot(t *testing.T) {
+	s := open(t)
+	read := time.Now()
+	yes := func(card int64) {
+		t.Helper()
+		if _, ok, err := s.SentBackAfterFeedback(card); err != nil || !ok {
+			t.Fatalf("SentBackAfterFeedback is %v %v, want true", ok, err)
+		}
+	}
+	no := func(what string, card int64) {
+		t.Helper()
+		if e, ok, err := s.SentBackAfterFeedback(card); err != nil || ok {
+			t.Errorf("%s: %+v %v %v, want false", what, e, ok, err)
+		}
+	}
+	// A send-back from the Git host, after to-host.
+	a := atHostWith(t, s, feedA)
+	if _, err := s.ReviewFeedback(a, feedA, read, feedbackReason); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(a, ToHost, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DecideWith(a, SendBack, "n", Options{Publishing: true}); err != nil {
+		t.Fatal(err)
+	}
+	no("from the Git host", a)
+
+	// A run in flight.
+	b := atHostWith(t, s, feedB)
+	if _, err := s.ReviewFeedback(b, feedB, read, feedbackReason); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(b, SendBack, ""); err != nil {
+		t.Fatal(err)
+	}
+	yes(b)
+	if err := s.AddRun(RunRow{ID: "r1", Card: b, Commit: feedB, Model: "m", Effort: "high"}, 8); err != nil {
+		t.Fatal(err)
+	}
+	no("a run in flight", b)
+
+	// An again from implement, needing you, after the run failed.
+	if _, err := s.EndRun("r1", Failed, "exit 1", State{Implement, Developer}, Cost{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(b, Again, ""); err != nil {
+		t.Fatal(err)
+	}
+	no("an again from implement, needing you", b)
+
+	// A proposal's entry between the feedback and the send-back, and one
+	// after it, change nothing.
+	c := mustCreate(t, s, "a card")
+	if _, err := s.Move(c.ID, State{Review, Run}, CauseRule); err != nil {
+		t.Fatal(err)
+	}
+	mustAddRun(t, s, theRun(c.ID, "rp"))
+	if _, err := s.EndRun("rp", Finished, "exit 0", passed, Cost{}, &Doc{Kind: KindProposals, Proposals: twoProposals}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DecideWith(c.ID, Publish, "", Options{Publishing: true, WorkflowYes: "c0ffee"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.KeepPullRequest(c.ID, feedA, "https://git.example/pull/1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReviewFeedback(c.ID, feedA, read, feedbackReason); err != nil {
+		t.Fatal(err)
+	}
+	ps, _, err := s.OpenProposals()
+	if err != nil || len(ps) < 2 {
+		t.Fatalf("the card's proposals: %v, %v", ps, err)
+	}
+	if _, err := s.Dismiss(ps[0].ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(c.ID, SendBack, ""); err != nil {
+		t.Fatal(err)
+	}
+	yes(c.ID)
+	if _, err := s.Dismiss(ps[1].ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	yes(c.ID)
+}
