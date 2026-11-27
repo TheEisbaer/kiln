@@ -1,9 +1,13 @@
 package seal
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestCheckCachePath takes the paths a cache may be mounted at, and refuses
@@ -124,5 +128,41 @@ func TestOldCaches(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), "not found") {
 			t.Errorf("RemoveOldCaches(%q, %q) = %v, want a refusal naming %s", c.repo, c.digest, err, c.want)
 		}
+	}
+}
+
+// TestRemoveOldCachesEndedDuringRemoval gives the engine's outcome of a
+// removal that the context's end came in the middle of: the volume was
+// removed, so no failure is reported.
+func TestRemoveOldCachesEndedDuringRemoval(t *testing.T) {
+	dir := t.TempDir()
+	mark := filepath.Join(dir, "mark")
+	volume := "kiln-cache-work-" + strings.Repeat("1", 64)
+	script := "#!/bin/sh\nPATH=/usr/bin:/bin\n" +
+		"case \"$1\" in\n" +
+		"volume) case \"$2\" in\n" +
+		"  ls) printf '%s\\t%s\\n' " + volume + " work ;;\n" +
+		"  rm) touch " + mark + "; sleep 0.5; echo " + volume + " ;;\n" +
+		"  esac ;;\n" +
+		"ps) ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for {
+			if _, err := os.Stat(mark); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	got, err := RemoveOldCaches(ctx, "work", strings.Repeat("c", 64))
+	if err != nil || !slices.Equal(got, []CacheRemoval{{Volume: volume}}) {
+		t.Errorf("RemoveOldCaches = %v, %v; want [{%s <nil>}], nil", got, err, volume)
 	}
 }
