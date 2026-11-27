@@ -240,9 +240,13 @@ echo "https://git-host.invalid/pull/$KILN_CARD"
 	go func() { ended <- launcher.Wait() }()
 
 	// The screen answers once kiln-up has built everything and the core runs.
-	// The waits add up to less than the test program's -test.timeout of 30
-	// minutes, so that a wait that runs out fails the test and its cleanup
-	// still prints what went wrong.
+	// The waits add up to 34 minutes: 12 for the screen, 2 for the network, 5
+	// for the core to take the card, 4 for the spec, 7 for publishing, 3 for
+	// merged and 1 for the screen to stop; the stop's SIGINT can add up to 2
+	// more. With the builds and blocks between them, all of this stays under
+	// the test program's -test.timeout of 45 minutes, set in check/in-image,
+	// so that a wait that runs out fails the test and its cleanup still
+	// prints what went wrong.
 	waitFor(t, 12*time.Minute, "the screen to answer", func() (bool, string) {
 		select {
 		case err := <-ended:
@@ -256,7 +260,7 @@ echo "https://git-host.invalid/pull/$KILN_CARD"
 
 	// The scripted upstream, on the network the core made for its proxy.
 	docker(t, "build", "--quiet", "--network", "none", "--tag", installUpstream,
-		"--file", "internal/run/testdata/claude/Dockerfile", root)
+		"--file", filepath.Join(root, "internal", "run", "testdata", "claude", "Dockerfile"), root)
 	waitFor(t, 2*time.Minute, "the network "+installNetwork, func() (bool, string) {
 		err := exec.Command("docker", "network", "inspect", installNetwork).Run()
 		return err == nil, fmt.Sprint(err)
