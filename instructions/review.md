@@ -30,6 +30,8 @@ Write each proposal to /kiln/out/proposals.md, one after the other, each in this
 
 Each proposal starts with its own `Proposal:` line, and its text runs to the next such line. Write proposals.md only when there is a proposal.
 
+When this text has a part `Proposals already made on this card`, it holds the proposals that earlier reviews of this card made, with what the developer did with each. Do not propose again a problem that one of them covers, also not under another title, whether it is open, made into a card or dismissed. Make a proposal only for a problem none of them covers. Findings are judged as above, whatever that part holds.
+
 ## Rules
 
 - Do the review yourself, in this run, on the model it was started with. A short lookup by a helper is fine.

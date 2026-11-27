@@ -673,7 +673,7 @@ func stagedCore(t *testing.T) (*core, string) {
 }
 
 // endRun ends a run of card 1 in the stage, with its document, as a run would.
-func endRun(t *testing.T, c *core, s store.Stage, to store.State, doc *store.Doc) {
+func endRun(t *testing.T, c *core, s store.Stage, to store.State, docs ...*store.Doc) {
 	t.Helper()
 	if _, err := c.store.Move(1, store.State{Stage: s, WaitsFor: store.Run}, store.CauseDeveloper); err != nil {
 		t.Fatal(err)
@@ -686,7 +686,7 @@ func endRun(t *testing.T, c *core, s store.Stage, to store.State, doc *store.Doc
 	if err := c.store.AddRun(store.RunRow{ID: id, Card: 1, Commit: "c0ffee", Model: "claude-opus-5-5", Effort: "high"}, 8); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.store.EndRun(id, store.Finished, "", to, store.Cost{}, doc); err != nil {
+	if _, err := c.store.EndRun(id, store.Finished, "", to, store.Cost{}, docs...); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1038,6 +1038,48 @@ func TestStageInputs(t *testing.T) {
 			t.Fatal(err)
 		}
 		check("review", string(readFile(t, in.Instruction)))
+	})
+
+	t.Run("review, with proposals of earlier reviews", func(t *testing.T) {
+		c, main := stagedCore(t)
+		approve(c, "")
+		goesBack := &store.Doc{Kind: store.KindReview, Text: "Verdict: goes back\n"}
+		endRun(t, c, store.Implement, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})
+		endRun(t, c, store.Review, reviewNeedsYou, goesBack, &store.Doc{Kind: store.KindProposals, Proposals: []store.Proposal{
+			{Title: "A title", Text: "a.go:1 fails."}, {Title: "B title", Text: "b.go:2 fails."}}})
+		if _, err := c.store.Dismiss(1, "Not a bug: the caller checks it."); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.store.Decide(1, store.SendBack, ""); err != nil {
+			t.Fatal(err)
+		}
+		endRun(t, c, store.Implement, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})
+		endRun(t, c, store.Review, reviewNeedsYou, goesBack, &store.Doc{Kind: store.KindProposals, Proposals: []store.Proposal{
+			{Title: "C title", Text: "c.go:3 fails."}}})
+		if _, _, err := c.store.MakeCard(3); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.store.Decide(1, store.SendBack, ""); err != nil {
+			t.Fatal(err)
+		}
+		endRun(t, c, store.Implement, reviewWaits, &store.Doc{Kind: store.KindReport, Text: "# Report\n"})
+		tip := commitOnBranch(t, c.Repo, main, map[string]string{"NOTES.md": "# Notes\nA line.\n"})
+		in, _, err := c.inputs(ctx, newRow(c, tip), card(c), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(readFile(t, in.Instruction))
+		want := []string{"## The card", "## The approved spec", proposalsHeading, "## The change"}
+		if h := toldParts(t, got, instructions.Review); !reflect.DeepEqual(h, want) {
+			t.Errorf("the headings are %q, want %q", h, want)
+		}
+		wantPart := proposalsHeading + "\n\n" + proposalsIntro + "\n\n" +
+			"### Proposal 1 of 3: dismissed, with the developer's note\n\n```markdown\nProposal: A title\na.go:1 fails.\n```\n\nNot a bug: the caller checks it.\n\n" +
+			"### Proposal 2 of 3: open\n\n```markdown\nProposal: B title\nb.go:2 fails.\n```\n\n" +
+			"### Proposal 3 of 3: made into card #2\n\n```markdown\nProposal: C title\nc.go:3 fails.\n```\n\n## The change"
+		if !strings.Contains(got, wantPart) {
+			t.Errorf("the review run is not told the proposals as it should, want:\n%s\n\nin:\n%s", wantPart, got)
+		}
 	})
 
 	t.Run("review, approved with a note", func(t *testing.T) {

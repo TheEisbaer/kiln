@@ -128,6 +128,9 @@ func TestReviewInstructionProposals(t *testing.T) {
 			t.Errorf("the review instruction lacks %q", want)
 		}
 	}
+	if h := strings.TrimPrefix(proposalsHeading, "## "); !strings.Contains(instructions.Review, h) {
+		t.Errorf("the review instruction does not name the part %q", h)
+	}
 	if strings.Contains(instructions.Review, "Proposals, if any.") {
 		t.Error("the review instruction still asks for proposals in review.md")
 	}

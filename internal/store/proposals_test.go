@@ -316,3 +316,50 @@ func TestProposalEntriesChangeNothing(t *testing.T) {
 		}
 	})
 }
+
+// TestProposalsOn reads the proposals of one card, in the order they were
+// written, acted on or not, and none of another card's.
+func TestProposalsOn(t *testing.T) {
+	s := open(t)
+	one := reviewed(t, s, &Doc{Kind: KindProposals, Proposals: twoProposals})
+	two := mustCreate(t, s, "another")
+	if _, err := s.Move(two.ID, State{Review, Run}, CauseRule); err != nil {
+		t.Fatal(err)
+	}
+	mustAddRun(t, s, theRun(two.ID, "r2"))
+	if _, err := s.EndRun("r2", Finished, "", State{Review, Developer}, Cost{}, &Doc{Kind: KindProposals, Proposals: []Proposal{{Title: "Other", Text: "x"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Move(one.ID, State{Review, Run}, CauseDeveloper); err != nil {
+		t.Fatal(err)
+	}
+	mustAddRun(t, s, theRun(one.ID, "r3"))
+	if _, err := s.EndRun("r3", Finished, "", State{Review, Developer}, Cost{}, &Doc{Kind: KindProposals, Proposals: []Proposal{{Title: "Third", Text: "y"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Dismiss(1, "No."); err != nil {
+		t.Fatal(err)
+	}
+	made, _, err := s.MakeCard(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ProposalsOn(one.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Proposal{
+		{ID: 1, Card: one.ID, Run: "r1", Number: 1, Title: "The first", Text: "foo.go:12 panics on nil.", Dismissed: true, Note: "No."},
+		{ID: 2, Card: one.ID, Run: "r1", Number: 2, Title: "", Text: "Something else, as written."},
+		{ID: 4, Card: one.ID, Run: "r3", Number: 1, Title: "Third", Text: "y", Made: made.ID},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the proposals on card %d are %+v, want %+v", one.ID, got, want)
+	}
+	if got, err := s.ProposalsOn(two.ID); err != nil || len(got) != 1 || got[0].Title != "Other" {
+		t.Errorf("the proposals on card %d are %+v (%v), want its own", two.ID, got, err)
+	}
+	if got, err := s.ProposalsOn(99); err != nil || len(got) != 0 {
+		t.Errorf("the proposals on an unknown card are %+v (%v)", got, err)
+	}
+}
