@@ -1,6 +1,9 @@
 package tick
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"os"
 	"slices"
 	"strings"
@@ -8,6 +11,7 @@ import (
 	"time"
 
 	"github.com/TheEisbaer/kiln/internal/seal"
+	"github.com/TheEisbaer/kiln/internal/settings"
 	"github.com/TheEisbaer/kiln/internal/store"
 )
 
@@ -382,4 +386,39 @@ func TestOldCachesStartGuard(t *testing.T) {
 	b.buildDone(t)
 	b.tick(t)
 	b.waitImage(t, w, "kiln-run-work")
+}
+
+// endedEngine is an engine whose RemoveOldCaches gives a set answer.
+type endedEngine struct {
+	engine
+	removals []seal.CacheRemoval
+	err      error
+}
+
+func (e endedEngine) RemoveOldCaches(context.Context, string, string) ([]seal.CacheRemoval, error) {
+	return e.removals, e.err
+}
+
+// TestOldCachesEndedContext prints a removal that was done although the
+// context has ended, and prints neither a failure nor a listing error then.
+func TestOldCachesEndedContext(t *testing.T) {
+	v1, v2 := "kiln-cache-work-"+strings.Repeat("1", 64), "kiln-cache-work-"+strings.Repeat("2", 64)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, c := range []struct {
+		name    string
+		fake    endedEngine
+		wantOut string
+	}{
+		{"a removal and a failure", endedEngine{removals: []seal.CacheRemoval{{Volume: v1}, {Volume: v2, Err: errors.New("signal: killed")}}},
+			"kiln core: repo work: removed the old cache volume " + v1 + "\n"},
+		{"a listing error", endedEngine{err: errors.New("signal: killed")}, ""},
+	} {
+		var out, errOut bytes.Buffer
+		c2 := &core{engine: c.fake, out: &out, errOut: &errOut}
+		c2.removeOldCaches(ctx, settings.Repo{Name: "work"}, strings.Repeat("c", 64))
+		if out.String() != c.wantOut || errOut.Len() != 0 {
+			t.Errorf("%s: out = %q, errOut = %q; want out %q and no errOut", c.name, out.String(), errOut.String(), c.wantOut)
+		}
+	}
 }

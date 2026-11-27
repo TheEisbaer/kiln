@@ -322,15 +322,19 @@ func (c *core) fillCache(ctx context.Context, repo settings.Repo, im repoImages)
 
 // removeOldCaches removes the repo's cache volumes other than the one of
 // digest that no container uses, and prints what it did: a removal on the
-// output, a failure once per volume and text. It never changes what the
-// caller does next. The caller holds the repo's build guard.
+// output, a failure once per volume and text. A removal that was done is
+// always printed; a failure or a listing error that comes with an ended
+// context is not, since a cancelled call's error says nothing about the
+// volume. It never changes what the caller does next. The caller holds the
+// repo's build guard.
 func (c *core) removeOldCaches(ctx context.Context, repo settings.Repo, digest string) {
 	const ending = "; it is tried again after the repo's next fill and at the core's next start"
 	removals, err := c.engine.RemoveOldCaches(ctx, repo.Name, digest)
-	if ctx.Err() != nil {
-		return
-	}
+	ended := ctx.Err() != nil
 	if err != nil {
+		if ended {
+			return
+		}
 		text := run.Printable(err.Error())
 		c.sayOnceAs(c.errOut, "old caches\x00"+repo.Name+"\x00"+text,
 			fmt.Sprintf("kiln core: repo %s: its old cache volumes were not looked at: %s%s", repo.Name, text, ending))
@@ -339,6 +343,9 @@ func (c *core) removeOldCaches(ctx context.Context, repo settings.Repo, digest s
 	for _, r := range removals {
 		if r.Err == nil {
 			fmt.Fprintf(c.out, "kiln core: repo %s: removed the old cache volume %s\n", repo.Name, r.Volume)
+			continue
+		}
+		if ended {
 			continue
 		}
 		text := run.Printable(r.Err.Error())

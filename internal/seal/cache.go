@@ -353,7 +353,10 @@ func oldCaches(listing, repo, digest string) []string {
 //     flight, a stopped container and kiln-fill-<repo> keep theirs. A failure
 //     of ps is the volume's error, and it is not removed.
 //  4. Each other volume is removed with `docker volume rm`, without force,
-//     so the engine refuses one that a container took since.
+//     so the engine refuses one that a container took since. The removal
+//     runs to its end even when ctx ends during it, so that its outcome is
+//     the engine's: a removal is never reported as failed because it was cut
+//     off after the engine did it.
 //  5. A failure of the listing is returned, and nothing is removed.
 //
 // It never touches a container or an image.
@@ -376,7 +379,7 @@ func RemoveOldCaches(ctx context.Context, repo, digest string) ([]CacheRemoval, 
 		if strings.TrimSpace(users) != "" {
 			continue
 		}
-		_, err = docker(ctx, nil, "volume", "rm", name)
+		_, err = docker(context.WithoutCancel(ctx), nil, "volume", "rm", name)
 		done = append(done, CacheRemoval{Volume: name, Err: err})
 	}
 	return done, nil
