@@ -7,7 +7,7 @@
 # Variables, each with its default:
 #   KILN_DATA          $HOME/kiln-live/data, the data directory; the program
 #                      is $KILN_DATA/kiln
-#   KILN_SOURCE        $HOME/work/kiln, the checkout that is built
+#   KILN_SOURCE        the checkout this script is in, the one that is built
 #   KILN_REPO          $HOME/kiln-live/repo.git, the instance's copy
 #   KILN_ORIGIN        https://github.com/TheEisbaer/kiln.git, cloned once
 #                      when the copy is missing
@@ -44,7 +44,14 @@ die() {
 }
 
 data=${KILN_DATA:-$HOME/kiln-live/data}
-src=${KILN_SOURCE:-$HOME/work/kiln}
+if [ -n "${KILN_SOURCE-}" ]; then
+    src=$KILN_SOURCE
+else
+    # The checkout this script is in, with symlinks resolved; CDPATH= keeps cd
+    # from printing a directory.
+    src=$(CDPATH= cd -P -- "$(dirname -- "$0")/.." && pwd -P) ||
+        die "cannot find the checkout this script is in; set KILN_SOURCE"
+fi
 repo=${KILN_REPO:-$HOME/kiln-live/repo.git}
 origin=${KILN_ORIGIN:-https://github.com/TheEisbaer/kiln.git}
 model=${KILN_MODEL:-claude-opus-5-5}

@@ -26,10 +26,18 @@
 # in KILN_GO_CACHE. The workflow cache, on a push to main, saves that cache;
 # it runs no code of the repo but this script, the workflows and the
 # toolchain image's Dockerfile.
+#
+# With --install-only, on the Git host's runner only, it runs the fresh-install
+# test, TestFreshInstall of check/, which follows docs/getting-started.md on
+# this engine (ADR 0061). It compiles the test with the network off, as the
+# engine part does, then removes every image named kiln-* and the builder's
+# cache, so that the guide's build is a first one, and runs it. The test uses
+# the instance's fixed names and port, so it never runs on the developer's
+# machine.
 set -eu
 
 usage() {
-    echo "usage: check/in-image [--engine | --compile-only | --check-only | --engine-only <package>]" >&2
+    echo "usage: check/in-image [--engine | --compile-only | --check-only | --engine-only <package> | --install-only]" >&2
     exit 2
 }
 
@@ -38,10 +46,12 @@ compile=
 check=1
 check_only=
 only=
+install=
 case "${1-}" in
     --engine) engine=1 ;;
     --compile-only) compile=1 ;;
     --check-only) check_only=1 ;;
+    --install-only) install=1 check= ;;
     --engine-only)
         [ -n "${2-}" ] || usage
         engine=1 check= only=$2
@@ -51,6 +61,11 @@ case "${1-}" in
     *) usage ;;
 esac
 [ "$#" -le 1 ] || usage
+
+if [ -n "$install" ] && [ "${GITHUB_ACTIONS-}" != true ]; then
+    echo "check/in-image: --install-only runs only on the Git host's runner (GITHUB_ACTIONS=true): it removes the engine's kiln-* images, and its test uses the instance's fixed names, kiln-proxy, the network kiln and port 4747" >&2
+    exit 2
+fi
 
 # Go's build cache, on the Git host's runner only: there the directory comes
 # from a cache that only a push to main saves, and is thrown away with the
@@ -73,7 +88,7 @@ if [ -n "$compile" ] && [ -z "$gocache" ]; then
     exit 2
 fi
 [ -n "$gocache" ] && mkdir -p "$gocache"
-[ "${GITHUB_ACTIONS-}" = true ] && [ -z "$compile" ] && [ -z "$check_only" ] && engine=1
+[ "${GITHUB_ACTIONS-}" = true ] && [ -z "$compile" ] && [ -z "$check_only" ] && [ -z "$install" ] && engine=1
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 image=kiln-toolchain
@@ -155,6 +170,29 @@ if [ -n "$compile" ]; then
             compile go build -o /dev/null ./check
             exit 0' sh "$goos" "$goarch" $packages
     exit 0
+fi
+
+# --install-only: the test program of check/, built for this machine with
+# the network off, then a fresh engine, then the test, from check/ as go test
+# would run it. The program goes outside the repo, which stays as it is.
+if [ -n "$install" ]; then
+    engine_target
+    tests=$(mktemp -d)
+    echo "== install test: compiling"
+    docker run --rm --network none \
+        --volume "$root:/src:ro" --workdir /src \
+        ${gocache:+--volume "$gocache:/gocache" --env GOCACHE=/gocache} \
+        --env GOOS="$goos" --env GOARCH="$goarch" --env CGO_ENABLED=0 \
+        "$image" sh -c 'go test -c -o /tmp/check.test ./check && cat /tmp/check.test' \
+        >"$tests/check.test" || { echo "== install test: compiling it failed" >&2; exit 1; }
+    chmod +x "$tests/check.test"
+    echo "== install test: removing the engine's kiln-* images and the builder's cache"
+    ids=$(docker image ls --format '{{.ID}} {{.Repository}}' | awk '$2 ~ /^kiln-/ { print $1 }' | sort -u)
+    # One word per image ID.
+    [ -z "$ids" ] || docker image rm --force $ids >/dev/null
+    docker builder prune --all --force >/dev/null
+    cd "$root/check"
+    exec env KILN_INSTALL_TEST=1 "$tests/check.test" -test.run '^TestFreshInstall$' -test.v -test.timeout=30m
 fi
 
 # The engine tests run in the background beside the check, if there is one:

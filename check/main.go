@@ -66,6 +66,7 @@ var steps = []step{
 	{dockerStep, func() error { return dockerOnlyInSeal(os.DirFS(".")) }},
 	{engineStep, func() error { return engineTestsFound(os.DirFS(".")) }},
 	{"the scripts parse", func() error { return scriptsParse(scriptsDir) }},
+	{guideStep, func() error { return guideTestable(os.DirFS(".")) }},
 }
 
 // run runs a command with the given extra environment, showing its output.
