@@ -199,7 +199,7 @@ func TestReadEvents(t *testing.T) {
 		}
 		rec := &record{Inputs: RecordInputs{Model: "claude-opus-5-5"}, ModelSeen: "claude-haiku-5-5",
 			Result: &Result{Subtype: "success"}, Saved: noChange}
-		if rec.status() == 0 {
+		if rec.status(false) == 0 {
 			t.Error("a run on another model has the exit status 0")
 		}
 	})
@@ -214,11 +214,11 @@ func TestReadEvents(t *testing.T) {
 			t.Errorf("the result is %+v, want none", s.result)
 		}
 		rec := &record{Inputs: RecordInputs{Model: s.model}, ModelSeen: s.model, Saved: noChange}
-		if rec.status() == 0 {
+		if rec.status(false) == 0 {
 			t.Error("a run with no result has the exit status 0")
 		}
 		rec.Result = &Result{Subtype: "success"}
-		if rec.status() != 0 {
+		if rec.status(false) != 0 {
 			t.Error("a run with a result, the model and exit 0 does not have the exit status 0")
 		}
 	})
@@ -239,10 +239,10 @@ func TestReadEvents(t *testing.T) {
 		} {
 			rec := &record{Inputs: RecordInputs{Model: "claude-haiku-5-5"}, ModelSeen: "claude-haiku-5-5",
 				Ending: Ending{OOMKilled: c.oom}, Result: c.result, Saved: noChange}
-			if rec.status() == 0 {
+			if rec.status(false) == 0 {
 				t.Errorf("%s: the run has the exit status 0", c.name)
 			}
-			if got := rec.reason(); got != c.reason {
+			if got := rec.reason(false); got != c.reason {
 				t.Errorf("%s: the reason is %q, want %q", c.name, got, c.reason)
 			}
 			if rec.refused() {
@@ -281,10 +281,10 @@ func TestRefused(t *testing.T) {
 	}
 	rec := &record{Inputs: RecordInputs{Model: "claude-opus-5-5"}, ModelSeen: s.model, Result: s.result,
 		Ending: Ending{ExitCode: 1}, Saved: notSaved}
-	if rec.status() == 0 {
+	if rec.status(false) == 0 {
 		t.Error("a run that the 401 ended has the exit status 0")
 	}
-	if got, want := rec.reason(), "the upstream refused the Claude credential (401), 23 turns, $1.5000, not saved"; got != want {
+	if got, want := rec.reason(false), "the upstream refused the Claude credential (401), 23 turns, $1.5000, not saved"; got != want {
 		t.Errorf("the reason is %q, want %q", got, want)
 	}
 	if !rec.refused() {
@@ -297,7 +297,7 @@ func TestRefused(t *testing.T) {
 	}
 	// Another error of the API keeps the reason as it was.
 	rec.Result.APIErrorStatus = 500
-	if got, want := rec.reason(), "exit 1, result is_error, 23 turns, $1.5000, not saved"; got != want {
+	if got, want := rec.reason(false), "exit 1, result is_error, 23 turns, $1.5000, not saved"; got != want {
 		t.Errorf("with a 500 the reason is %q, want %q", got, want)
 	}
 	if rec.refused() {

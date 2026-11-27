@@ -589,7 +589,7 @@ func TestInputs(t *testing.T) {
 	if !strings.HasPrefix(want, "# Write the spec for a card\n") {
 		t.Errorf("the instruction begins %q", want[:min(40, len(want))])
 	}
-	if !in.SkipSave || !reflect.DeepEqual(in.Hosts, c.Hosts) || in.WayOutImage == "" || in.Branch != "kiln/card-1" {
+	if !in.SkipSave || !reflect.DeepEqual(in.Hosts, c.Hosts) || in.WayOutImage == "" || in.Branch != "kiln/card-1" || in.Document != "spec" {
 		t.Errorf("the spec run's inputs are %+v", in)
 	}
 	// A run from main has no parent. A merge base that fails other than by
@@ -806,7 +806,7 @@ func TestStageInputs(t *testing.T) {
 		if got != want {
 			t.Errorf("the implement run is told\n%q\nwant\n%q", got, want)
 		}
-		if in.SkipSave || in.Hosts != nil || in.WayOutImage != "" || in.Model != "claude-sonnet-5-5" || in.Effort != "medium" || in.Commit != main {
+		if in.SkipSave || in.Hosts != nil || in.WayOutImage != "" || in.Model != "claude-sonnet-5-5" || in.Effort != "medium" || in.Commit != main || in.Document != "report" {
 			t.Errorf("the implement run's inputs are %+v", in)
 		}
 		// The spec names no title: the save keeps today's message.
@@ -1137,7 +1137,7 @@ func TestStageInputs(t *testing.T) {
 		if !strings.Contains(diff, "+A line.") || !strings.Contains(diff, "+A fix") {
 			t.Errorf("the diff is not from where the branch left main:\n%s", diff)
 		}
-		if !in.SkipSave || in.Hosts != nil || in.Model != "claude-opus-5-6" || in.Effort != "high" || in.Commit != tip {
+		if !in.SkipSave || in.Hosts != nil || in.Model != "claude-opus-5-6" || in.Effort != "high" || in.Commit != tip || in.Document != "review" {
 			t.Errorf("the review run's inputs are %+v", in)
 		}
 	})

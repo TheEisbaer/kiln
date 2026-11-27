@@ -1817,6 +1817,7 @@ func (c *core) inputs(ctx context.Context, row store.RunRow, card store.Card, in
 		Effort:      row.Effort,
 		Instance:    c.instance,
 		SkipSave:    !st.save,
+		Document:    st.kind,
 		Memory:      repo.Memory,
 		CPUs:        repo.CPUs,
 	}
