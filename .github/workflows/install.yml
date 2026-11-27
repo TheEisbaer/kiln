@@ -28,7 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     # As in check.yml: the caches are restored, never saved.
     cache-mode: read
-    timeout-minutes: 40
+    # Stays above check/in-image's -test.timeout for TestFreshInstall, with room for the steps before the test.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

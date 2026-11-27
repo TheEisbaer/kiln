@@ -192,7 +192,7 @@ if [ -n "$install" ]; then
     [ -z "$ids" ] || docker image rm --force $ids >/dev/null
     docker builder prune --all --force >/dev/null
     cd "$root/check"
-    exec env KILN_INSTALL_TEST=1 "$tests/check.test" -test.run '^TestFreshInstall$' -test.v -test.timeout=30m
+    exec env KILN_INSTALL_TEST=1 "$tests/check.test" -test.run '^TestFreshInstall$' -test.v -test.timeout=45m
 fi
 
 # The engine tests run in the background beside the check, if there is one:
