@@ -15,7 +15,8 @@
 #   by anyone but the pull request's creator, the same sign-in that published it. What is printed
 #   before that line is the feedback, oldest first.
 # - Otherwise the check: the pull request's blocking build policies (build validation), each for
-#   the published commit. With failed, what is printed before that line is the failed tasks' log.
+#   the published commit. With failed, what is printed before that line is the failed tasks' log
+#   or, for a build with no failed task, its result and its errors.
 #   Optional builds, reviewers and work item links are not the check.
 #
 # It needs az with the azure-devops extension, signed in, git and jq. The contract
@@ -25,6 +26,7 @@
 # non-zero exit. It only reads, with the developer's own az sign-in. No set -x anywhere.
 set -eu
 
+tab=$(printf '\t')
 fail() { echo "azure-devops check-result: $1" >&2; exit 2; }
 
 [ $# -eq 1 ] || fail "usage: check-result <path of the repo's copy>"
@@ -167,22 +169,43 @@ if [ -z "$failed" ]; then
   exit 0
 fi
 
-# For each failed build: the name and errors of each failed task, then its log without the
-# timestamps. The core keeps only the end, so the summary comes last again.
+# For each failed build: its pipeline and result, then the name and errors of each failed task
+# and its log without the timestamps; a build with no failed task has its errors instead. The
+# core keeps only the end, so the summary comes last again.
 summary=""
 for build in $failed; do
   case "$build" in *[!0-9]*) fail "Azure DevOps gave no build number." ;; esac
+  info=$(az pipelines build show --organization "$orgurl" --project "$project_id" --id "$build" -o json) ||
+    fail "cannot read build $build (is az signed in?)."
+  about=$(printf '%s' "$info" | jq -r '
+    def line: tostring | gsub("[\\r\\n\\t]"; " ");
+    "\(.definition.name // "unknown pipeline" | line)\t\(.result // .status // "unknown" | line)\(
+      if .result == "canceled" and .lastChangedBy.displayName then " by \(.lastChangedBy.displayName | line)" else "" end)"') ||
+    fail "cannot read build $build."
+  pipeline=${about%%"$tab"*}; state=${about#*"$tab"}
   timeline=$(az devops invoke --organization "$orgurl" --area build --resource timeline \
     --route-parameters project="$project_id" buildId="$build" --api-version 7.1 -o json) ||
     fail "cannot read the timeline of build $build (is az signed in?)."
-  records=$(printf '%s' "$timeline" | jq -c '[.records[] | select(.type == "Task" and .result == "failed")
+  [ -n "$timeline" ] || timeline='{}'  # a build that never started may have no timeline
+  records=$(printf '%s' "$timeline" | jq -c '[(.records // [])[] | select(.type == "Task" and .result == "failed")
       | {name, log: (.log.id // null), issues: [.issues[]? | select(.type == "error") | .message]}]') ||
     fail "cannot read the timeline of build $build."
+  if [ "$records" = "[]" ]; then
+    echo "=== build $build ($pipeline): $state, no task failed"
+    printf '%s' "$timeline" | jq -r '(.records // [])[] | . as $r | .issues[]? | select(.type == "error")
+      | "- \($r.type // "record") \($r.name // ""): \(.message // "" | .[0:500])"' ||
+      fail "cannot read the timeline of build $build."
+    printf '%s' "$info" | jq -r '.validationResults[]? | select(.result == "error") | "- validation: \(.message // "" | .[0:500])"' ||
+      fail "cannot read build $build."
+    summary="$summary
+- build $build ($pipeline): $state, no task failed"
+    continue
+  fi
   for row in $(printf '%s' "$records" | jq -r '.[] | @base64'); do
     task=$(printf '%s' "$row" | base64 -d)
     name=$(printf '%s' "$task" | jq -r .name)
     log=$(printf '%s' "$task" | jq -r '.log // empty')
-    echo "=== build $build, failed task: $name"
+    echo "=== build $build ($pipeline), failed task: $name"
     if [ -n "$log" ]; then
       case "$log" in *[!0-9]*) fail "Azure DevOps gave no log number for build $build." ;; esac
       lines=$(az devops invoke --organization "$orgurl" --area build --resource logs \
@@ -191,7 +214,7 @@ for build in $failed; do
       printf '%s' "$lines" | jq -r '.value[]' | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z //' | tail -n 400
     fi
     summary="$summary
-- build $build, $name: $(printf '%s' "$task" | jq -r '.issues | join(" | ") | .[0:500]')"
+- build $build ($pipeline), $name: $(printf '%s' "$task" | jq -r '.issues | join(" | ") | .[0:500]')"
   done
 done
 echo "=== what failed:$summary"

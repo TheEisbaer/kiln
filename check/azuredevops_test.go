@@ -64,6 +64,7 @@ case "$1 $2 $3" in
   "repos pr update") key=update ;;
   "repos pr work-item") [ "$4" = add ] && key=work-item-add ;;
   "repos pr policy") [ "$4" = list ] && key=policy-$id ;;
+  "pipelines build show") key=build-$id ;;
   "devops invoke "*)
     case "$resource" in
       pullRequestThreads) key=threads-$pr ;;
@@ -442,6 +443,7 @@ func TestAzureDevOpsCheckResult(t *testing.T) {
 	t.Run("failed with the log", func(t *testing.T) {
 		e := checkWorld(t)
 		e.answerJSON("policy-17", []any{build("rejected", adoCommit, true, "Build")})
+		e.answerJSON("build-101", obj{"definition": obj{"name": "PR build"}, "result": "failed"})
 		e.answerJSON("timeline-101", obj{"records": []any{
 			obj{"type": "Task", "result": "succeeded", "name": "Build", "log": obj{"id": 6}},
 			obj{"type": "Task", "result": "failed", "name": "Run tests", "log": obj{"id": 7},
@@ -449,8 +451,63 @@ func TestAzureDevOpsCheckResult(t *testing.T) {
 		}})
 		e.answerJSON("logs-101-7", obj{"count": 2, "value": []any{
 			"2026-11-26T10:00:00.1234567Z Running tests", "2026-11-26T10:00:01.0000000Z FAIL: TestX"}})
-		expect(t, e.check(), 0, "=== build 101, failed task: Run tests\nRunning tests\nFAIL: TestX\n"+
-			"=== what failed:\n- build 101, Run tests: 3 tests failed\nfailed\n")
+		expect(t, e.check(), 0, "=== build 101 (PR build), failed task: Run tests\nRunning tests\nFAIL: TestX\n"+
+			"=== what failed:\n- build 101 (PR build), Run tests: 3 tests failed\nfailed\n")
+	})
+
+	t.Run("failed with no failed task", func(t *testing.T) {
+		const summary = "=== what failed:\n- build 101 (PR build): %s, no task failed\nfailed\n"
+		for _, c := range []struct {
+			name, state string
+			info        obj
+			timeline    any
+			lines       string
+		}{
+			{"cancelled", "canceled by Ada Dev",
+				obj{"definition": obj{"name": "PR build"}, "result": "canceled", "lastChangedBy": obj{"displayName": "Ada Dev"}},
+				obj{"records": []any{
+					obj{"type": "Job", "result": "canceled", "name": "Linux"},
+					obj{"type": "Task", "result": "canceled", "name": "Run tests",
+						"issues": []any{obj{"type": "error", "message": "The operation was canceled."}}},
+				}},
+				"- Task Run tests: The operation was canceled.\n"},
+			{"a job-level error", "failed",
+				obj{"definition": obj{"name": "PR build"}, "result": "failed"},
+				obj{"records": []any{
+					obj{"type": "Stage", "result": "failed", "name": "Test"},
+					obj{"type": "Job", "result": "failed", "name": "Linux", "issues": []any{
+						obj{"type": "warning", "message": "slow"},
+						obj{"type": "error", "message": "We stopped hearing from agent A1."}}},
+					obj{"type": "Task", "result": "succeeded", "name": "Build"},
+				}},
+				"- Job Linux: We stopped hearing from agent A1.\n"},
+			{"never started", "failed",
+				obj{"definition": obj{"name": "PR build"}, "result": "failed", "validationResults": []any{
+					obj{"result": "warning", "message": "a warning"},
+					obj{"result": "error", "message": "/azure-pipelines.yml (Line: 3, Col: 1): Unexpected value 'stepz'"}}},
+				nil,
+				"- validation: /azure-pipelines.yml (Line: 3, Col: 1): Unexpected value 'stepz'\n"},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				e := checkWorld(t)
+				e.answerJSON("policy-17", []any{build("rejected", adoCommit, true, "Build")})
+				e.answerJSON("build-101", c.info)
+				if c.timeline == nil {
+					e.answer("timeline-101", "")
+				} else {
+					e.answerJSON("timeline-101", c.timeline)
+				}
+				expect(t, e.check(), 0, "=== build 101 (PR build): "+c.state+", no task failed\n"+c.lines+
+					fmt.Sprintf(summary, c.state))
+			})
+		}
+		t.Run("records null", func(t *testing.T) {
+			e := checkWorld(t)
+			e.answerJSON("policy-17", []any{build("rejected", adoCommit, true, "Build")})
+			e.answerJSON("build-101", obj{"definition": obj{"name": "PR build"}, "result": "failed"})
+			e.answerJSON("timeline-101", obj{"records": nil})
+			expect(t, e.check(), 0, "=== build 101 (PR build): failed, no task failed\n"+fmt.Sprintf(summary, "failed"))
+		})
 	})
 
 	t.Run("closed", func(t *testing.T) {
@@ -521,6 +578,12 @@ func TestAzureDevOpsCheckResult(t *testing.T) {
 				failing(t, e.check(), "is az signed in?")
 			})
 		}
+		t.Run("a failing build-101", func(t *testing.T) {
+			e := checkWorld(t)
+			e.answerJSON("policy-17", []any{build("rejected", adoCommit, true, "Build")})
+			e.refuse("build-101", "ERROR: Please run 'az login' to setup account.")
+			failing(t, e.check(), "cannot read build 101 (is az signed in?)")
+		})
 		t.Run("a bad KILN_COMMIT", func(t *testing.T) {
 			e := checkWorld(t)
 			failing(t, e.runCheck(e.pa, []string{"KILN_COMMIT=" + strings.ToUpper(adoCommit), "KILN_SINCE=" + adoSince}, e.copy), "KILN_COMMIT")
@@ -559,12 +622,13 @@ func TestAzureDevOpsCheckResult(t *testing.T) {
 		}
 		e.answerJSON("threads-17", threads())
 		e.answerJSON("policy-17", []any{build("rejected", adoCommit, true, "Build")})
+		e.answerJSON("build-101", obj{"definition": obj{"name": "PR build"}, "result": "failed"})
 		e.answerJSON("timeline-101", obj{"records": []any{obj{"type": "Task", "result": "failed", "name": "Run tests"}}})
 		if r := e.check(); r.last() != "failed" {
 			t.Errorf("standard output %q, standard error %q", r.stdout, r.stderr)
 		}
 		for _, c := range e.calls() {
-			for _, word := range []string{"create", "update", "set-vote", "work-item"} {
+			for _, word := range []string{"create", "update", "set-vote", "work-item", "queue", "cancel"} {
 				if has(c, word) {
 					t.Errorf("az was called with %s: %q", word, c)
 				}
