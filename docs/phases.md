@@ -34,7 +34,7 @@ Not on either list, and not built until decided with what the earlier phases hav
 - Kiln creating cards by itself, beyond proposals the developer accepts (ADR 0005, ADR 0033).
 - A supervising agent (ADR 0016).
 - Skipping the approval for kinds of card that never needed it (ADR 0008).
-- Acting on some human review comments without the developer (ADR 0028).
+- Acting on some human review comments without the developer (ADR 0028). Its first step is decided (ADR 0028, 2026-11-27): after the MVP, once an update made from a reviewer's feedback is published, Kiln replies on the Git host by itself to each comment the update addressed, with a trailer that shows Kiln wrote the reply; not built yet (docs/settled.md, ADR 0028). Acting on comments without the developer's send-back stays later and undecided.
 - A limit per stage (ADR 0014).
 - A budget on the CPU time of checks (ADR 0031).
 - One notification channel (ADR 0022).
