@@ -75,6 +75,11 @@ type Inputs struct {
 	// save is "not saved". The tick sets it for a spec run; `kiln run` by hand
 	// never does.
 	SkipSave bool
+	// Document is the kind of the stage's document the run writes,
+	// /kiln/out/<kind>.md: spec, report or review. Empty, as for `kiln run`
+	// by hand, no document is named. It is not among the labels a repeat must
+	// match, is not written to the container, and is not checked by check.
+	Document string
 	// Title is the message's first line for the save, the pull request title
 	// of the approved spec (TitleOf); empty, the save is "chore: save run
 	// <id>". It is not among the labels a repeat must match. `kiln run` by
@@ -313,7 +318,7 @@ func (e *otherInstruction) Is(target error) bool { return target == ErrOtherInst
 // Verdict is how a recorded run ended.
 type Verdict struct {
 	// Finished is true when the container exited with 0, it was not killed
-	// for memory, the result is success and not an error, the model was the
+	// for memory or the stage's document is there and whole, the result is success and not an error, the model was the
 	// one asked for, and the work is saved or nothing changed.
 	Finished bool
 	// Refused is true when the run ended because the upstream refused the
@@ -370,7 +375,7 @@ func do(ctx context.Context, in Inputs, out, errOut io.Writer) (int, error) {
 	if err := Remove(ctx, in); err != nil {
 		return exitFailed, err
 	}
-	return rec.status(), nil
+	return rec.status(false), nil
 }
 
 // Carry is steps 0 to 7 of a run: it checks the inputs and looks at what is
@@ -399,7 +404,8 @@ func Carry(ctx context.Context, in Inputs, starting func() error, notes io.Write
 		return Verdict{}, err
 	}
 	cost, session := rec.cost()
-	return Verdict{Finished: rec.status() == 0, Refused: rec.refused(), Reason: rec.reason(),
+	document := rec.Ending.OOMKilled && in.Document != "" && documentWhole(in.Runs, in.ID, in.Document)
+	return Verdict{Finished: rec.status(document) == 0, Refused: rec.refused(), Reason: rec.reason(document),
 		Hosts: rec.Hosts, WayOutGone: rec.WayOut == wayOutGone, Saved: rec.Saved,
 		Cost: cost, Session: session}, nil
 }

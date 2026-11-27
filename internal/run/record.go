@@ -100,17 +100,26 @@ func (in RecordInputs) matches(r *run) error {
 }
 
 // status is the command's exit status for a recorded run: 0 only when the
-// container exited with 0, it was not killed for memory, the result is success
-// and not an error, and the model matched. The work is saved, or nothing
-// changed, or the save was skipped, or there would be no record. A missing
-// result is failed, and so is a kill for memory whatever the exit code: the
-// engine may kill a process of the run's and not Claude Code itself.
-func (rec *record) status() int {
-	if rec.Ending.ExitCode == 0 && !rec.Ending.OOMKilled && rec.Result != nil && rec.Result.Subtype == "success" &&
+// container exited with 0, the result is success and not an error, and the
+// model matched. The work is saved, or nothing changed, or the save was
+// skipped, or there would be no record. A missing result is failed. A kill for
+// memory fails the run unless document is true, the stage's document is there
+// and whole: the engine's flag is about any process in the container's
+// cgroup, while Claude Code is the container's main process (exec claude) and
+// wrote its result and exited 0.
+func (rec *record) status(document bool) int {
+	if rec.Ending.ExitCode == 0 && (!rec.Ending.OOMKilled || document) && rec.Result != nil && rec.Result.Subtype == "success" &&
 		!rec.Result.IsError && rec.ModelSeen == rec.Inputs.Model && rec.Saved != "" {
 		return 0
 	}
 	return exitFailed
+}
+
+// documentWhole is true when the stage's document of run id is there and
+// whole, as ReadDocument tells it. An error reading documents.tar gives false.
+func documentWhole(runs, id, kind string) bool {
+	doc, err := ReadDocument(runs, id, kind)
+	return err == nil && doc.Problem == ""
 }
 
 // cost is the result's total_cost_usd and session_id. It is nil, and the
@@ -141,10 +150,12 @@ func ReadCost(runs, id string) (cost *float64, session string, err error) {
 // or is_error for a result that is an error with the subtype success, turns
 // and cost, and the saved commit, "no change" or "not saved". A run that
 // ended because the upstream refused the credential says so in words in place
-// of the ending and the subtype.
-func (rec *record) reason() string {
+// of the ending and the subtype. A run that finished though a process in it
+// was killed for memory (see status) says so at the end.
+func (rec *record) reason(document bool) string {
 	ending := fmt.Sprintf("exit %d", rec.Ending.ExitCode)
-	if rec.Ending.OOMKilled {
+	kept := rec.Ending.OOMKilled && rec.status(document) == 0
+	if rec.Ending.OOMKilled && !kept {
 		ending += ", killed for memory"
 	}
 	result := "no result"
@@ -163,7 +174,11 @@ func (rec *record) reason() string {
 	if saved != noChange && saved != notSaved {
 		saved = "saved " + saved
 	}
-	return ending + ", " + result + ", " + saved
+	line := ending + ", " + result + ", " + saved
+	if kept {
+		line += ", a process in the run was killed for memory"
+	}
+	return line
 }
 
 // partialDir is where a run is collected before it is recorded.
