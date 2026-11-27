@@ -241,6 +241,29 @@ func (s *Store) OpenProposals() ([]Proposal, ProposalCounts, error) {
 	return open, n, tx.Commit()
 }
 
+// ProposalsOn reads every proposal noticed on a card, open or acted on, oldest
+// first: the order they were written in, by ID. A card with none gives an
+// empty list.
+func (s *Store) ProposalsOn(card int64) ([]Proposal, error) {
+	rows, err := s.db.Query(proposalSelect+` WHERE card = ? ORDER BY id`, card)
+	if err != nil {
+		return nil, err
+	}
+	var list []Proposal
+	for rows.Next() {
+		p, err := scanProposal(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		list = append(list, p)
+	}
+	if err := errorsOf(rows); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
 // ProposalOf reads the proposal a card was made from, or nil when it was not
 // made from one.
 func (s *Store) ProposalOf(card int64) (*Proposal, error) {
