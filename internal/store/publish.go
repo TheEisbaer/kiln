@@ -40,6 +40,13 @@ const (
 	// the check result command printed any, by an empty line and the feedback
 	// as a fenced block (ADR 0028).
 	ReviewReason = "a reviewer commented on its pull request"
+	// LaterFeedbackReason begins the reason of the Git host's entry for the
+	// comments read when the developer sent a card back to implement after
+	// feedback, followed, when the command printed any, by an empty line and
+	// the comments as a fenced block (ADR 0028). It does not begin with
+	// ReviewReason, so that FromHost and Feedback pass it over: the entry of
+	// Kiln's first look stays the one they find.
+	LaterFeedbackReason = "reviewers commented after Kiln's first look"
 	// PublishedReason begins the reason of the entry that keeps a card's pull
 	// request's address, followed by the address.
 	PublishedReason = "published as "
@@ -422,4 +429,122 @@ func (s *Store) PublishAgain(card int64, commit, reason string) (Card, error) {
 			return writePublication(tx, card, p.WorkflowYes)
 		}})
 	return s.keepIfRefused(card, c, err)
+}
+
+// lastEntries reads a card's last two entries that are about no proposal,
+// the newest first.
+func lastEntries(q querier, card int64) ([]Entry, error) {
+	rows, err := q.Query(`SELECT number, at, cause, stage, waits_for, run, reason FROM entries
+		WHERE card = ? AND proposal IS NULL ORDER BY number DESC LIMIT 2`, card)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Entry
+	for rows.Next() {
+		e := Entry{Card: card}
+		var at string
+		var run, reason sql.NullString
+		if err := rows.Scan(&e.Number, &at, &e.Cause, &e.Stage, &e.WaitsFor, &run, &reason); err != nil {
+			return nil, err
+		}
+		e.Run, e.Reason = run.String, reason.String
+		if e.At, err = time.Parse(time.RFC3339Nano, at); err != nil {
+			return nil, fmt.Errorf("entry %d: %w", e.Number, err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// SentBackAfterFeedback returns the card's last entry that is about no
+// proposal, with true, only when it is the developer's, at implement waiting
+// for a run, the entry before it is a reviewer's feedback (Feedback), and the
+// card has no run in flight: the developer's send-back after feedback, whose
+// run has not started. It is false after the comments since were read
+// (LaterFeedback), after a retry, an again or a send-back from the Git host.
+// It reads the entry before the last one, which ADR 0042's third rule did not
+// name.
+func (s *Store) SentBackAfterFeedback(card int64) (Entry, bool, error) {
+	es, err := lastEntries(s.db, card)
+	if err != nil || len(es) < 2 {
+		return Entry{}, false, err
+	}
+	last, before := es[0], es[1]
+	if last.Cause != CauseDeveloper || last.State != (State{Implement, Run}) || !Feedback(before.State, before.Cause, before.Reason) {
+		return Entry{}, false, nil
+	}
+	f, err := readFacts(s.db, card)
+	if err != nil || f.InFlight {
+		return Entry{}, false, err
+	}
+	return last, true, nil
+}
+
+// LaterFeedback writes the comments read on the developer's send-back after
+// feedback: an entry of the Git host at implement, waiting for a run, with the
+// reason, which begins with LaterFeedbackReason, and the card's feedback_since
+// set to read, in one transaction. The card keeps its since. It is refused
+// with ErrRefused, nothing written and the card returned as it is, unless the
+// card is at implement waiting for a run with no run in flight, its last entry
+// that is about no proposal is the one numbered after, and its publication has
+// a commit and an address.
+func (s *Store) LaterFeedback(card, after int64, read time.Time, reason string) (Card, error) {
+	if read.IsZero() || !strings.HasPrefix(reason, LaterFeedbackReason) {
+		return Card{}, errors.New("later feedback needs the time it was read and a reason of later feedback")
+	}
+	to := State{Implement, Run}
+	c, err := s.change(edit{id: card, cause: CauseHost, reason: reason, always: true,
+		keepSince: func(State, Facts) bool { return true },
+		next: func(from State, f Facts) (State, error) {
+			if from != to || f.InFlight {
+				return State{}, fmt.Errorf("%w: card %d is in %s waiting for %s, with a run in flight: %v",
+					ErrRefused, card, from.Stage, from.WaitsFor, f.InFlight)
+			}
+			return to, nil
+		},
+		write: func(tx *sql.Tx, card int64) error {
+			es, err := lastEntries(tx, card)
+			if err != nil {
+				return err
+			}
+			if len(es) == 0 || es[0].Number != after {
+				return fmt.Errorf("%w: card %d has moved since entry %d", ErrRefused, card, after)
+			}
+			p, err := readPublication(tx, card)
+			if err != nil {
+				return err
+			}
+			if p.Commit == "" || p.Address == "" {
+				return fmt.Errorf("%w: card %d has no published commit with an address", ErrRefused, card)
+			}
+			_, err = tx.Exec(`UPDATE publishes SET feedback_since = ? WHERE card = ?`, read.UTC().Format(time.RFC3339Nano), card)
+			return err
+		}})
+	return s.keepIfRefused(card, c, err)
+}
+
+// FeedbackAfter returns the card's newest entry of the Git host whose reason
+// begins with LaterFeedbackReason and whose number is above after: the
+// comments read on the developer's send-back, told to an implement run after
+// the first feedback.
+func (s *Store) FeedbackAfter(card, after int64) (Entry, bool, error) {
+	e := Entry{Card: card}
+	var at string
+	var run sql.NullString
+	err := s.db.QueryRow(`SELECT number, at, cause, stage, waits_for, run, reason FROM entries
+		WHERE card = ? AND cause = ? AND substr(reason, 1, ?) = ? AND number > ?
+		ORDER BY number DESC LIMIT 1`, card, CauseHost, len(LaterFeedbackReason), LaterFeedbackReason, after).
+		Scan(&e.Number, &at, &e.Cause, &e.Stage, &e.WaitsFor, &run, &e.Reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Entry{}, false, nil
+	}
+	if err != nil {
+		return Entry{}, false, err
+	}
+	e.Run = run.String
+	if e.At, err = time.Parse(time.RFC3339Nano, at); err != nil {
+		return Entry{}, false, fmt.Errorf("entry %d: %w", e.Number, err)
+	}
+	return e, true, nil
 }

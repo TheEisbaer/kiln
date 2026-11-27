@@ -388,3 +388,69 @@ func readCheck(data []byte, cut bool) (result, output, failure string) {
 	}
 	return last, output, ""
 }
+
+// readAgain reads the comments made since Kiln's first look when the developer
+// sent a card back to implement after a reviewer's feedback (ADR 0028): the
+// check result command runs once more for the card's commit, with the card's
+// feedback mark, and what it prints on review is written as the Git host's
+// entry LaterFeedbackReason, which the implement run is told after the first
+// feedback. It acts once per send-back in a core's life, whatever comes of it.
+// Another result than review means no comments since the mark and is said
+// nowhere; a failure, closed, a repo without the command or a publication
+// without a commit is said once on the error output, and the run is told the
+// first feedback only. refused says that the card moved meanwhile.
+func (c *core) readAgain(ctx context.Context, repo settings.Repo, card store.Card) (refused bool, err error) {
+	entry, ok, err := c.store.SentBackAfterFeedback(card.ID)
+	if err != nil || !ok {
+		return false, err
+	}
+	if c.readTried == nil {
+		c.readTried = map[int64]int64{}
+	}
+	if c.readTried[card.ID] == entry.Number {
+		return false, nil
+	}
+	c.readTried[card.ID] = entry.Number
+	say := func(why string) {
+		fmt.Fprintln(c.errOut, run.Printable(fmt.Sprintf("kiln core: card %d: the comments since Kiln's first look are not read, "+
+			"so the implement run is told only the feedback read then: %s", card.ID, why)))
+	}
+	pub, err := c.store.Publication(card.ID)
+	if err != nil {
+		say("the card's publication is not read: " + err.Error())
+		return false, nil
+	}
+	switch {
+	case repo.CheckResultCommand == "":
+		say("the card's repo has no check result command")
+		return false, nil
+	case pub.Address == "" || !commitName.MatchString(pub.Commit):
+		say("the card's publication has no published commit")
+		return false, nil
+	}
+	read := time.Now()
+	result, output, failure := c.runCheckResult(ctx, repo.CheckResultCommand, pub.Commit, sinceOf(pub.FeedbackSince))
+	if ctx.Err() != nil {
+		return false, ctx.Err() // an interrupt: nothing is written
+	}
+	switch {
+	case failure != "":
+		say(failure)
+	case result == checkClosed:
+		say("the check result command printed closed")
+	case result == checkReview:
+		reason := store.LaterFeedbackReason
+		if output != "" {
+			reason += "\n\n" + fenced(output, "text")
+		}
+		if _, err := c.store.LaterFeedback(card.ID, entry.Number, read, reason); err != nil {
+			if errors.Is(err, store.ErrRefused) {
+				return true, nil
+			}
+			say("the comments are not kept: " + err.Error())
+			return false, nil
+		}
+		fmt.Fprintf(c.out, "card %d: %s\n", card.ID, store.LaterFeedbackReason)
+	}
+	return false, nil
+}

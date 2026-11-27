@@ -1357,3 +1357,10 @@ func TestToReview(t *testing.T) {
 		t.Errorf("the page does not name the move")
 	}
 }
+
+func TestPageLaterFeedback(t *testing.T) {
+	f := newFixture(t)
+	if w := f.do(t, "GET", "/", ""); !strings.Contains(w.Body.String(), `const LATER_FEEDBACK = "`+store.LaterFeedbackReason+`";`) {
+		t.Errorf("the page does not split the reason of later feedback by %q", store.LaterFeedbackReason)
+	}
+}

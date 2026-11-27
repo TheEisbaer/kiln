@@ -740,11 +740,12 @@ const CHECK_FAILED = "the check failed on the Git host";
 // A reviewer's feedback on the pull request keeps the feedback the same way.
 // It matches the store's ReviewReason.
 const REVIEW_FEEDBACK = "a reviewer commented on its pull request";
+const LATER_FEEDBACK = "reviewers commented after Kiln's first look";
 function feedbackCard(c) { return (c.reason || "").startsWith(REVIEW_FEEDBACK) && needsYou(c); }
 
 function reasonParts(reason) {
   reason = reason || "";
-  if (reason.startsWith(CHECK_FAILED) || reason.startsWith(REVIEW_FEEDBACK)) {
+  if (reason.startsWith(CHECK_FAILED) || reason.startsWith(REVIEW_FEEDBACK) || reason.startsWith(LATER_FEEDBACK)) {
     const at = reason.indexOf("\n\n");
     if (at < 0) return { sentence: sentence(reason), facts: [], failed: false, output: "" };
     const lines = reason.slice(at + 2).replace(/\n$/, "").split("\n");

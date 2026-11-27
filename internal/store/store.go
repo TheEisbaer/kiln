@@ -721,10 +721,12 @@ type edit struct {
 	// time, in the same transaction (the developer's to-host, ADR 0028).
 	mark bool
 	// keepSince, when it is set and true for the state the card goes to and
-	// the facts, leaves the card's since as it is. Only the rule's entry that
-	// renames the limit a card waits for room under sets it, so that the card
-	// keeps its place in the queue (ADR 0014); since stays when the card got
-	// the state it has, since the card stays in the backlog, waiting for room.
+	// the facts, leaves the card's since as it is. Two changes set it, so that
+	// the card keeps its place in the queue: the rule's entry that renames the
+	// limit a card waits for room under (ADR 0014), as the card stays in the
+	// backlog, waiting for room, and LaterFeedback's entry, as the card stays
+	// in implement, waiting for a run (ADR 0028); since stays when the card
+	// got the state it has.
 	keepSince func(to State, f Facts) bool
 }
 
